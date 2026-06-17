@@ -47,8 +47,7 @@ chmod +x "$APP_BINARY"
 
 rm -rf "$ICONSET_DIR"
 mkdir -p "$ICONSET_DIR"
-/usr/bin/qlmanage -t -s 1024 -o "$DIST_DIR" "$ICON_SOURCE" >/dev/null
-mv "$DIST_DIR/AppIcon.svg.png" "$ICONSET_DIR/icon_512x512@2x.png"
+	swift "$ROOT_DIR/script/svg2png.swift" "$ICON_SOURCE" "$ICONSET_DIR/icon_512x512@2x.png"
 /usr/bin/sips -z 16 16 "$ICONSET_DIR/icon_512x512@2x.png" --out "$ICONSET_DIR/icon_16x16.png" >/dev/null
 /usr/bin/sips -z 32 32 "$ICONSET_DIR/icon_512x512@2x.png" --out "$ICONSET_DIR/icon_16x16@2x.png" >/dev/null
 /usr/bin/sips -z 32 32 "$ICONSET_DIR/icon_512x512@2x.png" --out "$ICONSET_DIR/icon_32x32.png" >/dev/null
