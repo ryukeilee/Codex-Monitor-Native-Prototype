@@ -21,8 +21,9 @@ final class AppStateTests: XCTestCase {
         await appState.refreshNow(trigger: .manual)
 
         XCTAssertEqual(appState.snapshot, refreshed)
-        XCTAssertEqual(appState.status, .normal)
+        XCTAssertEqual(appState.status, .success)
         XCTAssertEqual(appState.dataSource, .real)
+        XCTAssertEqual(appState.failureCount, 0)
         XCTAssertEqual(store.loadSnapshot(), refreshed)
     }
 
@@ -40,8 +41,9 @@ final class AppStateTests: XCTestCase {
         await appState.refreshNow(trigger: .manual)
 
         XCTAssertEqual(appState.snapshot, initial)
-        XCTAssertEqual(appState.status, .failed)
+        XCTAssertEqual(appState.status, .networkFailed)
         XCTAssertEqual(appState.dataSource, .real)
+        XCTAssertEqual(appState.failureCount, 1)
         XCTAssertEqual(store.loadSnapshot(), initial)
     }
 
@@ -57,11 +59,11 @@ final class AppStateTests: XCTestCase {
         let restoredState = AppState(snapshotStore: store, refreshService: MockRefreshService(snapshot: snapshot))
 
         XCTAssertEqual(restoredState.snapshot, snapshot)
-        XCTAssertEqual(restoredState.status, .normal)
+        XCTAssertEqual(restoredState.status, .success)
         XCTAssertEqual(restoredState.dataSource, .real)
     }
 
-    func testMockSnapshotShowsNotConnected() {
+    func testMockSnapshotShowsDemoMode() {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.mock.\(UUID().uuidString)")!
         let store = SnapshotStore(defaults: defaults, key: "snapshot")
         let mockSnapshot = QuotaSnapshot(
@@ -73,7 +75,7 @@ final class AppStateTests: XCTestCase {
         let appState = AppState(snapshotStore: store, refreshService: MockRefreshService(snapshot: mockSnapshot))
 
         XCTAssertEqual(appState.dataSource, .mock)
-        XCTAssertEqual(appState.status, .notConnected)
+        XCTAssertEqual(appState.status, .demoMode)
     }
 
     func testLegacySnapshotWithoutSchemaVersionIsTreatedAsMock() {
@@ -89,6 +91,68 @@ final class AppStateTests: XCTestCase {
         XCTAssertNotNil(loaded)
         XCTAssertEqual(loaded?.dataSource, .mock)
         XCTAssertEqual(loaded?.schemaVersion, 1)
+    }
+
+    func testConsecutiveFailuresEscalateBackoff() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.backoff.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let initial = QuotaSnapshot(
+            weeklyQuotaPercent: 72, fiveHourQuotaPercent: 69, refreshedAt: .distantPast,
+            dataSource: .real
+        )
+        store.saveSnapshot(initial)
+
+        let appState = AppState(snapshotStore: store, refreshService: MockRefreshService(snapshot: nil))
+
+        // 1st failure → 5 min
+        await appState.refreshNow(trigger: .manual)
+        XCTAssertEqual(appState.backoffInterval, 300)
+        XCTAssertEqual(appState.failureCount, 1)
+
+        // 2nd failure → 10 min
+        await appState.refreshNow(trigger: .manual)
+        XCTAssertEqual(appState.backoffInterval, 600)
+        XCTAssertEqual(appState.failureCount, 2)
+
+        // 3rd failure → 15 min
+        await appState.refreshNow(trigger: .manual)
+        XCTAssertEqual(appState.backoffInterval, 900)
+        XCTAssertEqual(appState.failureCount, 3)
+
+        // 4th failure → still 15 min
+        await appState.refreshNow(trigger: .manual)
+        XCTAssertEqual(appState.backoffInterval, 900)
+        XCTAssertEqual(appState.failureCount, 4)
+    }
+
+    func testSuccessResetsFailureCountAndBackoff() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.reset.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let initial = QuotaSnapshot(
+            weeklyQuotaPercent: 72, fiveHourQuotaPercent: 69, refreshedAt: .distantPast,
+            dataSource: .real
+        )
+        store.saveSnapshot(initial)
+
+        let appState = AppState(snapshotStore: store, refreshService: MockRefreshService(snapshot: nil))
+
+        // Fail twice
+        await appState.refreshNow(trigger: .manual)
+        await appState.refreshNow(trigger: .manual)
+        XCTAssertEqual(appState.failureCount, 2)
+        XCTAssertEqual(appState.backoffInterval, 600)
+
+        // Succeed
+        let refreshed = QuotaSnapshot(
+            weeklyQuotaPercent: 80, fiveHourQuotaPercent: 70, refreshedAt: .now,
+            dataSource: .real
+        )
+        let successState = AppState(snapshotStore: store, refreshService: MockRefreshService(snapshot: refreshed))
+        await successState.refreshNow(trigger: .manual)
+
+        XCTAssertEqual(successState.status, .success)
+        XCTAssertEqual(successState.failureCount, 0)
+        XCTAssertEqual(successState.backoffInterval, 300)
     }
 }
 

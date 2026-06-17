@@ -23,20 +23,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusBarController.setTarget(self, action: #selector(togglePopover(_:)))
 
-        // Trigger an initial refresh after a short delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak state] in
-            state?.refresh(trigger: .manual)
-        }
-
+        // Scheduler with dynamic backoff
         let scheduler = RefreshScheduler(interval: 300) { [weak state] in
             state?.refresh(trigger: .scheduled)
         }
+
+        // Wire backoff changes from AppState → Scheduler
+        state.onBackoffChanged = { [weak scheduler] newInterval in
+            scheduler?.updateInterval(newInterval)
+        }
+
         scheduler.start()
 
-        let observer = SleepWakeObserver { [weak state] in
-            state?.refresh(trigger: .wake)
-        }
+        // Sleep/wake: pause timer on sleep, delayed refresh on wake
+        let observer = SleepWakeObserver(
+            wakeDelaySeconds: 5,
+            onSleep: { [weak scheduler] in
+                scheduler?.pause()
+            },
+            onWake: { [weak scheduler, weak state] in
+                scheduler?.resume()
+                state?.refresh(trigger: .wake)
+            }
+        )
         observer.start()
+
+        // Initial refresh after a short delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak state] in
+            state?.refresh(trigger: .manual)
+        }
 
         self.appState = state
         self.launchAtLoginManager = launchAtLoginManager

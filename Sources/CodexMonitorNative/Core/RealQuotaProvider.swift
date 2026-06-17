@@ -26,8 +26,26 @@ enum RealQuotaError: LocalizedError {
             return "Failed to parse response: \(detail)"
         case .noUsableRateLimits:
             return "No usable rate limits in response"
-        case .processExited(let code, let stderr):
-            return "Codex process exited (code \(code)): \(stderr)"
+        case .processExited(let code, _):
+            return "Codex process exited (code \(code))"
+        }
+    }
+
+    /// Classify this error into a QuotaRefreshStatus for the state machine.
+    var refreshStatus: QuotaRefreshStatus {
+        switch self {
+        case .codexNotFound:
+            return .noSnapshot
+        case .spawnFailed, .handshakeFailed, .requestTimedOut, .processExited:
+            return .networkFailed
+        case .rpcError(let message):
+            let lower = message.lowercased()
+            if lower.contains("auth") || lower.contains("unauthorized") || lower.contains("login") {
+                return .authRequired
+            }
+            return .networkFailed
+        case .parseFailed, .noUsableRateLimits:
+            return .parseFailed
         }
     }
 }
@@ -127,17 +145,14 @@ actor CodexRPCClient {
     }
 
     private func handleInitialized() {
-        // Send initialized notification (no id)
         let notif: [String: Any] = ["method": "initialized"]
         if let notifData = try? JSONSerialization.data(withJSONObject: notif, options: []),
            let notifLine = String(data: notifData, encoding: .utf8) {
             writeLine(notifLine)
         }
 
-        // Step 3: Send account/rateLimits/read
         sendRequest(method: "account/rateLimits/read")
 
-        // Step 4: Parse rate limits response
         pendingResolve = { [weak self] responseData in
             guard let self else { return }
             Task { await self.handleRateLimitsResponse(responseData) }
@@ -177,9 +192,8 @@ actor CodexRPCClient {
 
     private func handleTermination(status: Int32) {
         guard !hasResumed else { return }
-        let stderr = String(data: stderrData, encoding: .utf8) ?? ""
         if status != 0 {
-            complete(.failure(RealQuotaError.processExited(status, stderr)))
+            complete(.failure(RealQuotaError.processExited(status, "")))
         } else {
             complete(.failure(RealQuotaError.spawnFailed("Codex process exited unexpectedly")))
         }
@@ -270,7 +284,7 @@ struct RealQuotaProvider {
         return try await client.fetchQuota(timeoutSeconds: timeoutSeconds)
     }
 
-    // MARK: - Response Parsing
+    // MARK: - Response Parsing (with strict validation)
 
     static func parseRateLimits(response: [String: Any]) -> QuotaSnapshot? {
         let rateLimitsByLimitId = response["rateLimitsByLimitId"] as? [String: Any] ?? [:]
@@ -280,21 +294,56 @@ struct RealQuotaProvider {
             return nil
         }
 
-        guard let primary = codexBucket["primary"] as? [String: Any],
-              let primaryUsedPercent = primary["usedPercent"] as? Double else {
-            AppLogger.codexRPC.error("No primary window with usedPercent in codex bucket")
+        // Primary (5-hour) window
+        guard let primary = codexBucket["primary"] as? [String: Any] else {
+            AppLogger.codexRPC.error("No primary window in codex bucket")
             return nil
         }
 
-        let fiveHourRemaining = max(0, min(100, Int(100 - primaryUsedPercent)))
+        guard let primaryUsedPercent = primary["usedPercent"] as? Double,
+              primaryUsedPercent.isFinite else {
+            AppLogger.codexRPC.error("Primary usedPercent is missing, non-numeric, or non-finite")
+            return nil
+        }
 
+        guard primaryUsedPercent >= 0 && primaryUsedPercent <= 100 else {
+            AppLogger.codexRPC.error("Primary usedPercent out of range: \(primaryUsedPercent, privacy: .public)")
+            return nil
+        }
+
+        let fiveHourRemaining = Int((100.0 - primaryUsedPercent).rounded())
+
+        // Secondary (weekly) window
         let secondary: [String: Any]? = codexBucket["secondary"] as? [String: Any]
         let codexOtherBucket = rateLimitsByLimitId["codex_other"] as? [String: Any]
         let fallbackSecondary = codexOtherBucket?["primary"] as? [String: Any]
 
         let effectiveSecondary = secondary ?? fallbackSecondary
-        let weeklyUsedPercent = (effectiveSecondary?["usedPercent"] as? Double) ?? 0
-        let weeklyRemaining = max(0, min(100, Int(100 - weeklyUsedPercent)))
+
+        let weeklyUsedPercent: Double
+        if let sec = effectiveSecondary {
+            guard let used = sec["usedPercent"] as? Double, used.isFinite else {
+                AppLogger.codexRPC.error("Secondary usedPercent is missing, non-numeric, or non-finite")
+                return nil
+            }
+
+            guard used >= 0 && used <= 100 else {
+                AppLogger.codexRPC.error("Secondary usedPercent out of range: \(used, privacy: .public)")
+                return nil
+            }
+            weeklyUsedPercent = used
+        } else {
+            AppLogger.codexRPC.warning("No secondary window; defaulting to 0 used")
+            weeklyUsedPercent = 0
+        }
+
+        let weeklyRemaining = Int((100.0 - weeklyUsedPercent).rounded())
+
+        // Final range clamp (defense in depth)
+        guard (0...100).contains(fiveHourRemaining), (0...100).contains(weeklyRemaining) else {
+            AppLogger.codexRPC.error("Computed values out of range: weekly=\(weeklyRemaining) fiveHour=\(fiveHourRemaining)")
+            return nil
+        }
 
         AppLogger.codexRPC.info("Parsed real quota: weekly=\(weeklyRemaining)% fiveHour=\(fiveHourRemaining)%")
 

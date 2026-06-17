@@ -8,18 +8,40 @@ final class AppState: ObservableObject {
         case wake
     }
 
+    // MARK: - Published state
+
     @Published private(set) var snapshot: QuotaSnapshot
-    @Published private(set) var status: QuotaRefreshStatus = .notConnected
+    @Published private(set) var status: QuotaRefreshStatus = .noSnapshot
+
+    // MARK: - Diagnostics
+
+    @Published private(set) var lastAttemptAt: Date?
+    @Published private(set) var lastSuccessAt: Date?
+    @Published private(set) var failureCount: Int = 0
+    @Published private(set) var lastErrorSummary: String?
+
+    // MARK: - Backoff
+
+    /// The current backoff interval, if consecutive failures are escalating.
+    /// Callers should use this as the timer interval instead of the default 5 min.
+    @Published private(set) var backoffInterval: TimeInterval = 300
+
+    /// Called when the backoff interval changes so the scheduler can adapt.
+    var onBackoffChanged: (@MainActor (TimeInterval) -> Void)?
+
+    // MARK: - Private
 
     private let snapshotStore: SnapshotStore
     private let refreshAction: @Sendable (QuotaSnapshot) async throws -> QuotaSnapshot
     private let refreshDateFormatter: DateFormatter
 
     private var latestRealSnapshot: QuotaSnapshot?
-    private var latestMockSnapshot: QuotaSnapshot?
     private var consecutiveFailures: Int = 0
+    private let defaultInterval: TimeInterval = 300
 
     var isRefreshing: Bool { status == .refreshing }
+
+    // MARK: - Init
 
     init<T: QuotaRefreshing>(snapshotStore: SnapshotStore, refreshService: T) {
         self.snapshotStore = snapshotStore
@@ -31,17 +53,17 @@ final class AppState: ObservableObject {
             if stored.dataSource == .real {
                 latestRealSnapshot = stored
                 snapshot = stored
-                status = .normal
+                status = .success
+                lastSuccessAt = stored.refreshedAt
                 AppLogger.snapshot.info("Restored real snapshot: weekly=\(stored.weeklyQuotaPercent)% fiveHour=\(stored.fiveHourQuotaPercent)%")
             } else {
-                latestMockSnapshot = stored
                 snapshot = stored
-                status = .notConnected
+                status = .demoMode
                 AppLogger.snapshot.info("Restored mock snapshot (no real data yet)")
             }
         } else {
             snapshot = .notConnected
-            status = .notConnected
+            status = .noSnapshot
             AppLogger.snapshot.info("No persisted snapshot; starting in not-connected state")
         }
 
@@ -51,17 +73,25 @@ final class AppState: ObservableObject {
         refreshDateFormatter = formatter
     }
 
+    // MARK: - Formatters
+
     var formattedRefreshedAt: String {
         refreshDateFormatter.string(from: snapshot.refreshedAt)
+    }
+
+    var formattedLastAttempt: String? {
+        lastAttemptAt.map { refreshDateFormatter.string(from: $0) }
+    }
+
+    var formattedLastSuccess: String? {
+        lastSuccessAt.map { refreshDateFormatter.string(from: $0) }
     }
 
     var dataSource: QuotaDataSource {
         snapshot.dataSource
     }
 
-    var lastError: String? {
-        snapshot.errorMessage
-    }
+    // MARK: - Refresh
 
     func refresh(trigger: RefreshTrigger) {
         Task {
@@ -75,67 +105,119 @@ final class AppState: ObservableObject {
             return
         }
 
-        let triggerName: String
-        switch trigger {
-        case .manual:
-            triggerName = "manual"
-        case .scheduled:
-            triggerName = "scheduled"
-        case .wake:
-            triggerName = "wake"
-        }
+        let triggerName = triggerName(for: trigger)
 
         status = .refreshing
-        let baselineSnapshot = latestRealSnapshot ?? latestMockSnapshot ?? snapshot
+        lastAttemptAt = .now
+
+        let baselineSnapshot = latestRealSnapshot ?? snapshot
         AppLogger.refresh.info("Starting \(triggerName, privacy: .public) refresh (baseline source=\(baselineSnapshot.dataSource.rawValue, privacy: .public))")
 
         do {
             let refreshed = try await refreshAction(baselineSnapshot)
 
+            // Success path
             if refreshed.dataSource == .real {
                 latestRealSnapshot = refreshed
                 consecutiveFailures = 0
+                failureCount = 0
+                lastSuccessAt = refreshed.refreshedAt
+                lastErrorSummary = nil
+                snapshot = refreshed
+                status = .success
+                backoffInterval = defaultInterval
+                snapshotStore.saveSnapshot(refreshed)
+                AppLogger.refresh.info("Real refresh succeeded: weekly=\(refreshed.weeklyQuotaPercent)% fiveHour=\(refreshed.fiveHourQuotaPercent)%")
             } else {
-                latestMockSnapshot = refreshed
+                // Mock success (dev mode)
+                snapshot = refreshed
+                status = .demoMode
+                AppLogger.refresh.info("Mock refresh succeeded")
             }
-
-            snapshot = refreshed
-            status = refreshed.dataSource == .real ? .normal : .notConnected
-            snapshotStore.saveSnapshot(refreshed)
-
-            AppLogger.refresh.info("Refresh succeeded source=\(refreshed.dataSource.rawValue, privacy: .public) weekly=\(refreshed.weeklyQuotaPercent)% fiveHour=\(refreshed.fiveHourQuotaPercent)%")
         } catch {
+            // Failure path — classify and preserve
             consecutiveFailures += 1
+            failureCount = consecutiveFailures
 
-            // Keep displaying last successful data, don't clear
+            let classifiedStatus = classifyError(error)
+            lastErrorSummary = safeErrorMessage(from: error)
+            status = classifiedStatus
+
+            // Always keep the last successful real snapshot visible
             if let real = latestRealSnapshot {
                 snapshot = real
-            } else if let mock = latestMockSnapshot {
-                snapshot = mock
             }
-            // else keep current snapshot (notConnected)
+            // else: keep current snapshot (may be notConnected or mock)
 
-            status = (latestRealSnapshot != nil || latestMockSnapshot != nil) ? .failed : .notConnected
+            // Escalate backoff
+            backoffInterval = backoffFor(consecutiveFailures: consecutiveFailures)
+            onBackoffChanged?(backoffInterval)
 
-            let safeError = safeErrorMessage(from: error)
-            AppLogger.refresh.error("Refresh failed (consecutive=\(self.consecutiveFailures)): \(safeError, privacy: .public)")
+            AppLogger.refresh.error("Refresh failed (consecutive=\(self.consecutiveFailures)) status=\(classifiedStatus.rawValue, privacy: .public) backoff=\(self.backoffInterval)s")
         }
     }
+
+    // MARK: - Error classification
+
+    private func classifyError(_ error: Error) -> QuotaRefreshStatus {
+        if let realError = error as? RealQuotaError {
+            return realError.refreshStatus
+        }
+
+        if error is MockRefreshError {
+            return .networkFailed
+        }
+
+        let message = error.localizedDescription.lowercased()
+        if message.contains("auth") || message.contains("401") || message.contains("403") {
+            return .authRequired
+        }
+        if message.contains("parse") || message.contains("decode") || message.contains("malformed") {
+            return .parseFailed
+        }
+
+        return .networkFailed
+    }
+
+    // MARK: - Backoff
+
+    private func backoffFor(consecutiveFailures count: Int) -> TimeInterval {
+        switch count {
+        case 0...1:
+            return defaultInterval       // 5 min
+        case 2:
+            return 600                   // 10 min
+        default:
+            return 900                   // 15 min
+        }
+    }
+
+    // MARK: - Safe error messages
 
     private func safeErrorMessage(from error: Error) -> String {
         let message = error.localizedDescription
 
-        // Scrub any potential tokens or keys from error messages
-        if message.contains("Bearer ") || message.contains("Authorization") {
+        // Scrub sensitive tokens / headers from error messages
+        let lower = message.lowercased()
+        if lower.contains("bearer ") || lower.contains("authorization")
+            || lower.contains("access_token") || lower.contains("api_key") {
             return "Authentication error"
         }
-        if message.contains("401") || message.contains("403") {
+        if lower.contains("401") || lower.contains("403") {
             return "Authentication required"
         }
-        if message.contains("timed out") || message.contains("timeout") {
+        if lower.contains("timed out") || lower.contains("timeout") {
             return "Request timed out"
         }
 
         return message
+    }
+
+    private func triggerName(for trigger: RefreshTrigger) -> String {
+        switch trigger {
+        case .manual: return "manual"
+        case .scheduled: return "scheduled"
+        case .wake: return "wake"
+        }
     }
 }

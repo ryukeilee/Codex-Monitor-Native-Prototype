@@ -4,25 +4,41 @@ import XCTest
 
 @MainActor
 final class SleepWakeObserverTests: XCTestCase {
-    func testWakeNotificationInvokesHandler() async {
+    func testWakeNotificationInvokesHandlerAfterDelay() async {
         let notificationCenter = NotificationCenter()
         let fired = expectation(description: "wake handler invoked")
 
         let observer = SleepWakeObserver(
             notificationCenter: notificationCenter,
-            wakeNotificationName: .testWakeNotification
+            wakeDelaySeconds: 0  // zero delay for test
         ) {
             fired.fulfill()
         }
 
         observer.start()
-        notificationCenter.post(name: .testWakeNotification, object: nil)
+        notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
 
         await fulfillment(of: [fired], timeout: 1.0)
         observer.stop()
     }
-}
 
-private extension Notification.Name {
-    static let testWakeNotification = Notification.Name("CodexMonitorNativeTests.testWakeNotification")
+    func testSleepNotificationInvokesHandler() async {
+        let notificationCenter = NotificationCenter()
+        let fired = expectation(description: "sleep handler invoked")
+
+        let observer = SleepWakeObserver(
+            notificationCenter: notificationCenter,
+            wakeDelaySeconds: 0,
+            onSleep: {
+                fired.fulfill()
+            },
+            onWake: {}
+        )
+
+        observer.start()
+        notificationCenter.post(name: NSWorkspace.willSleepNotification, object: nil)
+
+        await fulfillment(of: [fired], timeout: 1.0)
+        observer.stop()
+    }
 }

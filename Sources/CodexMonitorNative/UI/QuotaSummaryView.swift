@@ -7,10 +7,12 @@ struct QuotaSummaryView: View {
         VStack(alignment: .leading, spacing: 10) {
             row(title: "Weekly Quota", value: weeklyQuotaText)
             row(title: "5 Hour Quota", value: fiveHourQuotaText)
-            row(title: "Last Refresh", value: appState.formattedRefreshedAt)
-            row(title: "Source", value: dataSourceText)
+            row(title: "Last Success", value: appState.formattedLastSuccess ?? "--")
+            row(title: "Last Attempt", value: appState.formattedLastAttempt ?? "--")
+            row(title: "Data Source", value: dataSourceText)
             row(title: "Status", value: statusText)
-            if let error = appState.lastError {
+
+            if let error = appState.lastErrorSummary {
                 HStack {
                     Text("Error")
                         .foregroundStyle(.secondary)
@@ -21,23 +23,46 @@ struct QuotaSummaryView: View {
                         .lineLimit(2)
                 }
             }
+
+            if appState.failureCount > 0 {
+                HStack {
+                    Text("Failures")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(appState.failureCount)")
+                        .fontWeight(.medium)
+                        .foregroundStyle(appState.status.isError ? .red : .secondary)
+                }
+            }
         }
     }
 
+    // MARK: - Quota display
+
     private var weeklyQuotaText: String {
-        switch appState.dataSource {
-        case .real:
-            return "\(appState.snapshot.weeklyQuotaPercent)%"
-        case .mock:
+        switch appState.status {
+        case .success, .refreshing, .networkFailed, .authRequired, .parseFailed:
+            if appState.dataSource == .real {
+                return "\(appState.snapshot.weeklyQuotaPercent)%"
+            }
+            return "--"
+        case .noSnapshot, .idle:
+            return "Not Connected"
+        case .demoMode:
             return "Demo"
         }
     }
 
     private var fiveHourQuotaText: String {
-        switch appState.dataSource {
-        case .real:
-            return "\(appState.snapshot.fiveHourQuotaPercent)%"
-        case .mock:
+        switch appState.status {
+        case .success, .refreshing, .networkFailed, .authRequired, .parseFailed:
+            if appState.dataSource == .real {
+                return "\(appState.snapshot.fiveHourQuotaPercent)%"
+            }
+            return "--"
+        case .noSnapshot, .idle:
+            return "Not Connected"
+        case .demoMode:
             return "Demo"
         }
     }
@@ -52,10 +77,7 @@ struct QuotaSummaryView: View {
     }
 
     private var statusText: String {
-        if appState.dataSource == .mock {
-            return "Prototype Mode"
-        }
-        return appState.status.displayName
+        appState.status.displayName
     }
 
     private func row(title: String, value: String) -> some View {
