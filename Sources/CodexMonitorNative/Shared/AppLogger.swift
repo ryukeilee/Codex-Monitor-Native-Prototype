@@ -10,4 +10,5 @@ enum AppLogger {
     static let snapshot = Logger(subsystem: subsystem, category: "Snapshot")
     static let system = Logger(subsystem: subsystem, category: "System")
     static let settings = Logger(subsystem: subsystem, category: "Settings")
+    static let codexRPC = Logger(subsystem: subsystem, category: "CodexRPC")
 }

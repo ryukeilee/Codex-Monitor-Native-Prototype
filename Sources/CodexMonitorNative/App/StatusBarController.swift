@@ -44,18 +44,35 @@ final class StatusBarController {
         button.image = nil
         button.imagePosition = .noImage
         button.appearsDisabled = false
-        applyTitle("72%")
-        button.toolTip = "Codex Monitor Native Prototype: 72%"
-        button.setAccessibilityTitle("Codex Monitor Native 72 percent")
-        AppLogger.statusBar.info("Status item created successfully in weekly quota text mode with placeholder title 72%")
+        applyTitle("CM")
+        button.toolTip = "Codex Monitor Native"
+        button.setAccessibilityTitle("Codex Monitor Native")
+        AppLogger.statusBar.info("Status item created; waiting for first quota data")
     }
 
     private func updateTitle(with snapshot: QuotaSnapshot) {
-        let title = "\(snapshot.weeklyQuotaPercent)%"
+        let title: String
+
+        switch snapshot.dataSource {
+        case .real:
+            title = "\(snapshot.weeklyQuotaPercent)%"
+        case .mock:
+            title = "Demo"
+        }
+
         applyTitle(title)
-        statusItem.button?.toolTip = "Codex Monitor Native Prototype: \(title)"
+        statusItem.button?.toolTip = tooltip(for: snapshot)
         statusItem.button?.setAccessibilityTitle("Codex Monitor Native \(title)")
-        AppLogger.statusBar.info("Current menu bar display content: \(title, privacy: .public)")
+        AppLogger.statusBar.info("Menu bar updated: \(title, privacy: .public) (source=\(snapshot.dataSource.rawValue, privacy: .public))")
+    }
+
+    private func tooltip(for snapshot: QuotaSnapshot) -> String {
+        switch snapshot.dataSource {
+        case .real:
+            return "Codex Monitor: Weekly \(snapshot.weeklyQuotaPercent)% · 5h \(snapshot.fiveHourQuotaPercent)%"
+        case .mock:
+            return "Codex Monitor Native (Demo Mode)"
+        }
     }
 
     private func applyTitle(_ title: String) {

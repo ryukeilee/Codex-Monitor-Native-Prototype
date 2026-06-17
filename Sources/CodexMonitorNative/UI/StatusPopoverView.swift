@@ -27,14 +27,14 @@ struct StatusPopoverView: View {
 
             HStack(spacing: 12) {
                 Button(action: onRefresh) {
-                    if appState.status == .refreshing {
+                    if appState.isRefreshing {
                         ProgressView()
                             .controlSize(.small)
                     } else {
                         Text("Refresh")
                     }
                 }
-                .disabled(appState.status == .refreshing)
+                .disabled(appState.isRefreshing)
 
                 Spacer()
 

@@ -20,13 +20,21 @@ struct SnapshotStore {
             return nil
         }
 
-        let snapshot = try? decoder.decode(QuotaSnapshot.self, from: data)
-        if snapshot != nil {
-            AppLogger.snapshot.info("Loaded persisted snapshot for key \(self.key, privacy: .public)")
-        } else {
-            AppLogger.snapshot.error("Failed to decode persisted snapshot for key \(self.key, privacy: .public)")
+        do {
+            let snapshot = try decoder.decode(QuotaSnapshot.self, from: data)
+            AppLogger.snapshot.info("Loaded persisted snapshot schemaV\(snapshot.schemaVersion) source=\(snapshot.dataSource.rawValue, privacy: .public)")
+
+            if snapshot.schemaVersion < QuotaSnapshot.currentSchemaVersion {
+                let migrated = migrate(snapshot)
+                AppLogger.snapshot.info("Migrated snapshot from schemaV\(snapshot.schemaVersion) to schemaV\(migrated.schemaVersion)")
+                return migrated
+            }
+
+            return snapshot
+        } catch {
+            AppLogger.snapshot.error("Failed to decode persisted snapshot: \(error.localizedDescription, privacy: .public)")
+            return loadLegacySnapshot(from: data)
         }
-        return snapshot
     }
 
     func saveSnapshot(_ snapshot: QuotaSnapshot) {
@@ -36,6 +44,42 @@ struct SnapshotStore {
         }
 
         defaults.set(data, forKey: key)
-        AppLogger.snapshot.info("Saved snapshot weekly=\(snapshot.weeklyQuotaPercent)% fiveHour=\(snapshot.fiveHourQuotaPercent)%")
+        AppLogger.snapshot.info("Saved snapshot schemaV\(snapshot.schemaVersion) source=\(snapshot.dataSource.rawValue, privacy: .public) weekly=\(snapshot.weeklyQuotaPercent)% fiveHour=\(snapshot.fiveHourQuotaPercent)%")
+    }
+
+    // MARK: - Legacy Support
+
+    private func loadLegacySnapshot(from data: Data) -> QuotaSnapshot? {
+        struct LegacySnapshot: Decodable {
+            let weeklyQuotaPercent: Int
+            let fiveHourQuotaPercent: Int
+            let refreshedAt: Date
+        }
+
+        guard let legacy = try? decoder.decode(LegacySnapshot.self, from: data) else {
+            return nil
+        }
+
+        AppLogger.snapshot.info("Loaded legacy snapshot (schemaV1), treating as mock data source")
+
+        return QuotaSnapshot(
+            weeklyQuotaPercent: legacy.weeklyQuotaPercent,
+            fiveHourQuotaPercent: legacy.fiveHourQuotaPercent,
+            refreshedAt: legacy.refreshedAt,
+            dataSource: .mock,
+            errorMessage: nil,
+            schemaVersion: 1
+        )
+    }
+
+    private func migrate(_ snapshot: QuotaSnapshot) -> QuotaSnapshot {
+        QuotaSnapshot(
+            weeklyQuotaPercent: snapshot.weeklyQuotaPercent,
+            fiveHourQuotaPercent: snapshot.fiveHourQuotaPercent,
+            refreshedAt: snapshot.refreshedAt,
+            dataSource: snapshot.dataSource,
+            errorMessage: snapshot.errorMessage,
+            schemaVersion: QuotaSnapshot.currentSchemaVersion
+        )
     }
 }

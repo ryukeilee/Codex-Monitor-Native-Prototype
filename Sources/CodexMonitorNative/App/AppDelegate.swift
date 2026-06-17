@@ -23,6 +23,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusBarController.setTarget(self, action: #selector(togglePopover(_:)))
 
+        // Trigger an initial refresh after a short delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak state] in
+            state?.refresh(trigger: .manual)
+        }
+
         let scheduler = RefreshScheduler(interval: 300) { [weak state] in
             state?.refresh(trigger: .scheduled)
         }
