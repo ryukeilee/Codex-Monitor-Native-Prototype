@@ -28,6 +28,7 @@ service-account*.json
 .vscode/
 
 # Build artifacts
+.build/
 dist/
 build/
 out/
