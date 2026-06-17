@@ -1,0 +1,34 @@
+# macOS
+.DS_Store
+
+# Logs
+*.log
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Local secrets and credentials
+*.pem
+*.p12
+*.pfx
+*.key
+*.crt
+*.cer
+*.mobileprovision
+id_rsa
+id_rsa.pub
+known_hosts
+credentials.json
+service-account*.json
+
+# Editor
+.idea/
+.vscode/
+
+# Build artifacts
+dist/
+build/
+out/
+DerivedData/

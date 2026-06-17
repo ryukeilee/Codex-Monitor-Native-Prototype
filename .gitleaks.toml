@@ -1,0 +1,40 @@
+title = "Codex Monitor Native Prototype secret detection rules"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allow sample placeholders and docs"
+paths = [
+  '''(^|/)\.env\.example$''',
+  '''(^|/)README\.md$'''
+]
+regexes = [
+  '''example[_-]?key''',
+  '''example[_-]?secret''',
+  '''test[_-]?token'''
+]
+
+[[rules]]
+id = "generic-api-key-assignment"
+description = "Potential API key or token assignment"
+regex = '''(?i)(api[_-]?key|access[_-]?token|secret|client[_-]?secret)\s*[:=]\s*["']?[A-Za-z0-9_\-\/+=]{16,}["']?'''
+tags = ["key", "token", "secret"]
+
+[[rules]]
+id = "private-key-block"
+description = "Private key material"
+regex = '''-----BEGIN [A-Z ]*PRIVATE KEY-----'''
+tags = ["key", "private-key"]
+
+[[rules]]
+id = "github-token"
+description = "GitHub personal access token"
+regex = '''gh[pousr]_[A-Za-z0-9]{36,255}'''
+tags = ["github", "token"]
+
+[[rules]]
+id = "openai-key"
+description = "OpenAI API key"
+regex = '''sk-[A-Za-z0-9]{20,}'''
+tags = ["openai", "key"]
