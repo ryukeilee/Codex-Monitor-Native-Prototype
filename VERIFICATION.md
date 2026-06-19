@@ -3,7 +3,8 @@
 ## Commands Run
 
 ```bash
-swift build
+swift build -c debug
+swift build -c release
 swift test
 ./script/build_and_run.sh --verify
 ./script/build_and_run.sh --telemetry

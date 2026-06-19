@@ -2,6 +2,17 @@
 
 Bootstrap repository for the Codex Monitor native prototype.
 
+This repository is a Swift Package app, so use `swift build` for command-line
+builds. There is no checked-in `.xcodeproj` or `.xcworkspace`, which means
+`xcodebuild -scheme "Codex Monitor Native"` will not work here.
+
+## Build
+
+```bash
+swift build -c debug
+swift build -c release
+```
+
 ## Run
 
 ```bash
