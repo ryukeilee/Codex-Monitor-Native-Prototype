@@ -19,9 +19,21 @@ swift build -c release
 ./script/build_and_run.sh
 ```
 
+## Install
+
+Use the Release bundle from the same script entrypoint:
+
+```bash
+BUILD_CONFIGURATION=release ./script/build_and_run.sh --verify
+sudo rm -rf "/Applications/Codex Monitor Native.app"
+sudo ditto "$PWD/dist/CodexMonitorNative.app" "/Applications/Codex Monitor Native.app"
+open -n "/Applications/Codex Monitor Native.app"
+```
+
 Useful variants:
 
 ```bash
+BUILD_CONFIGURATION=release ./script/build_and_run.sh
 ./script/build_and_run.sh --verify
 ./script/build_and_run.sh --logs
 ./script/build_and_run.sh --telemetry

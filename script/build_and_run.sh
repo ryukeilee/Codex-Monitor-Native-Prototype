@@ -5,6 +5,7 @@ MODE="${1:-run}"
 APP_NAME="CodexMonitorNative"
 BUNDLE_ID="com.ryukeilee.CodexMonitorNativePrototype"
 MIN_SYSTEM_VERSION="14.0"
+BUILD_CONFIGURATION="${BUILD_CONFIGURATION:-debug}"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
@@ -37,8 +38,8 @@ BUILD_FLAGS=(
 export CLANG_MODULE_CACHE_PATH="$MODULE_CACHE"
 export SWIFTPM_MODULECACHE_OVERRIDE="$MODULE_CACHE"
 
-swift build "${BUILD_FLAGS[@]}"
-BUILD_BINARY="$(swift build "${BUILD_FLAGS[@]}" --show-bin-path)/$APP_NAME"
+swift build -c "$BUILD_CONFIGURATION" "${BUILD_FLAGS[@]}"
+BUILD_BINARY="$(swift build -c "$BUILD_CONFIGURATION" "${BUILD_FLAGS[@]}" --show-bin-path)/$APP_NAME"
 
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_MACOS" "$APP_RESOURCES"
