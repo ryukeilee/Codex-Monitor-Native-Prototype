@@ -4,6 +4,7 @@ enum QuotaRefreshStatus: String, Equatable, Sendable {
     case idle
     case refreshing
     case success
+    case stale
     case networkFailed
     case authRequired
     case parseFailed
@@ -18,6 +19,8 @@ enum QuotaRefreshStatus: String, Equatable, Sendable {
             return "Refreshing"
         case .success:
             return "Connected"
+        case .stale:
+            return "Stale"
         case .networkFailed:
             return "Network Failed"
         case .authRequired:
@@ -33,7 +36,7 @@ enum QuotaRefreshStatus: String, Equatable, Sendable {
 
     var isError: Bool {
         switch self {
-        case .networkFailed, .authRequired, .parseFailed, .noSnapshot:
+        case .stale, .networkFailed, .authRequired, .parseFailed, .noSnapshot:
             return true
         case .idle, .refreshing, .success, .demoMode:
             return false

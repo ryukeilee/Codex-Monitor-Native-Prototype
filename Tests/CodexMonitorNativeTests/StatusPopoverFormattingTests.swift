@@ -59,7 +59,11 @@ final class StatusPopoverFormattingTests: XCTestCase {
     func testSourceStatusLineUsesCompactPrimaryCopy() {
         XCTAssertEqual(
             StatusPopoverFormatting.sourceStatusLine(dataSource: .real, status: .success),
-            "Real data · Connected"
+            "Real data · Fresh"
+        )
+        XCTAssertEqual(
+            StatusPopoverFormatting.sourceStatusLine(dataSource: .real, status: .stale),
+            "Real data · Stale"
         )
         XCTAssertEqual(
             StatusPopoverFormatting.sourceStatusLine(dataSource: .mock, status: .demoMode),
@@ -68,8 +72,9 @@ final class StatusPopoverFormattingTests: XCTestCase {
     }
 
     func testTitleSummaryMatchesStatusState() {
-        XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .success), "Quota looks healthy")
-        XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .networkFailed), "Refresh failed")
+        XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .success), "Quota is fresh")
+        XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .stale), "Quota data is stale")
+        XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .networkFailed), "Last refresh failed")
     }
 
     private func makeDate(_ iso8601: String) -> Date {

@@ -58,11 +58,13 @@ enum StatusPopoverFormatting {
     static func titleSummary(for status: QuotaRefreshStatus) -> String {
         switch status {
         case .success:
-            return "Quota looks healthy"
+            return "Quota is fresh"
         case .refreshing:
-            return "Refreshing quota"
+            return "Updating quota"
+        case .stale:
+            return "Quota data is stale"
         case .networkFailed, .authRequired, .parseFailed:
-            return "Refresh failed"
+            return "Last refresh failed"
         case .noSnapshot:
             return "Waiting for first sync"
         case .demoMode:
@@ -88,15 +90,17 @@ enum StatusPopoverFormatting {
     private static func statusLabel(for status: QuotaRefreshStatus) -> String {
         switch status {
         case .success:
-            return "Connected"
+            return "Fresh"
         case .refreshing:
-            return "Refreshing"
+            return "Updating"
+        case .stale:
+            return "Stale"
         case .networkFailed:
-            return "Network failed"
+            return "Failed"
         case .authRequired:
-            return "Auth required"
+            return "Failed"
         case .parseFailed:
-            return "Parse failed"
+            return "Failed"
         case .noSnapshot:
             return "Not connected"
         case .demoMode:

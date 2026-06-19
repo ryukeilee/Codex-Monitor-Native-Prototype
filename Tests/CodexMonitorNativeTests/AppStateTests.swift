@@ -27,6 +27,21 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(store.loadSnapshot(), refreshed)
     }
 
+    func testRestoredRealSnapshotMarksStaleDataImmediately() {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.stale.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let staleSnapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 72, fiveHourQuotaPercent: 69, refreshedAt: .distantPast,
+            dataSource: .real
+        )
+        store.saveSnapshot(staleSnapshot)
+
+        let appState = AppState(snapshotStore: store, refreshService: MockRefreshService(snapshot: staleSnapshot))
+
+        XCTAssertEqual(appState.status, .stale)
+        XCTAssertTrue(appState.isDataStale)
+    }
+
     func testFailedRefreshKeepsLastSuccessfulSnapshot() async {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.failure.\(UUID().uuidString)")!
         let store = SnapshotStore(defaults: defaults, key: "snapshot")
@@ -154,6 +169,40 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(successState.failureCount, 0)
         XCTAssertEqual(successState.backoffInterval, 300)
     }
+
+    func testConcurrentRefreshRequestsDoNotStartTwice() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.concurrent.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let initial = QuotaSnapshot(
+            weeklyQuotaPercent: 72, fiveHourQuotaPercent: 69, refreshedAt: .distantPast,
+            dataSource: .real
+        )
+        store.saveSnapshot(initial)
+
+        let refreshed = QuotaSnapshot(
+            weeklyQuotaPercent: 81, fiveHourQuotaPercent: 74, refreshedAt: .now,
+            dataSource: .real
+        )
+        let service = BlockingRefreshService(snapshot: refreshed)
+        let appState = AppState(snapshotStore: store, refreshService: service)
+
+        let first = Task {
+            await appState.refreshNow(trigger: .manual)
+        }
+        await Task.yield()
+
+        let second = Task {
+            await appState.refreshNow(trigger: .manual)
+        }
+
+        await Task.yield()
+        let callCount = await service.callCount()
+        XCTAssertEqual(callCount, 1)
+
+        await service.release()
+        await first.value
+        await second.value
+    }
 }
 
 private struct MockRefreshService: QuotaRefreshing {
@@ -164,5 +213,32 @@ private struct MockRefreshService: QuotaRefreshing {
             throw MockRefreshError.simulatedFailure
         }
         return snapshot
+    }
+}
+
+private actor BlockingRefreshService: QuotaRefreshing {
+    let snapshot: QuotaSnapshot
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var callCountValue = 0
+
+    init(snapshot: QuotaSnapshot) {
+        self.snapshot = snapshot
+    }
+
+    func refresh(basedOn currentSnapshot: QuotaSnapshot) async throws -> QuotaSnapshot {
+        callCountValue += 1
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+        return snapshot
+    }
+
+    func callCount() -> Int {
+        callCountValue
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
     }
 }

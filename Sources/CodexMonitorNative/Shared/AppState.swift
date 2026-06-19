@@ -36,8 +36,17 @@ final class AppState: ObservableObject {
     private var latestRealSnapshot: QuotaSnapshot?
     private var consecutiveFailures: Int = 0
     private let defaultInterval: TimeInterval = 300
+    private let staleAfterInterval: TimeInterval = 20 * 60
+    private var freshnessTask: Task<Void, Never>?
 
     var isRefreshing: Bool { status == .refreshing }
+    var isDataStale: Bool {
+        guard snapshot.dataSource == .real, let lastSuccessAt else {
+            return false
+        }
+
+        return Date.now.timeIntervalSince(lastSuccessAt) >= staleAfterInterval
+    }
 
     // MARK: - Init
 
@@ -51,9 +60,10 @@ final class AppState: ObservableObject {
             if stored.dataSource == .real {
                 latestRealSnapshot = stored
                 snapshot = stored
-                status = .success
+                status = stored.isFresh(referenceDate: .now, staleAfterInterval: staleAfterInterval) ? .success : .stale
                 lastSuccessAt = stored.refreshedAt
                 AppLogger.snapshot.info("Restored real snapshot: weekly=\(stored.weeklyQuotaPercent)% fiveHour=\(stored.fiveHourQuotaPercent)%")
+                scheduleFreshnessCheck()
             } else {
                 snapshot = stored
                 status = .demoMode
@@ -71,6 +81,14 @@ final class AppState: ObservableObject {
 
     var formattedRefreshedAt: String {
         StatusPopoverFormatting.shortTimestamp(for: snapshot.refreshedAt)
+    }
+
+    var displayStatus: QuotaRefreshStatus {
+        if status == .success, isDataStale {
+            return .stale
+        }
+
+        return status
     }
 
     var formattedLastAttempt: String? {
@@ -103,6 +121,7 @@ final class AppState: ObservableObject {
 
         status = .refreshing
         lastAttemptAt = .now
+        freshnessTask?.cancel()
 
         let baselineSnapshot = latestRealSnapshot ?? snapshot
         AppLogger.refresh.info("Starting \(triggerName, privacy: .public) refresh (baseline source=\(baselineSnapshot.dataSource.rawValue, privacy: .public))")
@@ -121,11 +140,13 @@ final class AppState: ObservableObject {
                 status = .success
                 backoffInterval = defaultInterval
                 snapshotStore.saveSnapshot(refreshed)
+                scheduleFreshnessCheck()
                 AppLogger.refresh.info("Real refresh succeeded: weekly=\(refreshed.weeklyQuotaPercent)% fiveHour=\(refreshed.fiveHourQuotaPercent)%")
             } else {
                 // Mock success (dev mode)
                 snapshot = refreshed
                 status = .demoMode
+                lastErrorSummary = nil
                 AppLogger.refresh.info("Mock refresh succeeded")
             }
         } catch {
@@ -136,6 +157,7 @@ final class AppState: ObservableObject {
             let classifiedStatus = classifyError(error)
             lastErrorSummary = safeErrorMessage(from: error)
             status = classifiedStatus
+            freshnessTask?.cancel()
 
             // Always keep the last successful real snapshot visible
             if let real = latestRealSnapshot {
@@ -189,22 +211,74 @@ final class AppState: ObservableObject {
     // MARK: - Safe error messages
 
     private func safeErrorMessage(from error: Error) -> String {
-        let message = error.localizedDescription
+        switch error {
+        case let realError as RealQuotaError:
+            return shortMessage(for: realError)
+        case is MockRefreshError:
+            return "Data source not reachable"
+        default:
+            let message = error.localizedDescription.lowercased()
+            if message.contains("auth") || message.contains("login") {
+                return "Login session unavailable"
+            }
+            if message.contains("timeout") || message.contains("timed out") {
+                return "Data source timed out"
+            }
+            return "Last refresh failed"
+        }
+    }
 
-        // Scrub sensitive tokens / headers from error messages
-        let lower = message.lowercased()
-        if lower.contains("bearer ") || lower.contains("authorization")
-            || lower.contains("access_token") || lower.contains("api_key") {
-            return "Authentication error"
+    private func shortMessage(for error: RealQuotaError) -> String {
+        switch error {
+        case .codexNotFound:
+            return "Data source not found"
+        case .spawnFailed, .handshakeFailed, .requestTimedOut, .processExited:
+            return "Data source not reachable"
+        case .rpcError(let message):
+            let lower = message.lowercased()
+            if lower.contains("auth") || lower.contains("unauthorized") || lower.contains("login") {
+                return "Login session unavailable"
+            }
+            return "Data source rejected request"
+        case .parseFailed, .noUsableRateLimits:
+            return "Bad data from source"
         }
-        if lower.contains("401") || lower.contains("403") {
-            return "Authentication required"
-        }
-        if lower.contains("timed out") || lower.contains("timeout") {
-            return "Request timed out"
+    }
+
+    private func scheduleFreshnessCheck() {
+        freshnessTask?.cancel()
+
+        guard snapshot.dataSource == .real, let lastSuccessAt else {
+            return
         }
 
-        return message
+        let elapsed = Date.now.timeIntervalSince(lastSuccessAt)
+        let remaining = staleAfterInterval - elapsed
+
+        if remaining <= 0 {
+            if status == .success {
+                status = .stale
+            }
+            return
+        }
+
+        freshnessTask = Task { [weak self] in
+            let delay = UInt64(remaining * 1_000_000_000)
+            do {
+                try await Task.sleep(nanoseconds: delay)
+            } catch {
+                return
+            }
+
+            await MainActor.run {
+                guard let self else { return }
+                guard self.status == .success, self.isDataStale else { return }
+
+                self.status = .stale
+                self.lastErrorSummary = nil
+                AppLogger.refresh.info("Marked data stale after \(self.staleAfterInterval, format: .fixed(precision: 0)) seconds without a successful refresh")
+            }
+        }
     }
 
     private func triggerName(for trigger: RefreshTrigger) -> String {
@@ -213,5 +287,15 @@ final class AppState: ObservableObject {
         case .scheduled: return "scheduled"
         case .wake: return "wake"
         }
+    }
+
+    deinit {
+        freshnessTask?.cancel()
+    }
+}
+
+private extension QuotaSnapshot {
+    func isFresh(referenceDate: Date, staleAfterInterval: TimeInterval) -> Bool {
+        referenceDate.timeIntervalSince(refreshedAt) < staleAfterInterval
     }
 }

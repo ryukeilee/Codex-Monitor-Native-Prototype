@@ -63,6 +63,8 @@ final class StatusBarController {
 
         switch status {
         case .success:
+            fallthrough
+        case .stale:
             // Real data available — show percentage
             title = "\(snapshot.weeklyQuotaPercent)%"
 
@@ -107,6 +109,8 @@ final class StatusBarController {
             return "Codex Monitor: Auth required (showing last known data)"
         case .parseFailed:
             return "Codex Monitor: Parse error (showing last known data)"
+        case .stale:
+            return "Codex Monitor: Data is stale (showing last known data)"
         case .noSnapshot:
             return "Codex Monitor: Not connected"
         case .idle:

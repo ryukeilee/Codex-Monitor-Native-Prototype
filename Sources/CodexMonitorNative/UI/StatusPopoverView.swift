@@ -7,33 +7,62 @@ struct StatusPopoverView: View {
     let onQuit: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text("Codex Monitor Native")
-                    .font(.title3.weight(.semibold))
+                    .font(.headline.weight(.semibold))
                     .lineLimit(1)
 
                 Text(StatusPopoverFormatting.titleSummary(for: appState.status))
-                    .font(.callout)
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.9)
+
+                if let refreshError = appState.lastErrorSummary {
+                    Text(refreshError)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             }
 
             QuotaSummaryView(appState: appState)
 
             Divider()
+                .opacity(0.55)
 
-            VStack(alignment: .leading, spacing: 8) {
-                Toggle(isOn: launchAtLoginBinding) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
                     Text("Launch at Login")
+                        .font(.subheadline.weight(.medium))
+
+                    Text(launchAtLoginManager.helperText)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
                 }
-                .disabled(launchAtLoginManager.isUpdating)
+
+                Spacer(minLength: 8)
+
+                Toggle("", isOn: launchAtLoginBinding)
+                    .labelsHidden()
+                    .disabled(launchAtLoginManager.isUpdating)
+                    .controlSize(.small)
+                    .accessibilityLabel("Launch at Login")
+            }
+
+            if let loginError = launchAtLoginManager.lastErrorSummary {
+                Text(loginError)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
 
             Divider()
+                .opacity(0.55)
 
-            HStack(spacing: 12) {
+            HStack(spacing: 8) {
                 Button(action: onRefresh) {
                     if appState.isRefreshing {
                         ProgressView()
@@ -42,15 +71,21 @@ struct StatusPopoverView: View {
                         Text("Refresh")
                     }
                 }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
                 .disabled(appState.isRefreshing)
+                .frame(minWidth: 84)
 
                 Spacer()
 
-                Button("Quit", role: .destructive, action: onQuit)
+                Button("Quit", action: onQuit)
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.secondary)
+                    .controlSize(.small)
             }
         }
-        .padding(14)
-        .frame(width: 340)
+        .padding(12)
+        .frame(width: 318)
     }
 
     private var launchAtLoginBinding: Binding<Bool> {

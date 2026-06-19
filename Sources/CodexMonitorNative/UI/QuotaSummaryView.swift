@@ -4,23 +4,19 @@ struct QuotaSummaryView: View {
     @ObservedObject var appState: AppState
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
             quotaRow(title: "Weekly Quota", value: weeklyQuotaText)
             quotaRow(title: "5 Hour Quota", value: fiveHourQuotaText)
 
-            VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 4) {
                 Text(updatedText)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.9)
-
+                Text("·")
                 Text(sourceStatusText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.9)
             }
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+            .lineLimit(1)
+            .minimumScaleFactor(0.85)
         }
     }
 
@@ -28,7 +24,7 @@ struct QuotaSummaryView: View {
 
     private var weeklyQuotaText: String {
         switch appState.status {
-        case .success, .refreshing, .networkFailed, .authRequired, .parseFailed:
+        case .success, .stale, .refreshing, .networkFailed, .authRequired, .parseFailed:
             if appState.dataSource == .real {
                 return "\(appState.snapshot.weeklyQuotaPercent)%"
             }
@@ -42,7 +38,7 @@ struct QuotaSummaryView: View {
 
     private var fiveHourQuotaText: String {
         switch appState.status {
-        case .success, .refreshing, .networkFailed, .authRequired, .parseFailed:
+        case .success, .stale, .refreshing, .networkFailed, .authRequired, .parseFailed:
             if appState.dataSource == .real {
                 return "\(appState.snapshot.fiveHourQuotaPercent)%"
             }
@@ -69,12 +65,13 @@ struct QuotaSummaryView: View {
     }
 
     private func quotaRow(title: String, value: String) -> some View {
-        HStack {
+        HStack(alignment: .firstTextBaseline) {
             Text(title)
+                .font(.subheadline)
                 .foregroundStyle(.secondary)
             Spacer()
             Text(value)
-                .fontWeight(.medium)
+                .font(.body.weight(.semibold))
                 .monospacedDigit()
         }
     }

@@ -1,6 +1,26 @@
 import Foundation
 import ServiceManagement
 
+protocol LoginItemManaging {
+    var status: SMAppService.Status { get }
+    func register() throws
+    func unregister() throws
+}
+
+struct SystemLoginItemManager: LoginItemManaging {
+    var status: SMAppService.Status {
+        SMAppService.mainApp.status
+    }
+
+    func register() throws {
+        try SMAppService.mainApp.register()
+    }
+
+    func unregister() throws {
+        try SMAppService.mainApp.unregister()
+    }
+}
+
 @MainActor
 final class LaunchAtLoginManager: ObservableObject {
     enum StatusInfo: Equatable {
@@ -41,16 +61,14 @@ final class LaunchAtLoginManager: ObservableObject {
     @Published private(set) var isEnabled = false
     @Published private(set) var statusInfo: StatusInfo = .notRegistered
     @Published private(set) var isUpdating = false
+    @Published private(set) var lastErrorSummary: String?
 
-    private let defaults: UserDefaults
-    private let preferenceKey: String
+    private let loginItemManager: LoginItemManaging
 
     init(
-        defaults: UserDefaults = .standard,
-        preferenceKey: String = "codex.monitor.native.prototype.launchAtLoginEnabled"
+        loginItemManager: LoginItemManaging = SystemLoginItemManager()
     ) {
-        self.defaults = defaults
-        self.preferenceKey = preferenceKey
+        self.loginItemManager = loginItemManager
         refreshStatus()
     }
 
@@ -62,10 +80,6 @@ final class LaunchAtLoginManager: ObservableObject {
         statusInfo.message
     }
 
-    var persistedPreference: Bool {
-        defaults.bool(forKey: preferenceKey)
-    }
-
     func refreshStatus() {
         let status = serviceStatus()
         statusInfo = status
@@ -74,12 +88,13 @@ final class LaunchAtLoginManager: ObservableObject {
     }
 
     func setLaunchAtLogin(_ enabled: Bool) {
-        defaults.set(enabled, forKey: preferenceKey)
         AppLogger.system.info("Launch at login preference changed to \(enabled, privacy: .public)")
+        lastErrorSummary = nil
 
         guard #available(macOS 13.0, *) else {
             statusInfo = .unavailable("Launch at login requires macOS 13 or later.")
             isEnabled = false
+            lastErrorSummary = "Launch at login unavailable"
             AppLogger.system.error("Launch at login unavailable on this macOS version")
             return
         }
@@ -89,17 +104,18 @@ final class LaunchAtLoginManager: ObservableObject {
 
         do {
             if enabled {
-                try SMAppService.mainApp.register()
+                try loginItemManager.register()
                 AppLogger.system.info("Requested launch at login registration for main app")
             } else {
-                try SMAppService.mainApp.unregister()
+                try loginItemManager.unregister()
                 AppLogger.system.info("Requested launch at login unregistration for main app")
             }
+            refreshStatus()
         } catch {
+            lastErrorSummary = shortErrorMessage(from: error)
             AppLogger.system.error("Launch at login update failed: \(error.localizedDescription, privacy: .public)")
+            refreshStatus()
         }
-
-        refreshStatus()
     }
 
     private func serviceStatus() -> StatusInfo {
@@ -107,7 +123,7 @@ final class LaunchAtLoginManager: ObservableObject {
             return .unavailable("Launch at login requires macOS 13 or later.")
         }
 
-        switch SMAppService.mainApp.status {
+        switch loginItemManager.status {
         case .enabled:
             return .enabled
         case .notRegistered:
@@ -119,5 +135,13 @@ final class LaunchAtLoginManager: ObservableObject {
         @unknown default:
             return .unknown("Launch at login returned an unknown system status.")
         }
+    }
+
+    private func shortErrorMessage(from error: Error) -> String {
+        let message = error.localizedDescription.lowercased()
+        if message.contains("permission") || message.contains("not permitted") {
+            return "Login session unavailable"
+        }
+        return "Launch at login update failed"
     }
 }
