@@ -33,8 +33,6 @@ final class AppState: ObservableObject {
 
     private let snapshotStore: SnapshotStore
     private let refreshAction: @Sendable (QuotaSnapshot) async throws -> QuotaSnapshot
-    private let refreshDateFormatter: DateFormatter
-
     private var latestRealSnapshot: QuotaSnapshot?
     private var consecutiveFailures: Int = 0
     private let defaultInterval: TimeInterval = 300
@@ -67,24 +65,20 @@ final class AppState: ObservableObject {
             AppLogger.snapshot.info("No persisted snapshot; starting in not-connected state")
         }
 
-        let formatter = DateFormatter()
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .short
-        refreshDateFormatter = formatter
     }
 
     // MARK: - Formatters
 
     var formattedRefreshedAt: String {
-        refreshDateFormatter.string(from: snapshot.refreshedAt)
+        StatusPopoverFormatting.shortTimestamp(for: snapshot.refreshedAt)
     }
 
     var formattedLastAttempt: String? {
-        lastAttemptAt.map { refreshDateFormatter.string(from: $0) }
+        lastAttemptAt.map { StatusPopoverFormatting.shortTimestamp(for: $0) }
     }
 
     var formattedLastSuccess: String? {
-        lastSuccessAt.map { refreshDateFormatter.string(from: $0) }
+        lastSuccessAt.map { StatusPopoverFormatting.shortTimestamp(for: $0) }
     }
 
     var dataSource: QuotaDataSource {

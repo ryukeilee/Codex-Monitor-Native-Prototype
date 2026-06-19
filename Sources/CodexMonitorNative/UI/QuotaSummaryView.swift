@@ -4,35 +4,22 @@ struct QuotaSummaryView: View {
     @ObservedObject var appState: AppState
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            row(title: "Weekly Quota", value: weeklyQuotaText)
-            row(title: "5 Hour Quota", value: fiveHourQuotaText)
-            row(title: "Last Success", value: appState.formattedLastSuccess ?? "--")
-            row(title: "Last Attempt", value: appState.formattedLastAttempt ?? "--")
-            row(title: "Data Source", value: dataSourceText)
-            row(title: "Status", value: statusText)
+        VStack(alignment: .leading, spacing: 12) {
+            quotaRow(title: "Weekly Quota", value: weeklyQuotaText)
+            quotaRow(title: "5 Hour Quota", value: fiveHourQuotaText)
 
-            if let error = appState.lastErrorSummary {
-                HStack {
-                    Text("Error")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text(error)
-                        .fontWeight(.medium)
-                        .foregroundStyle(.red)
-                        .lineLimit(2)
-                }
-            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(updatedText)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.9)
 
-            if appState.failureCount > 0 {
-                HStack {
-                    Text("Failures")
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text("\(appState.failureCount)")
-                        .fontWeight(.medium)
-                        .foregroundStyle(appState.status.isError ? .red : .secondary)
-                }
+                Text(sourceStatusText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.9)
             }
         }
     }
@@ -67,26 +54,28 @@ struct QuotaSummaryView: View {
         }
     }
 
-    private var dataSourceText: String {
-        switch appState.dataSource {
-        case .real:
-            return "Real (codex app-server)"
-        case .mock:
-            return "Demo Mode"
-        }
+    private var updatedText: String {
+        StatusPopoverFormatting.updatedLine(
+            lastSuccess: appState.lastSuccessAt,
+            lastAttempt: appState.lastAttemptAt
+        )
     }
 
-    private var statusText: String {
-        appState.status.displayName
+    private var sourceStatusText: String {
+        StatusPopoverFormatting.sourceStatusLine(
+            dataSource: appState.dataSource,
+            status: appState.status
+        )
     }
 
-    private func row(title: String, value: String) -> some View {
+    private func quotaRow(title: String, value: String) -> some View {
         HStack {
             Text(title)
                 .foregroundStyle(.secondary)
             Spacer()
             Text(value)
                 .fontWeight(.medium)
+                .monospacedDigit()
         }
     }
 }

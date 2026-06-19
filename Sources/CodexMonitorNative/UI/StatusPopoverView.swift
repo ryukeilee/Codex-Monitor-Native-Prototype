@@ -7,23 +7,31 @@ struct StatusPopoverView: View {
     let onQuit: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Codex Monitor Native")
-                .font(.title3.weight(.semibold))
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Codex Monitor Native")
+                    .font(.title3.weight(.semibold))
+                    .lineLimit(1)
+
+                Text(StatusPopoverFormatting.titleSummary(for: appState.status))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.9)
+            }
 
             QuotaSummaryView(appState: appState)
+
+            Divider()
 
             VStack(alignment: .leading, spacing: 8) {
                 Toggle(isOn: launchAtLoginBinding) {
                     Text("Launch at Login")
-                        .font(.headline)
                 }
                 .disabled(launchAtLoginManager.isUpdating)
-
-                Text(launchAtLoginManager.helperText)
-                    .font(.caption)
-                    .foregroundStyle(launchAtLoginManager.statusInfo == .requiresApproval ? .orange : .secondary)
             }
+
+            Divider()
 
             HStack(spacing: 12) {
                 Button(action: onRefresh) {
@@ -41,7 +49,7 @@ struct StatusPopoverView: View {
                 Button("Quit", role: .destructive, action: onQuit)
             }
         }
-        .padding(16)
+        .padding(14)
         .frame(width: 340)
     }
 
