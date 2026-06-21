@@ -13,7 +13,7 @@ final class QuotaDecisionTests: XCTestCase {
         let decision = QuotaDecisionEngine.evaluate(snapshot: snapshot, hasUsableRealData: true)
 
         XCTAssertEqual(decision.level, .safe)
-        XCTAssertEqual(decision.recommendation, "可以继续跑日常 medium")
+        XCTAssertEqual(decision.recommendation, "可以继续正常使用")
     }
 
     func testDecisionIsObserveWhenQuotaNeedsAttention() {

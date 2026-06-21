@@ -83,7 +83,7 @@ final class StatusPopoverFormattingTests: XCTestCase {
 
         let formatted = StatusPopoverFormatting.relativeRecoveryLine(for: resetAt, now: now)
 
-        XCTAssertEqual(formatted, "1h30m")
+        XCTAssertEqual(formatted, "1小时30分")
     }
 
     func testRelativeRecoveryLineShowsRecoveredWhenDeadlinePassed() {

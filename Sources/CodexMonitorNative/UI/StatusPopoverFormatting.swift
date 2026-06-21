@@ -95,14 +95,14 @@ enum StatusPopoverFormatting {
         let minutes = (remaining % 3600) / 60
 
         if hours > 0 {
-            return minutes > 0 ? "\(hours)h\(minutes)m" : "\(hours)h"
+            return minutes > 0 ? "\(hours)小时\(minutes)分" : "\(hours)小时"
         }
 
         if minutes > 0 {
-            return "\(minutes)m"
+            return "\(minutes)分"
         }
 
-        return "<1m"
+        return "少于1分"
     }
 
     private static func sourceLabel(for dataSource: QuotaDataSource) -> String {

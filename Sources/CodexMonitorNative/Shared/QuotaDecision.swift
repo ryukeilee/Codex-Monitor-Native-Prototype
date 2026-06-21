@@ -47,7 +47,7 @@ enum QuotaDecisionEngine {
 
         return QuotaDecision(
             level: .safe,
-            recommendation: "可以继续跑日常 medium"
+            recommendation: "可以继续正常使用"
         )
     }
 
