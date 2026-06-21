@@ -5,6 +5,10 @@ struct QuotaSummaryView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            quotaRow(title: "5h Recovery", value: fiveHourRecoveryText)
+            quotaRow(title: "Recovers In", value: recoveryCountdownText)
+            quotaRow(title: "Decision", value: decisionText)
+            detailLine(title: "Advice", value: recommendationText)
             quotaRow(title: "Weekly Quota", value: weeklyQuotaText)
             quotaRow(title: "5 Hour Quota", value: fiveHourQuotaText)
 
@@ -64,6 +68,26 @@ struct QuotaSummaryView: View {
         )
     }
 
+    private var fiveHourRecoveryText: String {
+        guard let resetAt = appState.effectiveFiveHourResetAt else {
+            return "--"
+        }
+
+        return StatusPopoverFormatting.shortTimestamp(for: resetAt)
+    }
+
+    private var recoveryCountdownText: String {
+        StatusPopoverFormatting.relativeRecoveryLine(for: appState.effectiveFiveHourResetAt)
+    }
+
+    private var decisionText: String {
+        appState.quotaDecision.level.rawValue
+    }
+
+    private var recommendationText: String {
+        appState.quotaDecision.recommendation
+    }
+
     private func quotaRow(title: String, value: String) -> some View {
         HStack(alignment: .firstTextBaseline) {
             Text(title)
@@ -73,6 +97,18 @@ struct QuotaSummaryView: View {
             Text(value)
                 .font(.body.weight(.semibold))
                 .monospacedDigit()
+        }
+    }
+
+    private func detailLine(title: String, value: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(title)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .frame(width: 78, alignment: .leading)
+            Text(value)
+                .font(.subheadline.weight(.medium))
+                .multilineTextAlignment(.leading)
         }
     }
 }

@@ -77,6 +77,24 @@ final class StatusPopoverFormattingTests: XCTestCase {
         XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .networkFailed), "Last refresh failed")
     }
 
+    func testRelativeRecoveryLineShowsRemainingDuration() {
+        let now = makeDate("2026-06-19T12:40:00Z")
+        let resetAt = makeDate("2026-06-19T14:10:00Z")
+
+        let formatted = StatusPopoverFormatting.relativeRecoveryLine(for: resetAt, now: now)
+
+        XCTAssertEqual(formatted, "1h 30m")
+    }
+
+    func testRelativeRecoveryLineShowsRecoveredWhenDeadlinePassed() {
+        let now = makeDate("2026-06-19T12:40:00Z")
+        let resetAt = makeDate("2026-06-19T12:35:00Z")
+
+        let formatted = StatusPopoverFormatting.relativeRecoveryLine(for: resetAt, now: now)
+
+        XCTAssertEqual(formatted, "已恢复")
+    }
+
     private func makeDate(_ iso8601: String) -> Date {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]

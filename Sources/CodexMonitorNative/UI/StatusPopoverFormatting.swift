@@ -78,6 +78,33 @@ enum StatusPopoverFormatting {
         "\(sourceLabel(for: dataSource)) · \(statusLabel(for: status))"
     }
 
+    static func relativeRecoveryLine(
+        for date: Date?,
+        now: Date = .now
+    ) -> String {
+        guard let date else {
+            return "--"
+        }
+
+        let remaining = Int(date.timeIntervalSince(now).rounded())
+        if remaining <= 0 {
+            return "已恢复"
+        }
+
+        let hours = remaining / 3600
+        let minutes = (remaining % 3600) / 60
+
+        if hours > 0 {
+            return minutes > 0 ? "\(hours)h \(minutes)m" : "\(hours)h"
+        }
+
+        if minutes > 0 {
+            return "\(minutes)m"
+        }
+
+        return "<1m"
+    }
+
     private static func sourceLabel(for dataSource: QuotaDataSource) -> String {
         switch dataSource {
         case .real:

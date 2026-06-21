@@ -312,6 +312,7 @@ struct RealQuotaProvider {
         }
 
         let fiveHourRemaining = Int((100.0 - primaryUsedPercent).rounded())
+        let fiveHourResetAt = parseResetDate(from: primary)
 
         // Secondary (weekly) window
         let secondary: [String: Any]? = codexBucket["secondary"] as? [String: Any]
@@ -350,10 +351,65 @@ struct RealQuotaProvider {
         return QuotaSnapshot(
             weeklyQuotaPercent: weeklyRemaining,
             fiveHourQuotaPercent: fiveHourRemaining,
+            fiveHourResetAt: fiveHourResetAt,
             refreshedAt: .now,
             dataSource: .real,
             errorMessage: nil
         )
+    }
+
+    private static func parseResetDate(from window: [String: Any]) -> Date? {
+        for key in ["resetAt", "resetsAt", "nextResetAt", "windowResetAt"] {
+            guard let rawValue = window[key] else {
+                continue
+            }
+
+            if let parsed = parseDate(rawValue) {
+                return parsed
+            }
+        }
+
+        return nil
+    }
+
+    private static func parseDate(_ rawValue: Any) -> Date? {
+        if let date = rawValue as? Date {
+            return date
+        }
+
+        if let seconds = rawValue as? Double {
+            return dateFromTimestamp(seconds)
+        }
+
+        if let seconds = rawValue as? Int {
+            return dateFromTimestamp(Double(seconds))
+        }
+
+        if let string = rawValue as? String {
+            if let numeric = Double(string) {
+                return dateFromTimestamp(numeric)
+            }
+
+            let iso8601 = ISO8601DateFormatter()
+            iso8601.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let date = iso8601.date(from: string) {
+                return date
+            }
+
+            iso8601.formatOptions = [.withInternetDateTime]
+            return iso8601.date(from: string)
+        }
+
+        return nil
+    }
+
+    private static func dateFromTimestamp(_ rawValue: Double) -> Date? {
+        guard rawValue.isFinite, rawValue > 0 else {
+            return nil
+        }
+
+        let seconds = rawValue > 10_000_000_000 ? rawValue / 1_000 : rawValue
+        return Date(timeIntervalSince1970: seconds)
     }
 
     // MARK: - Codex Path Resolution

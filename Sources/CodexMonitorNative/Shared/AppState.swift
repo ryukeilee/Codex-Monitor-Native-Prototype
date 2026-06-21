@@ -103,6 +103,24 @@ final class AppState: ObservableObject {
         snapshot.dataSource
     }
 
+    var hasUsableRealQuotaData: Bool {
+        snapshot.dataSource == .real &&
+        status != .noSnapshot &&
+        status != .demoMode &&
+        status != .idle
+    }
+
+    var quotaDecision: QuotaDecision {
+        QuotaDecisionEngine.evaluate(snapshot: snapshot, hasUsableRealData: hasUsableRealQuotaData)
+    }
+
+    var effectiveFiveHourResetAt: Date? {
+        QuotaDecisionEngine.effectiveFiveHourResetAt(
+            for: snapshot,
+            hasUsableRealData: hasUsableRealQuotaData
+        )
+    }
+
     // MARK: - Refresh
 
     func refresh(trigger: RefreshTrigger) {

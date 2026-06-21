@@ -65,6 +65,7 @@ struct SnapshotStore {
         return QuotaSnapshot(
             weeklyQuotaPercent: legacy.weeklyQuotaPercent,
             fiveHourQuotaPercent: legacy.fiveHourQuotaPercent,
+            fiveHourResetAt: nil,
             refreshedAt: legacy.refreshedAt,
             dataSource: .mock,
             errorMessage: nil,
@@ -76,6 +77,7 @@ struct SnapshotStore {
         QuotaSnapshot(
             weeklyQuotaPercent: snapshot.weeklyQuotaPercent,
             fiveHourQuotaPercent: snapshot.fiveHourQuotaPercent,
+            fiveHourResetAt: snapshot.fiveHourResetAt,
             refreshedAt: snapshot.refreshedAt,
             dataSource: snapshot.dataSource,
             errorMessage: snapshot.errorMessage,
