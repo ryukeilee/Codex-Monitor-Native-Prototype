@@ -52,7 +52,7 @@ final class StatusBarController {
         button.image = nil
         button.imagePosition = .noImage
         button.appearsDisabled = false
-        applyTitle("CM")
+        applyTitle("--")
         button.toolTip = "Codex Monitor Native"
         button.setAccessibilityTitle("Codex Monitor Native")
         AppLogger.statusBar.info("Status item created; waiting for first quota data")
@@ -65,30 +65,22 @@ final class StatusBarController {
         case .success:
             fallthrough
         case .stale:
-            // Real data available — show percentage
-            title = "\(snapshot.weeklyQuotaPercent)%"
+            // status bar title displays weekly quota, while 5h quota remains in dropdown.
+            title = snapshot.dataSource == .real ? "\(snapshot.weeklyQuotaPercent)%" : "--%"
 
         case .refreshing:
             // Keep last value, never flash empty
-            if snapshot.dataSource == .real {
-                title = "\(snapshot.weeklyQuotaPercent)%"
-            } else {
-                title = "CM"
-            }
+            title = snapshot.dataSource == .real ? "\(snapshot.weeklyQuotaPercent)%" : "--%"
 
         case .networkFailed, .authRequired, .parseFailed:
-            // Error state: show last real % if available, otherwise CM
-            if snapshot.dataSource == .real {
-                title = "\(snapshot.weeklyQuotaPercent)%"
-            } else {
-                title = "CM"
-            }
+            // Error state: show last real weekly % if available, otherwise placeholder.
+            title = snapshot.dataSource == .real ? "\(snapshot.weeklyQuotaPercent)%" : "--%"
 
         case .noSnapshot, .idle:
-            title = "CM"
+            title = "--%"
 
         case .demoMode:
-            title = "Demo"
+            title = "--%"
         }
 
         applyTitle(title)
@@ -100,7 +92,7 @@ final class StatusBarController {
     private func tooltip(for snapshot: QuotaSnapshot, status: QuotaRefreshStatus) -> String {
         switch status {
         case .success:
-            return "Codex Monitor: Weekly \(snapshot.weeklyQuotaPercent)% · 5h \(snapshot.fiveHourQuotaPercent)%"
+            return "Codex Monitor: 5h \(snapshot.fiveHourQuotaPercent)% · Weekly \(snapshot.weeklyQuotaPercent)%"
         case .refreshing:
             return "Codex Monitor: Refreshing…"
         case .networkFailed:

@@ -233,33 +233,33 @@ final class AppState: ObservableObject {
         case let realError as RealQuotaError:
             return shortMessage(for: realError)
         case is MockRefreshError:
-            return "Data source not reachable"
+            return "数据源不可达"
         default:
             let message = error.localizedDescription.lowercased()
             if message.contains("auth") || message.contains("login") {
-                return "Login session unavailable"
+                return "登录会话不可用"
             }
             if message.contains("timeout") || message.contains("timed out") {
-                return "Data source timed out"
+                return "数据源超时"
             }
-            return "Last refresh failed"
+            return "上次刷新失败"
         }
     }
 
     private func shortMessage(for error: RealQuotaError) -> String {
         switch error {
         case .codexNotFound:
-            return "Data source not found"
+            return "未找到数据源"
         case .spawnFailed, .handshakeFailed, .requestTimedOut, .processExited:
-            return "Data source not reachable"
+            return "数据源不可达"
         case .rpcError(let message):
             let lower = message.lowercased()
             if lower.contains("auth") || lower.contains("unauthorized") || lower.contains("login") {
-                return "Login session unavailable"
+                return "登录会话不可用"
             }
-            return "Data source rejected request"
+            return "数据源拒绝请求"
         case .parseFailed, .noUsableRateLimits:
-            return "Bad data from source"
+            return "数据源返回异常"
         }
     }
 

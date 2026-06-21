@@ -9,7 +9,7 @@ final class LaunchAtLoginManagerTests: XCTestCase {
         let manager = LaunchAtLoginManager(loginItemManager: service)
 
         XCTAssertTrue(manager.shouldLaunchAtLogin)
-        XCTAssertEqual(manager.helperText, "Launch at login is enabled.")
+        XCTAssertEqual(manager.helperText, "已启用")
         XCTAssertNil(manager.lastErrorSummary)
     }
 
@@ -24,8 +24,8 @@ final class LaunchAtLoginManagerTests: XCTestCase {
         manager.setLaunchAtLogin(true)
 
         XCTAssertFalse(manager.shouldLaunchAtLogin)
-        XCTAssertEqual(manager.helperText, "Launch at login is disabled.")
-        XCTAssertEqual(manager.lastErrorSummary, "Login session unavailable")
+        XCTAssertEqual(manager.helperText, "未启用")
+        XCTAssertEqual(manager.lastErrorSummary, "登录会话不可用")
     }
 }
 

@@ -7,17 +7,11 @@ struct StatusPopoverView: View {
     let onQuit: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Codex Monitor Native")
                     .font(.headline.weight(.semibold))
                     .lineLimit(1)
-
-                Text(StatusPopoverFormatting.titleSummary(for: appState.status))
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.9)
 
                 if let refreshError = appState.lastErrorSummary {
                     Text(refreshError)
@@ -32,15 +26,15 @@ struct StatusPopoverView: View {
             Divider()
                 .opacity(0.55)
 
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Launch at Login")
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("开机启动")
                         .font(.subheadline.weight(.medium))
 
                     Text(launchAtLoginManager.helperText)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                        .lineLimit(2)
+                        .lineLimit(1)
                 }
 
                 Spacer(minLength: 8)
@@ -49,7 +43,7 @@ struct StatusPopoverView: View {
                     .labelsHidden()
                     .disabled(launchAtLoginManager.isUpdating)
                     .controlSize(.small)
-                    .accessibilityLabel("Launch at Login")
+                    .accessibilityLabel("开机启动")
             }
 
             if let loginError = launchAtLoginManager.lastErrorSummary {
@@ -62,30 +56,29 @@ struct StatusPopoverView: View {
             Divider()
                 .opacity(0.55)
 
-            HStack(spacing: 8) {
+            HStack(alignment: .center, spacing: 8) {
                 Button(action: onRefresh) {
                     if appState.isRefreshing {
                         ProgressView()
                             .controlSize(.small)
                     } else {
-                        Text("Refresh")
+                        Text("刷新")
                     }
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .disabled(appState.isRefreshing)
-                .frame(minWidth: 84)
 
                 Spacer()
 
-                Button("Quit", action: onQuit)
+                Button("退出", action: onQuit)
                     .buttonStyle(.borderless)
                     .foregroundStyle(.secondary)
                     .controlSize(.small)
             }
         }
         .padding(12)
-        .frame(width: 318)
+        .frame(width: 314)
     }
 
     private var launchAtLoginBinding: Binding<Bool> {

@@ -43,13 +43,13 @@ final class LaunchAtLoginManager: ObservableObject {
         var message: String {
             switch self {
             case .enabled:
-                return "Launch at login is enabled."
+                return "已启用"
             case .notRegistered:
-                return "Launch at login is disabled."
+                return "未启用"
             case .requiresApproval:
-                return "Launch at login needs approval in System Settings > Login Items."
+                return "需在系统设置中批准"
             case .notFound:
-                return "macOS could not find this app's login item registration."
+                return "未找到登录项"
             case let .unavailable(reason):
                 return reason
             case let .unknown(reason):
@@ -92,9 +92,9 @@ final class LaunchAtLoginManager: ObservableObject {
         lastErrorSummary = nil
 
         guard #available(macOS 13.0, *) else {
-            statusInfo = .unavailable("Launch at login requires macOS 13 or later.")
+            statusInfo = .unavailable("开机启动需要 macOS 13 或更新版本")
             isEnabled = false
-            lastErrorSummary = "Launch at login unavailable"
+            lastErrorSummary = "开机启动不可用"
             AppLogger.system.error("Launch at login unavailable on this macOS version")
             return
         }
@@ -120,7 +120,7 @@ final class LaunchAtLoginManager: ObservableObject {
 
     private func serviceStatus() -> StatusInfo {
         guard #available(macOS 13.0, *) else {
-            return .unavailable("Launch at login requires macOS 13 or later.")
+            return .unavailable("开机启动需要 macOS 13 或更新版本")
         }
 
         switch loginItemManager.status {
@@ -133,15 +133,15 @@ final class LaunchAtLoginManager: ObservableObject {
         case .notFound:
             return .notFound
         @unknown default:
-            return .unknown("Launch at login returned an unknown system status.")
+            return .unknown("开机启动返回未知系统状态")
         }
     }
 
     private func shortErrorMessage(from error: Error) -> String {
         let message = error.localizedDescription.lowercased()
         if message.contains("permission") || message.contains("not permitted") {
-            return "Login session unavailable"
+            return "登录会话不可用"
         }
-        return "Launch at login update failed"
+        return "开机启动更新失败"
     }
 }

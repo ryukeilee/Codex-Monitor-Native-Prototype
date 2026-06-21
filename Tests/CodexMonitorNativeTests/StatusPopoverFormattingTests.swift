@@ -17,7 +17,7 @@ final class StatusPopoverFormattingTests: XCTestCase {
             timeZone: timeZone
         )
 
-        XCTAssertEqual(formatted, "Today 08:05")
+        XCTAssertEqual(formatted, "今天 08:05")
     }
 
     func testShortTimestampUsesMonthDayForOtherDays() {
@@ -53,28 +53,28 @@ final class StatusPopoverFormattingTests: XCTestCase {
             timeZone: timeZone
         )
 
-        XCTAssertEqual(formatted, "Updated Today 12:40")
+        XCTAssertEqual(formatted, "更新 今天 12:40")
     }
 
     func testSourceStatusLineUsesCompactPrimaryCopy() {
         XCTAssertEqual(
             StatusPopoverFormatting.sourceStatusLine(dataSource: .real, status: .success),
-            "Real data · Fresh"
+            "真实数据 · 最新"
         )
         XCTAssertEqual(
             StatusPopoverFormatting.sourceStatusLine(dataSource: .real, status: .stale),
-            "Real data · Stale"
+            "真实数据 · 已过期"
         )
         XCTAssertEqual(
             StatusPopoverFormatting.sourceStatusLine(dataSource: .mock, status: .demoMode),
-            "Demo data · Demo mode"
+            "演示数据 · 演示模式"
         )
     }
 
     func testTitleSummaryMatchesStatusState() {
-        XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .success), "Quota is fresh")
-        XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .stale), "Quota data is stale")
-        XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .networkFailed), "Last refresh failed")
+        XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .success), "数据已更新")
+        XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .stale), "数据已过期")
+        XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .networkFailed), "上次刷新失败")
     }
 
     func testRelativeRecoveryLineShowsRemainingDuration() {
@@ -83,7 +83,7 @@ final class StatusPopoverFormattingTests: XCTestCase {
 
         let formatted = StatusPopoverFormatting.relativeRecoveryLine(for: resetAt, now: now)
 
-        XCTAssertEqual(formatted, "1h 30m")
+        XCTAssertEqual(formatted, "1h30m")
     }
 
     func testRelativeRecoveryLineShowsRecoveredWhenDeadlinePassed() {

@@ -37,40 +37,40 @@ enum StatusPopoverFormatting {
         } ?? "--"
 
         if successText == attemptText {
-            return "Updated \(successText)"
+            return "更新 \(successText)"
         }
 
         if lastSuccess == nil && lastAttempt == nil {
-            return "Updated --"
+            return "更新 --"
         }
 
         if lastSuccess == nil {
-            return "Updated \(attemptText)"
+            return "更新 \(attemptText)"
         }
 
         if lastAttempt == nil {
-            return "Updated \(successText)"
+            return "更新 \(successText)"
         }
 
-        return "Updated \(successText) · Attempted \(attemptText)"
+        return "更新 \(successText) · 尝试 \(attemptText)"
     }
 
     static func titleSummary(for status: QuotaRefreshStatus) -> String {
         switch status {
         case .success:
-            return "Quota is fresh"
+            return "数据已更新"
         case .refreshing:
-            return "Updating quota"
+            return "正在更新"
         case .stale:
-            return "Quota data is stale"
+            return "数据已过期"
         case .networkFailed, .authRequired, .parseFailed:
-            return "Last refresh failed"
+            return "上次刷新失败"
         case .noSnapshot:
-            return "Waiting for first sync"
+            return "等待首次同步"
         case .demoMode:
-            return "Demo data loaded"
+            return "演示数据"
         case .idle:
-            return "Safe to continue"
+            return "可继续"
         }
     }
 
@@ -95,7 +95,7 @@ enum StatusPopoverFormatting {
         let minutes = (remaining % 3600) / 60
 
         if hours > 0 {
-            return minutes > 0 ? "\(hours)h \(minutes)m" : "\(hours)h"
+            return minutes > 0 ? "\(hours)h\(minutes)m" : "\(hours)h"
         }
 
         if minutes > 0 {
@@ -108,32 +108,32 @@ enum StatusPopoverFormatting {
     private static func sourceLabel(for dataSource: QuotaDataSource) -> String {
         switch dataSource {
         case .real:
-            return "Real data"
+            return "真实数据"
         case .mock:
-            return "Demo data"
+            return "演示数据"
         }
     }
 
     private static func statusLabel(for status: QuotaRefreshStatus) -> String {
         switch status {
         case .success:
-            return "Fresh"
+            return "最新"
         case .refreshing:
-            return "Updating"
+            return "更新中"
         case .stale:
-            return "Stale"
+            return "已过期"
         case .networkFailed:
-            return "Failed"
+            return "失败"
         case .authRequired:
-            return "Failed"
+            return "失败"
         case .parseFailed:
-            return "Failed"
+            return "失败"
         case .noSnapshot:
-            return "Not connected"
+            return "未连接"
         case .demoMode:
-            return "Demo mode"
+            return "演示模式"
         case .idle:
-            return "Idle"
+            return "空闲"
         }
     }
 
@@ -150,6 +150,7 @@ enum StatusPopoverFormatting {
     }
 
     private static func todayLabel(for locale: Locale) -> String {
-        locale.identifier.lowercased().hasPrefix("zh") ? "今天" : "Today"
+        _ = locale
+        return "今天"
     }
 }

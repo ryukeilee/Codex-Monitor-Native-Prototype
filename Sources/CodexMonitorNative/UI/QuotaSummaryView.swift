@@ -4,24 +4,26 @@ struct QuotaSummaryView: View {
     @ObservedObject var appState: AppState
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            quotaRow(title: "5h Recovery", value: fiveHourRecoveryText)
-            quotaRow(title: "Recovers In", value: recoveryCountdownText)
-            quotaRow(title: "Decision", value: decisionText)
-            detailLine(title: "Advice", value: recommendationText)
-            quotaRow(title: "Weekly Quota", value: weeklyQuotaText)
-            quotaRow(title: "5 Hour Quota", value: fiveHourQuotaText)
-
-            HStack(spacing: 4) {
-                Text(updatedText)
-                Text("·")
-                Text(sourceStatusText)
+        GroupBox {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("\(decisionText) · \(freshnessText)")
+                Text("5小时额度 \(fiveHourQuotaText) · 周额度 \(weeklyQuotaText)")
+                Text("恢复 \(fiveHourRecoveryText) · 还需 \(recoveryCountdownText)")
+                Text("建议 \(recommendationText)")
+                    .foregroundStyle(.secondary)
+                    .fontWeight(.medium)
             }
-            .font(.caption2)
-            .foregroundStyle(.tertiary)
-            .lineLimit(1)
-            .minimumScaleFactor(0.85)
+            .font(.subheadline)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    private var decisionText: String {
+        appState.quotaDecision.level.rawValue
+    }
+
+    private var freshnessText: String {
+        StatusPopoverFormatting.titleSummary(for: appState.status)
     }
 
     // MARK: - Quota display
@@ -34,9 +36,9 @@ struct QuotaSummaryView: View {
             }
             return "--"
         case .noSnapshot, .idle:
-            return "Not Connected"
+            return "--"
         case .demoMode:
-            return "Demo"
+            return "演示"
         }
     }
 
@@ -48,24 +50,10 @@ struct QuotaSummaryView: View {
             }
             return "--"
         case .noSnapshot, .idle:
-            return "Not Connected"
+            return "--"
         case .demoMode:
-            return "Demo"
+            return "演示"
         }
-    }
-
-    private var updatedText: String {
-        StatusPopoverFormatting.updatedLine(
-            lastSuccess: appState.lastSuccessAt,
-            lastAttempt: appState.lastAttemptAt
-        )
-    }
-
-    private var sourceStatusText: String {
-        StatusPopoverFormatting.sourceStatusLine(
-            dataSource: appState.dataSource,
-            status: appState.status
-        )
     }
 
     private var fiveHourRecoveryText: String {
@@ -80,35 +68,7 @@ struct QuotaSummaryView: View {
         StatusPopoverFormatting.relativeRecoveryLine(for: appState.effectiveFiveHourResetAt)
     }
 
-    private var decisionText: String {
-        appState.quotaDecision.level.rawValue
-    }
-
     private var recommendationText: String {
         appState.quotaDecision.recommendation
-    }
-
-    private func quotaRow(title: String, value: String) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(title)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-            Spacer()
-            Text(value)
-                .font(.body.weight(.semibold))
-                .monospacedDigit()
-        }
-    }
-
-    private func detailLine(title: String, value: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Text(title)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .frame(width: 78, alignment: .leading)
-            Text(value)
-                .font(.subheadline.weight(.medium))
-                .multilineTextAlignment(.leading)
-        }
     }
 }
