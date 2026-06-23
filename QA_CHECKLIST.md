@@ -1,4 +1,4 @@
-# Codex Monitor Native Prototype QA Checklist
+# Codex Monitor Native QA Checklist
 
 This checklist separates what is already proven by automated verification from
 the final macOS behaviors that should be visually confirmed on a real desktop.
@@ -12,7 +12,7 @@ the final macOS behaviors that should be visually confirmed on a real desktop.
 - Clicking the status item again closes the popover.
 - The popover displays weekly quota, 5 hour quota, last refresh time, and status.
 - Manual refresh succeeds and updates snapshot data.
-- Forced refresh failure preserves the last successful snapshot and shows `Refresh Failed`.
+- Forced refresh failure preserves the last successful snapshot and shows the current failure state text.
 - Snapshot persistence restores the latest successful snapshot across relaunches.
 - Scheduler wiring fires periodic refresh ticks.
 - Wake observer wiring responds to wake notifications.

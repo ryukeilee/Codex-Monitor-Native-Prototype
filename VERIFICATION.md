@@ -12,7 +12,7 @@ swift test
 
 ## Automated Results
 
-- `swift test` passed with 5 tests.
+- `swift test` is the primary regression command for the current Swift Package app.
 - Live accessibility scripting confirmed the menu bar item text (`72%`, then restored `71%` from snapshot).
 - Live accessibility scripting plus telemetry confirmed:
   - status item click opens popover

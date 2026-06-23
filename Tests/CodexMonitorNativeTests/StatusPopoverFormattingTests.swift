@@ -56,6 +56,26 @@ final class StatusPopoverFormattingTests: XCTestCase {
         XCTAssertEqual(formatted, "更新 今天 12:40")
     }
 
+    func testUpdatedLineKeepsAttemptWhenDifferentFromSuccess() {
+        let calendar = Calendar(identifier: .gregorian)
+        let timeZone = TimeZone(secondsFromGMT: 0)!
+        let locale = Locale(identifier: "en_US")
+        let now = makeDate("2026-06-19T12:50:00Z")
+        let lastSuccess = makeDate("2026-06-19T12:40:00Z")
+        let lastAttempt = makeDate("2026-06-19T12:48:00Z")
+
+        let formatted = StatusPopoverFormatting.updatedLine(
+            lastSuccess: lastSuccess,
+            lastAttempt: lastAttempt,
+            now: now,
+            calendar: calendar.setting(timeZone: timeZone),
+            locale: locale,
+            timeZone: timeZone
+        )
+
+        XCTAssertEqual(formatted, "更新 今天 12:40 · 尝试 今天 12:48")
+    }
+
     func testSourceStatusLineUsesCompactPrimaryCopy() {
         XCTAssertEqual(
             StatusPopoverFormatting.sourceStatusLine(dataSource: .real, status: .success),
@@ -69,6 +89,43 @@ final class StatusPopoverFormattingTests: XCTestCase {
             StatusPopoverFormatting.sourceStatusLine(dataSource: .mock, status: .demoMode),
             "演示数据 · 演示模式"
         )
+    }
+
+    func testSourceStatusLineDistinguishesFailureStates() {
+        XCTAssertEqual(
+            StatusPopoverFormatting.sourceStatusLine(dataSource: .real, status: .networkFailed),
+            "真实数据 · 网络异常"
+        )
+        XCTAssertEqual(
+            StatusPopoverFormatting.sourceStatusLine(dataSource: .real, status: .authRequired),
+            "真实数据 · 需要登录"
+        )
+        XCTAssertEqual(
+            StatusPopoverFormatting.sourceStatusLine(dataSource: .real, status: .parseFailed),
+            "真实数据 · 数据异常"
+        )
+    }
+
+    func testCredibilityLineCombinesUpdateSourceAndStatus() {
+        let calendar = Calendar(identifier: .gregorian)
+        let timeZone = TimeZone(secondsFromGMT: 0)!
+        let locale = Locale(identifier: "en_US")
+        let now = makeDate("2026-06-19T12:50:00Z")
+        let lastSuccess = makeDate("2026-06-19T12:40:00Z")
+        let lastAttempt = makeDate("2026-06-19T12:48:00Z")
+
+        let formatted = StatusPopoverFormatting.credibilityLine(
+            lastSuccess: lastSuccess,
+            lastAttempt: lastAttempt,
+            dataSource: .real,
+            status: .success,
+            now: now,
+            calendar: calendar.setting(timeZone: timeZone),
+            locale: locale,
+            timeZone: timeZone
+        )
+
+        XCTAssertEqual(formatted, "更新 今天 12:40 · 尝试 今天 12:48 · 真实数据 · 最新")
     }
 
     func testTitleSummaryMatchesStatusState() {

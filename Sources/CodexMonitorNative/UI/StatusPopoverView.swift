@@ -13,6 +13,11 @@ struct StatusPopoverView: View {
                     .font(.headline.weight(.semibold))
                     .lineLimit(1)
 
+                Text(credibilityLine)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+
                 if let refreshError = appState.lastErrorSummary {
                     Text(refreshError)
                         .font(.caption2)
@@ -88,6 +93,15 @@ struct StatusPopoverView: View {
                 AppLogger.settings.info("Launch at login toggle changed from UI to \(newValue, privacy: .public)")
                 launchAtLoginManager.setLaunchAtLogin(newValue)
             }
+        )
+    }
+
+    private var credibilityLine: String {
+        StatusPopoverFormatting.credibilityLine(
+            lastSuccess: appState.lastSuccessAt,
+            lastAttempt: appState.lastAttemptAt,
+            dataSource: appState.dataSource,
+            status: appState.displayStatus
         )
     }
 }

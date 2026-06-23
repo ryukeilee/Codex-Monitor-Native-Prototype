@@ -78,6 +78,28 @@ enum StatusPopoverFormatting {
         "\(sourceLabel(for: dataSource)) · \(statusLabel(for: status))"
     }
 
+    static func credibilityLine(
+        lastSuccess: Date?,
+        lastAttempt: Date?,
+        dataSource: QuotaDataSource,
+        status: QuotaRefreshStatus,
+        now: Date = .now,
+        calendar: Calendar = .current,
+        locale: Locale = .current,
+        timeZone: TimeZone = .current
+    ) -> String {
+        let updated = updatedLine(
+            lastSuccess: lastSuccess,
+            lastAttempt: lastAttempt,
+            now: now,
+            calendar: calendar,
+            locale: locale,
+            timeZone: timeZone
+        )
+        let sourceStatus = sourceStatusLine(dataSource: dataSource, status: status)
+        return "\(updated) · \(sourceStatus)"
+    }
+
     static func relativeRecoveryLine(
         for date: Date?,
         now: Date = .now
@@ -123,11 +145,11 @@ enum StatusPopoverFormatting {
         case .stale:
             return "已过期"
         case .networkFailed:
-            return "失败"
+            return "网络异常"
         case .authRequired:
-            return "失败"
+            return "需要登录"
         case .parseFailed:
-            return "失败"
+            return "数据异常"
         case .noSnapshot:
             return "未连接"
         case .demoMode:
