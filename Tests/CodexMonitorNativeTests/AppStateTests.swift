@@ -24,6 +24,7 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(appState.status, .success)
         XCTAssertEqual(appState.dataSource, .real)
         XCTAssertEqual(appState.failureCount, 0)
+        XCTAssertEqual(appState.realQuotaHealth, RealQuotaHealthDiagnostic(kind: .requestSucceeded, isUsingCachedSnapshot: false))
         XCTAssertEqual(store.loadSnapshot(), refreshed)
     }
 
@@ -59,7 +60,88 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(appState.status, .networkFailed)
         XCTAssertEqual(appState.dataSource, .real)
         XCTAssertEqual(appState.failureCount, 1)
+        XCTAssertEqual(appState.realQuotaHealth, RealQuotaHealthDiagnostic(kind: .rpcRejected, isUsingCachedSnapshot: true))
         XCTAssertEqual(store.loadSnapshot(), initial)
+    }
+
+    func testAuthFailureShowsLoginRequiredAndPreservesCachedSnapshot() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.auth.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let initial = QuotaSnapshot(
+            weeklyQuotaPercent: 72, fiveHourQuotaPercent: 69, refreshedAt: .distantPast,
+            dataSource: .real
+        )
+        store.saveSnapshot(initial)
+
+        let appState = AppState(
+            snapshotStore: store,
+            refreshService: MockRefreshService(error: RealQuotaError.rpcError("Unauthorized: please login"))
+        )
+
+        await appState.refreshNow(trigger: .manual)
+
+        XCTAssertEqual(appState.snapshot, initial)
+        XCTAssertEqual(appState.status, .authRequired)
+        XCTAssertEqual(appState.realQuotaHealth, RealQuotaHealthDiagnostic(kind: .loginRequired, isUsingCachedSnapshot: true))
+        XCTAssertEqual(appState.lastErrorSummary, "需要重新登录 Codex")
+    }
+
+    func testParseFailureShowsResponseInvalidAndPreservesCachedSnapshot() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.parse.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let initial = QuotaSnapshot(
+            weeklyQuotaPercent: 72, fiveHourQuotaPercent: 69, refreshedAt: .distantPast,
+            dataSource: .real
+        )
+        store.saveSnapshot(initial)
+
+        let appState = AppState(
+            snapshotStore: store,
+            refreshService: MockRefreshService(error: RealQuotaError.parseFailed("missing rateLimitsByLimitId"))
+        )
+
+        await appState.refreshNow(trigger: .manual)
+
+        XCTAssertEqual(appState.snapshot, initial)
+        XCTAssertEqual(appState.status, .parseFailed)
+        XCTAssertEqual(appState.realQuotaHealth, RealQuotaHealthDiagnostic(kind: .responseInvalid, isUsingCachedSnapshot: true))
+        XCTAssertEqual(appState.lastErrorSummary, "响应不可解析")
+    }
+
+    func testCodexNotFoundKeepsCachedSnapshotVisible() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.codexMissing.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let initial = QuotaSnapshot(
+            weeklyQuotaPercent: 72, fiveHourQuotaPercent: 69, refreshedAt: .distantPast,
+            dataSource: .real
+        )
+        store.saveSnapshot(initial)
+
+        let appState = AppState(
+            snapshotStore: store,
+            refreshService: MockRefreshService(error: RealQuotaError.codexNotFound)
+        )
+
+        await appState.refreshNow(trigger: .manual)
+
+        XCTAssertEqual(appState.snapshot, initial)
+        XCTAssertEqual(appState.status, .networkFailed)
+        XCTAssertEqual(appState.realQuotaHealth, RealQuotaHealthDiagnostic(kind: .executableMissing, isUsingCachedSnapshot: true))
+        XCTAssertEqual(appState.lastErrorSummary, "未找到 codex 可执行文件")
+    }
+
+    func testRestoredRealSnapshotWaitsForFirstRequestWhileShowingCachedData() {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.cachedHealth.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 64, fiveHourQuotaPercent: 52, refreshedAt: .now,
+            dataSource: .real
+        )
+        store.saveSnapshot(snapshot)
+
+        let appState = AppState(snapshotStore: store, refreshService: MockRefreshService(snapshot: snapshot))
+
+        XCTAssertEqual(appState.realQuotaHealth, RealQuotaHealthDiagnostic(kind: .waitingForFirstRequest, isUsingCachedSnapshot: true))
     }
 
     func testSnapshotStoreRestoresLatestSuccessfulSnapshotAcrossInstances() {
@@ -207,8 +289,17 @@ final class AppStateTests: XCTestCase {
 
 private struct MockRefreshService: QuotaRefreshing {
     let snapshot: QuotaSnapshot?
+    let error: Error?
+
+    init(snapshot: QuotaSnapshot? = nil, error: Error? = nil) {
+        self.snapshot = snapshot
+        self.error = error
+    }
 
     func refresh(basedOn currentSnapshot: QuotaSnapshot) async throws -> QuotaSnapshot {
+        if let error {
+            throw error
+        }
         guard let snapshot else {
             throw MockRefreshError.simulatedFailure
         }

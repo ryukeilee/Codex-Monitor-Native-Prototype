@@ -19,6 +19,10 @@ final class AppState: ObservableObject {
     @Published private(set) var lastSuccessAt: Date?
     @Published private(set) var failureCount: Int = 0
     @Published private(set) var lastErrorSummary: String?
+    @Published private(set) var realQuotaHealth = RealQuotaHealthDiagnostic(
+        kind: .waitingForFirstRequest,
+        isUsingCachedSnapshot: false
+    )
 
     // MARK: - Backoff
 
@@ -62,16 +66,28 @@ final class AppState: ObservableObject {
                 snapshot = stored
                 status = stored.isFresh(referenceDate: .now, staleAfterInterval: staleAfterInterval) ? .success : .stale
                 lastSuccessAt = stored.refreshedAt
+                realQuotaHealth = RealQuotaHealthDiagnostic(
+                    kind: .waitingForFirstRequest,
+                    isUsingCachedSnapshot: true
+                )
                 AppLogger.snapshot.info("Restored real snapshot: weekly=\(stored.weeklyQuotaPercent)% fiveHour=\(stored.fiveHourQuotaPercent)%")
                 scheduleFreshnessCheck()
             } else {
                 snapshot = stored
                 status = .demoMode
+                realQuotaHealth = RealQuotaHealthDiagnostic(
+                    kind: .waitingForFirstRequest,
+                    isUsingCachedSnapshot: false
+                )
                 AppLogger.snapshot.info("Restored mock snapshot (no real data yet)")
             }
         } else {
             snapshot = .notConnected
             status = .noSnapshot
+            realQuotaHealth = RealQuotaHealthDiagnostic(
+                kind: .waitingForFirstRequest,
+                isUsingCachedSnapshot: false
+            )
             AppLogger.snapshot.info("No persisted snapshot; starting in not-connected state")
         }
 
@@ -140,6 +156,10 @@ final class AppState: ObservableObject {
         status = .refreshing
         lastAttemptAt = .now
         freshnessTask?.cancel()
+        realQuotaHealth = RealQuotaHealthDiagnostic(
+            kind: .requestInProgress,
+            isUsingCachedSnapshot: latestRealSnapshot != nil
+        )
 
         let baselineSnapshot = latestRealSnapshot ?? snapshot
         AppLogger.refresh.info("Starting \(triggerName, privacy: .public) refresh (baseline source=\(baselineSnapshot.dataSource.rawValue, privacy: .public))")
@@ -156,6 +176,10 @@ final class AppState: ObservableObject {
                 lastErrorSummary = nil
                 snapshot = refreshed
                 status = .success
+                realQuotaHealth = RealQuotaHealthDiagnostic(
+                    kind: .requestSucceeded,
+                    isUsingCachedSnapshot: false
+                )
                 backoffInterval = defaultInterval
                 snapshotStore.saveSnapshot(refreshed)
                 scheduleFreshnessCheck()
@@ -165,6 +189,10 @@ final class AppState: ObservableObject {
                 snapshot = refreshed
                 status = .demoMode
                 lastErrorSummary = nil
+                realQuotaHealth = RealQuotaHealthDiagnostic(
+                    kind: .waitingForFirstRequest,
+                    isUsingCachedSnapshot: false
+                )
                 AppLogger.refresh.info("Mock refresh succeeded")
             }
         } catch {
@@ -176,6 +204,7 @@ final class AppState: ObservableObject {
             lastErrorSummary = safeErrorMessage(from: error)
             status = classifiedStatus
             freshnessTask?.cancel()
+            realQuotaHealth = healthDiagnostic(for: error)
 
             // Always keep the last successful real snapshot visible
             if let real = latestRealSnapshot {
@@ -195,6 +224,9 @@ final class AppState: ObservableObject {
 
     private func classifyError(_ error: Error) -> QuotaRefreshStatus {
         if let realError = error as? RealQuotaError {
+            if case .codexNotFound = realError, latestRealSnapshot != nil {
+                return .networkFailed
+            }
             return realError.refreshStatus
         }
 
@@ -211,6 +243,49 @@ final class AppState: ObservableObject {
         }
 
         return .networkFailed
+    }
+
+    private func healthDiagnostic(for error: Error) -> RealQuotaHealthDiagnostic {
+        let usingCachedSnapshot = latestRealSnapshot != nil
+
+        if let realError = error as? RealQuotaError {
+            return RealQuotaHealthDiagnostic(
+                kind: realError.healthKind,
+                isUsingCachedSnapshot: usingCachedSnapshot
+            )
+        }
+
+        if error is MockRefreshError {
+            return RealQuotaHealthDiagnostic(
+                kind: .rpcRejected,
+                isUsingCachedSnapshot: usingCachedSnapshot
+            )
+        }
+
+        let message = error.localizedDescription.lowercased()
+        if message.contains("auth") || message.contains("401") || message.contains("403") || message.contains("login") {
+            return RealQuotaHealthDiagnostic(
+                kind: .loginRequired,
+                isUsingCachedSnapshot: usingCachedSnapshot
+            )
+        }
+        if message.contains("timeout") || message.contains("timed out") {
+            return RealQuotaHealthDiagnostic(
+                kind: .requestTimedOut,
+                isUsingCachedSnapshot: usingCachedSnapshot
+            )
+        }
+        if message.contains("parse") || message.contains("decode") || message.contains("malformed") {
+            return RealQuotaHealthDiagnostic(
+                kind: .responseInvalid,
+                isUsingCachedSnapshot: usingCachedSnapshot
+            )
+        }
+
+        return RealQuotaHealthDiagnostic(
+            kind: .rpcRejected,
+            isUsingCachedSnapshot: usingCachedSnapshot
+        )
     }
 
     // MARK: - Backoff
@@ -249,17 +324,23 @@ final class AppState: ObservableObject {
     private func shortMessage(for error: RealQuotaError) -> String {
         switch error {
         case .codexNotFound:
-            return "未找到数据源"
-        case .spawnFailed, .handshakeFailed, .requestTimedOut, .processExited:
-            return "数据源不可达"
+            return "未找到 codex 可执行文件"
+        case .spawnFailed:
+            return "启动 codex 失败"
+        case .handshakeFailed:
+            return "Codex 握手失败"
+        case .requestTimedOut:
+            return "请求超时"
+        case .processExited:
+            return "Codex 提前退出"
         case .rpcError(let message):
             let lower = message.lowercased()
             if lower.contains("auth") || lower.contains("unauthorized") || lower.contains("login") {
-                return "登录会话不可用"
+                return "需要重新登录 Codex"
             }
-            return "数据源拒绝请求"
+            return "RPC 请求失败"
         case .parseFailed, .noUsableRateLimits:
-            return "数据源返回异常"
+            return "响应不可解析"
         }
     }
 

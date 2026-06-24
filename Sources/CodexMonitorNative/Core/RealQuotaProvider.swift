@@ -48,6 +48,25 @@ enum RealQuotaError: LocalizedError {
             return .parseFailed
         }
     }
+
+    var healthKind: RealQuotaHealthDiagnostic.Kind {
+        switch self {
+        case .codexNotFound:
+            return .executableMissing
+        case .spawnFailed, .handshakeFailed, .processExited:
+            return .codexUnavailable
+        case .requestTimedOut:
+            return .requestTimedOut
+        case .rpcError(let message):
+            let lower = message.lowercased()
+            if lower.contains("auth") || lower.contains("unauthorized") || lower.contains("login") {
+                return .loginRequired
+            }
+            return .rpcRejected
+        case .parseFailed, .noUsableRateLimits:
+            return .responseInvalid
+        }
+    }
 }
 
 actor CodexRPCClient {

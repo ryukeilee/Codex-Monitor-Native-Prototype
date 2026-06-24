@@ -18,6 +18,11 @@ struct StatusPopoverView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
 
+                Text(realQuotaHealthLine)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+
                 if let refreshError = appState.lastErrorSummary {
                     Text(refreshError)
                         .font(.caption2)
@@ -103,5 +108,9 @@ struct StatusPopoverView: View {
             dataSource: appState.dataSource,
             status: appState.displayStatus
         )
+    }
+
+    private var realQuotaHealthLine: String {
+        StatusPopoverFormatting.realQuotaHealthLine(appState.realQuotaHealth)
     }
 }

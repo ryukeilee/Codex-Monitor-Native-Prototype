@@ -100,6 +100,35 @@ enum StatusPopoverFormatting {
         return "\(updated) · \(sourceStatus)"
     }
 
+    static func realQuotaHealthLine(_ diagnostic: RealQuotaHealthDiagnostic) -> String {
+        let suffix = fallbackSuffix(isUsingCachedSnapshot: diagnostic.isUsingCachedSnapshot)
+
+        switch diagnostic.kind {
+        case .waitingForFirstRequest:
+            return diagnostic.isUsingCachedSnapshot
+                ? "真实链路：尚未发起请求，显示上次成功数据"
+                : "真实链路：等待首次真实请求"
+        case .requestInProgress:
+            return diagnostic.isUsingCachedSnapshot
+                ? "真实链路：正在请求 Codex，暂时显示上次成功数据"
+                : "真实链路：正在请求 Codex"
+        case .requestSucceeded:
+            return "真实链路：Codex 可用，请求成功"
+        case .executableMissing:
+            return "真实链路：未找到 codex 可执行文件\(suffix)"
+        case .codexUnavailable:
+            return "真实链路：Codex 不可用\(suffix)"
+        case .requestTimedOut:
+            return "真实链路：请求超时\(suffix)"
+        case .loginRequired:
+            return "真实链路：需要登录\(suffix)"
+        case .responseInvalid:
+            return "真实链路：响应不可解析\(suffix)"
+        case .rpcRejected:
+            return "真实链路：RPC 请求失败\(suffix)"
+        }
+    }
+
     static func relativeRecoveryLine(
         for date: Date?,
         now: Date = .now
@@ -174,5 +203,9 @@ enum StatusPopoverFormatting {
     private static func todayLabel(for locale: Locale) -> String {
         _ = locale
         return "今天"
+    }
+
+    private static func fallbackSuffix(isUsingCachedSnapshot: Bool) -> String {
+        isUsingCachedSnapshot ? "，显示上次成功数据" : "，当前无可用快照"
     }
 }

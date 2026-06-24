@@ -1,61 +1,90 @@
 # Codex Monitor Native QA Checklist
 
-This checklist separates what is already proven by automated verification from
-the final macOS behaviors that should be visually confirmed on a real desktop.
+本清单用于发布前最后收口。
 
-## Already Proven by Automation
+原则：
 
-- App launches as a menu bar style app with `LSUIElement = true`.
-- The running process is background-only and has no regular windows.
-- The menu bar status item shows a quota percentage and updates from persisted data.
-- Clicking the status item opens the popover.
-- Clicking the status item again closes the popover.
-- The popover displays weekly quota, 5 hour quota, last refresh time, and status.
-- Manual refresh succeeds and updates snapshot data.
-- Forced refresh failure preserves the last successful snapshot and shows the current failure state text.
-- Snapshot persistence restores the latest successful snapshot across relaunches.
-- Scheduler wiring fires periodic refresh ticks.
-- Wake observer wiring responds to wake notifications.
+- 先看自动证据，再做真实桌面行为检查。
+- 没有实际做过的人工步骤不要勾选。
+- 如果发现失败，优先记录“看到什么”和“预期什么不一致”。
 
-## Manual macOS Verification
+## A. 自动验证门槛
 
-### 1. Full-Screen Behavior
+- [ ] `swift build -c debug` 通过
+- [ ] `swift test` 通过
+- [ ] `./script/build_and_run.sh --verify` 通过
 
-1. Launch the app with `./script/build_and_run.sh`.
-2. Open any regular macOS app such as TextEdit or Safari.
-3. Put that app into full-screen mode.
-4. Open the menu bar item from the full-screen Space.
-5. Confirm the popover appears as a transient menu bar panel rather than a persistent floating window.
-6. Click outside the popover inside the full-screen app.
-7. Confirm the popover closes immediately.
-8. Re-open the popover and then switch focus back to the full-screen app.
-9. Confirm the full-screen app remains the primary surface and the popover does not stay stuck above it.
+## B. 核心行为核对
 
-Expected result:
-The popover behaves like a normal menu bar transient panel and does not remain as a persistent overlay on top of the full-screen app.
+### 1. 菜单栏显示策略
 
-### 2. Idle Resource Spot Check
+- [ ] 有真实快照时，菜单栏只显示周额度百分比，例如 `71%`
+- [ ] 菜单栏不显示 5 小时额度
+- [ ] 无真实快照或演示模式时，菜单栏显示 `--%`
 
-1. Launch the app with `./script/build_and_run.sh`.
-2. Leave the popover closed for at least 10 seconds.
-3. Run:
+### 2. Popover 顶部状态
+
+- [ ] 显示更新时间
+- [ ] 当最近尝试时间与成功时间不同，显示 `尝试 ...`
+- [ ] 显示数据来源与刷新状态
+- [ ] 显示真实链路健康诊断
+
+### 3. 手动刷新
+
+- [ ] Popover 中存在“刷新”按钮
+- [ ] 刷新期间按钮进入进行中状态且不可重复触发
+- [ ] 刷新成功后状态更新
+- [ ] 刷新失败后保留上次成功快照
+
+### 4. 真实 / 缓存 / 失败路径
+
+- [ ] 真实成功时，Popover 可显示真实数据与成功诊断
+- [ ] 有真实缓存后再失败时，Popover 明确显示“上次成功数据”仍在使用
+- [ ] 无真实快照时，不把占位状态显示成真实额度
+- [ ] 真实链路错误至少能区分：
+  - [ ] 需要登录
+  - [ ] 响应不可解析
+  - [ ] 通用 RPC / Codex 不可用
+
+### 5. 调度与系统事件
+
+- [ ] 启动后会自动发起刷新
+- [ ] 定时刷新仍工作
+- [ ] 连续失败后退避仍工作
+- [ ] 唤醒后会再次尝试刷新
+
+## C. 人工 macOS 行为
+
+### 1. Full-Screen Space
+
+- [ ] 在全屏 Space 中可以打开 Popover
+- [ ] 点击外部或失焦后 Popover 会关闭
+- [ ] Popover 不会卡成持续悬浮层
+
+### 2. Sleep / Wake
+
+- [ ] 睡眠唤醒后会触发一次刷新尝试
+- [ ] 若唤醒后的刷新失败，仍显示上次成功快照
+- [ ] 唤醒后的失败类型能在 Popover 顶部读出来
+
+### 3. 空闲资源抽查
+
+- [ ] 空闲时 CPU 接近 `0.0`
+- [ ] RSS 维持在原生小工具可接受范围
+
+建议命令：
 
 ```bash
 ps -axo pid,%cpu,rss,etime,comm | rg 'CodexMonitorNative.app/Contents/MacOS/CodexMonitorNative|CodexMonitorNative$'
 ```
 
-Expected result:
-CPU should be near `0.0` when idle, and memory should stay modest for a native utility-style app.
+## D. 记录区
 
-### 3. Sleep / Wake Spot Check
+记录本次发布前检查：
 
-1. Launch the app.
-2. Put the Mac to sleep and wake it again.
-3. Open the menu bar popover or stream logs with:
-
-```bash
-./script/build_and_run.sh --telemetry
-```
-
-Expected result:
-The app should attempt one refresh after wake and continue showing the last successful snapshot if that refresh fails.
+- 日期：
+- 检查人：
+- 自动验证结果：
+- Full-Screen Space 结果：
+- Sleep / Wake 结果：
+- 发现的问题：

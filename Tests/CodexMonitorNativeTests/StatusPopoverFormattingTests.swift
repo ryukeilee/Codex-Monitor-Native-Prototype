@@ -128,6 +128,30 @@ final class StatusPopoverFormattingTests: XCTestCase {
         XCTAssertEqual(formatted, "更新 今天 12:40 · 尝试 今天 12:48 · 真实数据 · 最新")
     }
 
+    func testRealQuotaHealthLineShowsSuccess() {
+        let formatted = StatusPopoverFormatting.realQuotaHealthLine(
+            RealQuotaHealthDiagnostic(kind: .requestSucceeded, isUsingCachedSnapshot: false)
+        )
+
+        XCTAssertEqual(formatted, "真实链路：Codex 可用，请求成功")
+    }
+
+    func testRealQuotaHealthLineShowsLoginFailureWithCachedSnapshot() {
+        let formatted = StatusPopoverFormatting.realQuotaHealthLine(
+            RealQuotaHealthDiagnostic(kind: .loginRequired, isUsingCachedSnapshot: true)
+        )
+
+        XCTAssertEqual(formatted, "真实链路：需要登录，显示上次成功数据")
+    }
+
+    func testRealQuotaHealthLineShowsParseFailureWithoutCachedSnapshot() {
+        let formatted = StatusPopoverFormatting.realQuotaHealthLine(
+            RealQuotaHealthDiagnostic(kind: .responseInvalid, isUsingCachedSnapshot: false)
+        )
+
+        XCTAssertEqual(formatted, "真实链路：响应不可解析，当前无可用快照")
+    }
+
     func testTitleSummaryMatchesStatusState() {
         XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .success), "数据已更新")
         XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .stale), "数据已过期")
