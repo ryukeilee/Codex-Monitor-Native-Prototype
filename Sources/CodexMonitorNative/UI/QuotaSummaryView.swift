@@ -5,29 +5,39 @@ struct QuotaSummaryView: View {
 
     var body: some View {
         GroupBox {
-            VStack(alignment: .leading, spacing: 5) {
-                Text("\(decisionText) · \(freshnessText)")
-                Text(quotaSummaryText)
-                Text("恢复 \(fiveHourRecoveryText) · 还需 \(recoveryCountdownText)")
-                Text("建议 \(recommendationText)")
-                    .foregroundStyle(.secondary)
-                    .fontWeight(.medium)
+            VStack(alignment: .leading, spacing: 12) {
+                Text(freshnessText)
+                    .font(.headline.weight(.semibold))
+
+                HStack(alignment: .top, spacing: 16) {
+                    metricBlock(title: "5小时额度", value: fiveHourQuotaText)
+                    metricBlock(title: "周额度", value: weeklyQuotaText)
+                }
+
+                HStack(alignment: .top, spacing: 16) {
+                    metricBlock(title: "恢复时间", value: fiveHourRecoveryText)
+                    metricBlock(title: "剩余", value: recoveryCountdownText)
+                }
             }
-            .font(.subheadline)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-    }
-
-    private var decisionText: String {
-        appState.quotaDecision.level.rawValue
     }
 
     private var freshnessText: String {
         StatusPopoverFormatting.titleSummary(for: appState.displayStatus)
     }
 
-    private var quotaSummaryText: String {
-        StatusPopoverFormatting.quotaSummaryLine(
+    private var fiveHourQuotaText: String {
+        StatusPopoverFormatting.quotaValueText(
+            for: .fiveHour,
+            snapshot: appState.snapshot,
+            status: appState.displayStatus
+        )
+    }
+
+    private var weeklyQuotaText: String {
+        StatusPopoverFormatting.quotaValueText(
+            for: .weekly,
             snapshot: appState.snapshot,
             status: appState.displayStatus
         )
@@ -41,22 +51,24 @@ struct QuotaSummaryView: View {
         recoveryParts.remainingText
     }
 
-    private var recommendationText: String {
-        appState.quotaDecision.recommendation
-    }
-
     private var recoveryParts: (resetText: String, remainingText: String) {
-        let line = StatusPopoverFormatting.recoverySummaryLine(
+        let details = StatusPopoverFormatting.recoveryDetails(
             resetAt: appState.effectiveFiveHourResetAt,
             status: appState.displayStatus
         )
-        let parts = line.components(separatedBy: " · ")
-        guard parts.count == 2 else {
-            return ("--", "--")
-        }
+        return (details.resetText, details.remainingText)
+    }
 
-        let resetText = parts[0].replacingOccurrences(of: "恢复 ", with: "")
-        let remainingText = parts[1].replacingOccurrences(of: "还需 ", with: "")
-        return (resetText, remainingText)
+    @ViewBuilder
+    private func metricBlock(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

@@ -153,9 +153,9 @@ final class StatusPopoverFormattingTests: XCTestCase {
     }
 
     func testTitleSummaryMatchesStatusState() {
-        XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .success), "数据已更新")
-        XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .stale), "数据已过期")
-        XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .networkFailed), "上次刷新失败")
+        XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .success), "已更新")
+        XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .stale), "数据过期")
+        XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .networkFailed), "网络异常")
     }
 
     func testRelativeRecoveryLineShowsRemainingDuration() {
@@ -262,6 +262,22 @@ final class StatusPopoverFormattingTests: XCTestCase {
         )
 
         XCTAssertEqual(formatted, "恢复 -- · 还需 --")
+    }
+
+    func testRecoveryDetailsExposeResetAndRemainingSeparately() {
+        let now = makeDate("2026-06-19T12:40:00Z")
+        let resetAt = makeDate("2026-06-19T14:10:00Z")
+
+        let details = StatusPopoverFormatting.recoveryDetails(
+            resetAt: resetAt,
+            status: .success,
+            now: now,
+            calendar: Calendar(identifier: .gregorian).setting(timeZone: TimeZone(secondsFromGMT: 0)!),
+            locale: Locale(identifier: "en_US"),
+            timeZone: TimeZone(secondsFromGMT: 0)!
+        )
+
+        XCTAssertEqual(details, .init(resetText: "今天 14:10", remainingText: "1小时30分"))
     }
 
     private func makeDate(_ iso8601: String) -> Date {

@@ -1,9 +1,14 @@
 import Foundation
 
 enum StatusPopoverFormatting {
-    private enum QuotaMetric {
+    enum QuotaMetric {
         case fiveHour
         case weekly
+    }
+
+    struct RecoveryDetails: Equatable {
+        let resetText: String
+        let remainingText: String
     }
 
     static func shortTimestamp(
@@ -63,19 +68,23 @@ enum StatusPopoverFormatting {
     static func titleSummary(for status: QuotaRefreshStatus) -> String {
         switch status {
         case .success:
-            return "数据已更新"
+            return "已更新"
         case .refreshing:
-            return "正在更新"
+            return "正在刷新"
         case .stale:
-            return "数据已过期"
-        case .networkFailed, .authRequired, .parseFailed:
-            return "上次刷新失败"
+            return "数据过期"
+        case .networkFailed:
+            return "网络异常"
+        case .authRequired:
+            return "需要登录"
+        case .parseFailed:
+            return "数据异常"
         case .noSnapshot:
-            return "等待首次同步"
+            return "等待同步"
         case .demoMode:
             return "演示数据"
         case .idle:
-            return "可继续"
+            return "等待刷新"
         }
     }
 
@@ -165,7 +174,15 @@ enum StatusPopoverFormatting {
         snapshot: QuotaSnapshot,
         status: QuotaRefreshStatus
     ) -> String {
-        "5小时额度 \(quotaText(for: .fiveHour, snapshot: snapshot, status: status)) · 周额度 \(quotaText(for: .weekly, snapshot: snapshot, status: status))"
+        "5小时额度 \(quotaValueText(for: .fiveHour, snapshot: snapshot, status: status)) · 周额度 \(quotaValueText(for: .weekly, snapshot: snapshot, status: status))"
+    }
+
+    static func quotaValueText(
+        for metric: QuotaMetric,
+        snapshot: QuotaSnapshot,
+        status: QuotaRefreshStatus
+    ) -> String {
+        quotaText(for: metric, snapshot: snapshot, status: status)
     }
 
     static func recoverySummaryLine(
@@ -176,8 +193,27 @@ enum StatusPopoverFormatting {
         locale: Locale = .current,
         timeZone: TimeZone = .current
     ) -> String {
+        let details = recoveryDetails(
+            resetAt: resetAt,
+            status: status,
+            now: now,
+            calendar: calendar,
+            locale: locale,
+            timeZone: timeZone
+        )
+        return "恢复 \(details.resetText) · 还需 \(details.remainingText)"
+    }
+
+    static func recoveryDetails(
+        resetAt: Date?,
+        status: QuotaRefreshStatus,
+        now: Date = .now,
+        calendar: Calendar = .current,
+        locale: Locale = .current,
+        timeZone: TimeZone = .current
+    ) -> RecoveryDetails {
         guard showsQuotaValues(for: status), let resetAt else {
-            return "恢复 -- · 还需 --"
+            return RecoveryDetails(resetText: "--", remainingText: "--")
         }
 
         let resetText = shortTimestamp(
@@ -188,7 +224,7 @@ enum StatusPopoverFormatting {
             timeZone: timeZone
         )
         let remainingText = relativeRecoveryLine(for: resetAt, now: now)
-        return "恢复 \(resetText) · 还需 \(remainingText)"
+        return RecoveryDetails(resetText: resetText, remainingText: remainingText)
     }
 
     static func quotaTooltip(

@@ -7,34 +7,19 @@ struct StatusPopoverView: View {
     let onQuit: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Codex Monitor Native")
-                    .font(.headline.weight(.semibold))
-                    .lineLimit(1)
-
-                Text(credibilityLine)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-
-                Text(realQuotaHealthLine)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-
-                if let refreshError = appState.lastErrorSummary {
-                    Text(refreshError)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-            }
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Codex Monitor Native")
+                .font(.headline.weight(.semibold))
+                .lineLimit(1)
 
             QuotaSummaryView(appState: appState)
 
-            Divider()
-                .opacity(0.55)
+            if let supportLine {
+                Text(supportLine)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
 
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 VStack(alignment: .leading, spacing: 1) {
@@ -110,7 +95,29 @@ struct StatusPopoverView: View {
         )
     }
 
-    private var realQuotaHealthLine: String {
-        StatusPopoverFormatting.realQuotaHealthLine(appState.realQuotaHealth)
+    private var supportLine: String? {
+        switch appState.displayStatus {
+        case .refreshing:
+            return "正在刷新，先显示当前快照"
+        case .networkFailed, .authRequired, .parseFailed:
+            if let refreshError = appState.lastErrorSummary {
+                return "\(credibilityLine) · \(refreshError)"
+            }
+            return credibilityLine
+        case .stale:
+            return credibilityLine
+        default:
+            if let refreshError = appState.lastErrorSummary {
+                return refreshError
+            }
+
+            let healthLine = StatusPopoverFormatting.realQuotaHealthLine(appState.realQuotaHealth)
+            switch appState.realQuotaHealth.kind {
+            case .requestSucceeded:
+                return nil
+            default:
+                return healthLine
+            }
+        }
     }
 }
