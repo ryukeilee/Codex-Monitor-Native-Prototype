@@ -176,6 +176,94 @@ final class StatusPopoverFormattingTests: XCTestCase {
         XCTAssertEqual(formatted, "已恢复")
     }
 
+    func testQuotaSummaryLineUsesRealSnapshotForFailureStates() {
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 71,
+            fiveHourQuotaPercent: 64,
+            refreshedAt: .now,
+            dataSource: .real
+        )
+
+        let formatted = StatusPopoverFormatting.quotaSummaryLine(
+            snapshot: snapshot,
+            status: .networkFailed
+        )
+
+        XCTAssertEqual(formatted, "5小时额度 64% · 周额度 71%")
+    }
+
+    func testQuotaTooltipKeepsSameQuotaValuesWhileRefreshing() {
+        let now = makeDate("2026-06-19T12:40:00Z")
+        let resetAt = makeDate("2026-06-19T14:10:00Z")
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 58,
+            fiveHourQuotaPercent: 43,
+            fiveHourResetAt: resetAt,
+            refreshedAt: .now,
+            dataSource: .real
+        )
+
+        let formatted = StatusPopoverFormatting.quotaTooltip(
+            snapshot: snapshot,
+            status: .refreshing,
+            resetAt: resetAt,
+            now: now,
+            calendar: Calendar(identifier: .gregorian).setting(timeZone: TimeZone(secondsFromGMT: 0)!),
+            locale: Locale(identifier: "en_US"),
+            timeZone: TimeZone(secondsFromGMT: 0)!
+        )
+
+        XCTAssertEqual(formatted, "Codex Monitor：5小时额度 43% · 周额度 58% · 恢复 今天 14:10 · 还需 1小时30分 · 正在刷新")
+    }
+
+    func testQuotaTooltipKeepsSameQuotaValuesOnAuthFailure() {
+        let now = makeDate("2026-06-19T12:40:00Z")
+        let resetAt = makeDate("2026-06-19T13:25:00Z")
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 52,
+            fiveHourQuotaPercent: 37,
+            fiveHourResetAt: resetAt,
+            refreshedAt: .now,
+            dataSource: .real
+        )
+
+        let formatted = StatusPopoverFormatting.quotaTooltip(
+            snapshot: snapshot,
+            status: .authRequired,
+            resetAt: resetAt,
+            now: now,
+            calendar: Calendar(identifier: .gregorian).setting(timeZone: TimeZone(secondsFromGMT: 0)!),
+            locale: Locale(identifier: "en_US"),
+            timeZone: TimeZone(secondsFromGMT: 0)!
+        )
+
+        XCTAssertEqual(formatted, "Codex Monitor：5小时额度 37% · 周额度 52% · 恢复 今天 13:25 · 还需 45分 · 需要登录，显示上次数据")
+    }
+
+    func testQuotaSummaryLineUsesPlaceholderWithoutRealSnapshot() {
+        let snapshot = QuotaSnapshot.notConnected
+
+        let formatted = StatusPopoverFormatting.quotaSummaryLine(
+            snapshot: snapshot,
+            status: .noSnapshot
+        )
+
+        XCTAssertEqual(formatted, "5小时额度 -- · 周额度 --")
+    }
+
+    func testRecoverySummaryLineUsesPlaceholdersWithoutUsableQuotaState() {
+        let formatted = StatusPopoverFormatting.recoverySummaryLine(
+            resetAt: makeDate("2026-06-19T13:25:00Z"),
+            status: .noSnapshot,
+            now: makeDate("2026-06-19T12:40:00Z"),
+            calendar: Calendar(identifier: .gregorian).setting(timeZone: TimeZone(secondsFromGMT: 0)!),
+            locale: Locale(identifier: "en_US"),
+            timeZone: TimeZone(secondsFromGMT: 0)!
+        )
+
+        XCTAssertEqual(formatted, "恢复 -- · 还需 --")
+    }
+
     private func makeDate(_ iso8601: String) -> Date {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]

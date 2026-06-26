@@ -1,6 +1,11 @@
 import Foundation
 
 enum StatusPopoverFormatting {
+    private enum QuotaMetric {
+        case fiveHour
+        case weekly
+    }
+
     static func shortTimestamp(
         for date: Date,
         now: Date = .now,
@@ -156,12 +161,117 @@ enum StatusPopoverFormatting {
         return "少于1分"
     }
 
+    static func quotaSummaryLine(
+        snapshot: QuotaSnapshot,
+        status: QuotaRefreshStatus
+    ) -> String {
+        "5小时额度 \(quotaText(for: .fiveHour, snapshot: snapshot, status: status)) · 周额度 \(quotaText(for: .weekly, snapshot: snapshot, status: status))"
+    }
+
+    static func recoverySummaryLine(
+        resetAt: Date?,
+        status: QuotaRefreshStatus,
+        now: Date = .now,
+        calendar: Calendar = .current,
+        locale: Locale = .current,
+        timeZone: TimeZone = .current
+    ) -> String {
+        guard showsQuotaValues(for: status), let resetAt else {
+            return "恢复 -- · 还需 --"
+        }
+
+        let resetText = shortTimestamp(
+            for: resetAt,
+            now: now,
+            calendar: calendar,
+            locale: locale,
+            timeZone: timeZone
+        )
+        let remainingText = relativeRecoveryLine(for: resetAt, now: now)
+        return "恢复 \(resetText) · 还需 \(remainingText)"
+    }
+
+    static func quotaTooltip(
+        snapshot: QuotaSnapshot,
+        status: QuotaRefreshStatus,
+        resetAt: Date? = nil,
+        now: Date = .now,
+        calendar: Calendar = .current,
+        locale: Locale = .current,
+        timeZone: TimeZone = .current
+    ) -> String {
+        let recovery = recoverySummaryLine(
+            resetAt: resetAt,
+            status: status,
+            now: now,
+            calendar: calendar,
+            locale: locale,
+            timeZone: timeZone
+        )
+
+        switch status {
+        case .success:
+            return "Codex Monitor：\(quotaSummaryLine(snapshot: snapshot, status: status)) · \(recovery)"
+        case .refreshing:
+            return "Codex Monitor：\(quotaSummaryLine(snapshot: snapshot, status: status)) · \(recovery) · 正在刷新"
+        case .networkFailed:
+            return "Codex Monitor：\(quotaSummaryLine(snapshot: snapshot, status: status)) · \(recovery) · 网络异常，显示上次数据"
+        case .authRequired:
+            return "Codex Monitor：\(quotaSummaryLine(snapshot: snapshot, status: status)) · \(recovery) · 需要登录，显示上次数据"
+        case .parseFailed:
+            return "Codex Monitor：\(quotaSummaryLine(snapshot: snapshot, status: status)) · \(recovery) · 数据异常，显示上次数据"
+        case .stale:
+            return "Codex Monitor：\(quotaSummaryLine(snapshot: snapshot, status: status)) · \(recovery) · 数据已过期"
+        case .noSnapshot:
+            return "Codex Monitor：等待连接"
+        case .idle:
+            return "Codex Monitor：等待首次刷新"
+        case .demoMode:
+            return "Codex Monitor：演示模式"
+        }
+    }
+
     private static func sourceLabel(for dataSource: QuotaDataSource) -> String {
         switch dataSource {
         case .real:
             return "真实数据"
         case .mock:
             return "演示数据"
+        }
+    }
+
+    private static func quotaText(
+        for metric: QuotaMetric,
+        snapshot: QuotaSnapshot,
+        status: QuotaRefreshStatus
+    ) -> String {
+        guard showsQuotaValues(for: status) else {
+            switch status {
+            case .demoMode:
+                return "演示"
+            case .success, .stale, .refreshing, .networkFailed, .authRequired, .parseFailed, .noSnapshot, .idle:
+                return "--"
+            }
+        }
+
+        guard snapshot.dataSource == .real else {
+            return "--"
+        }
+
+        switch metric {
+        case .fiveHour:
+            return "\(snapshot.fiveHourQuotaPercent)%"
+        case .weekly:
+            return "\(snapshot.weeklyQuotaPercent)%"
+        }
+    }
+
+    private static func showsQuotaValues(for status: QuotaRefreshStatus) -> Bool {
+        switch status {
+        case .success, .stale, .refreshing, .networkFailed, .authRequired, .parseFailed:
+            return true
+        case .noSnapshot, .idle, .demoMode:
+            return false
         }
     }
 

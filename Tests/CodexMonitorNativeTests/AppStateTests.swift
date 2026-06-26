@@ -46,8 +46,9 @@ final class AppStateTests: XCTestCase {
     func testFailedRefreshKeepsLastSuccessfulSnapshot() async {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.failure.\(UUID().uuidString)")!
         let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let resetAt = Date.now.addingTimeInterval(90 * 60)
         let initial = QuotaSnapshot(
-            weeklyQuotaPercent: 72, fiveHourQuotaPercent: 69, refreshedAt: .distantPast,
+            weeklyQuotaPercent: 72, fiveHourQuotaPercent: 69, fiveHourResetAt: resetAt, refreshedAt: .distantPast,
             dataSource: .real
         )
         store.saveSnapshot(initial)
@@ -61,7 +62,38 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(appState.dataSource, .real)
         XCTAssertEqual(appState.failureCount, 1)
         XCTAssertEqual(appState.realQuotaHealth, RealQuotaHealthDiagnostic(kind: .rpcRejected, isUsingCachedSnapshot: true))
+        XCTAssertEqual(appState.effectiveFiveHourResetAt, resetAt)
         XCTAssertEqual(store.loadSnapshot(), initial)
+    }
+
+    func testRefreshInProgressKeepsCachedQuotaAndRecoveryTimeVisible() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.refreshing.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let resetAt = Date.now.addingTimeInterval(2 * 60 * 60)
+        let initial = QuotaSnapshot(
+            weeklyQuotaPercent: 72, fiveHourQuotaPercent: 69, fiveHourResetAt: resetAt, refreshedAt: .now,
+            dataSource: .real
+        )
+        store.saveSnapshot(initial)
+
+        let refreshed = QuotaSnapshot(
+            weeklyQuotaPercent: 81, fiveHourQuotaPercent: 63, fiveHourResetAt: Date.now.addingTimeInterval(4 * 60 * 60), refreshedAt: .now,
+            dataSource: .real
+        )
+        let service = BlockingRefreshService(snapshot: refreshed)
+        let appState = AppState(snapshotStore: store, refreshService: service)
+
+        let task = Task {
+            await appState.refreshNow(trigger: .manual)
+        }
+        await Task.yield()
+
+        XCTAssertEqual(appState.status, .refreshing)
+        XCTAssertEqual(appState.snapshot, initial)
+        XCTAssertEqual(appState.effectiveFiveHourResetAt, resetAt)
+
+        await service.release()
+        await task.value
     }
 
     func testAuthFailureShowsLoginRequiredAndPreservesCachedSnapshot() async {

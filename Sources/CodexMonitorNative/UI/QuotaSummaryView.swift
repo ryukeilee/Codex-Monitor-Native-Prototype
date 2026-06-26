@@ -7,7 +7,7 @@ struct QuotaSummaryView: View {
         GroupBox {
             VStack(alignment: .leading, spacing: 5) {
                 Text("\(decisionText) · \(freshnessText)")
-                Text("5小时额度 \(fiveHourQuotaText) · 周额度 \(weeklyQuotaText)")
+                Text(quotaSummaryText)
                 Text("恢复 \(fiveHourRecoveryText) · 还需 \(recoveryCountdownText)")
                 Text("建议 \(recommendationText)")
                     .foregroundStyle(.secondary)
@@ -23,52 +23,40 @@ struct QuotaSummaryView: View {
     }
 
     private var freshnessText: String {
-        StatusPopoverFormatting.titleSummary(for: appState.status)
+        StatusPopoverFormatting.titleSummary(for: appState.displayStatus)
     }
 
-    // MARK: - Quota display
-
-    private var weeklyQuotaText: String {
-        switch appState.status {
-        case .success, .stale, .refreshing, .networkFailed, .authRequired, .parseFailed:
-            if appState.dataSource == .real {
-                return "\(appState.snapshot.weeklyQuotaPercent)%"
-            }
-            return "--"
-        case .noSnapshot, .idle:
-            return "--"
-        case .demoMode:
-            return "演示"
-        }
-    }
-
-    private var fiveHourQuotaText: String {
-        switch appState.status {
-        case .success, .stale, .refreshing, .networkFailed, .authRequired, .parseFailed:
-            if appState.dataSource == .real {
-                return "\(appState.snapshot.fiveHourQuotaPercent)%"
-            }
-            return "--"
-        case .noSnapshot, .idle:
-            return "--"
-        case .demoMode:
-            return "演示"
-        }
+    private var quotaSummaryText: String {
+        StatusPopoverFormatting.quotaSummaryLine(
+            snapshot: appState.snapshot,
+            status: appState.displayStatus
+        )
     }
 
     private var fiveHourRecoveryText: String {
-        guard let resetAt = appState.effectiveFiveHourResetAt else {
-            return "--"
-        }
-
-        return StatusPopoverFormatting.shortTimestamp(for: resetAt)
+        recoveryParts.resetText
     }
 
     private var recoveryCountdownText: String {
-        StatusPopoverFormatting.relativeRecoveryLine(for: appState.effectiveFiveHourResetAt)
+        recoveryParts.remainingText
     }
 
     private var recommendationText: String {
         appState.quotaDecision.recommendation
+    }
+
+    private var recoveryParts: (resetText: String, remainingText: String) {
+        let line = StatusPopoverFormatting.recoverySummaryLine(
+            resetAt: appState.effectiveFiveHourResetAt,
+            status: appState.displayStatus
+        )
+        let parts = line.components(separatedBy: " · ")
+        guard parts.count == 2 else {
+            return ("--", "--")
+        }
+
+        let resetText = parts[0].replacingOccurrences(of: "恢复 ", with: "")
+        let remainingText = parts[1].replacingOccurrences(of: "还需 ", with: "")
+        return (resetText, remainingText)
     }
 }

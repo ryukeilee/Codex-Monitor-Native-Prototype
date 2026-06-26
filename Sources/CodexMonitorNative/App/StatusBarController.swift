@@ -90,25 +90,23 @@ final class StatusBarController {
     }
 
     private func tooltip(for snapshot: QuotaSnapshot, status: QuotaRefreshStatus) -> String {
+        StatusPopoverFormatting.quotaTooltip(
+            snapshot: snapshot,
+            status: status,
+            resetAt: appStateResetAt(for: snapshot, status: status)
+        )
+    }
+
+    private func appStateResetAt(for snapshot: QuotaSnapshot, status: QuotaRefreshStatus) -> Date? {
+        guard snapshot.dataSource == .real else {
+            return nil
+        }
+
         switch status {
-        case .success:
-            return "Codex Monitor：5小时 \(snapshot.fiveHourQuotaPercent)% · 周额度 \(snapshot.weeklyQuotaPercent)%"
-        case .refreshing:
-            return "Codex Monitor：正在刷新"
-        case .networkFailed:
-            return "Codex Monitor：网络异常，显示上次数据"
-        case .authRequired:
-            return "Codex Monitor：需要登录，显示上次数据"
-        case .parseFailed:
-            return "Codex Monitor：数据异常，显示上次数据"
-        case .stale:
-            return "Codex Monitor：数据已过期，显示上次数据"
-        case .noSnapshot:
-            return "Codex Monitor：等待连接"
-        case .idle:
-            return "Codex Monitor：等待首次刷新"
-        case .demoMode:
-            return "Codex Monitor：演示模式"
+        case .success, .stale, .refreshing, .networkFailed, .authRequired, .parseFailed:
+            return snapshot.fiveHourResetAt ?? snapshot.refreshedAt.addingTimeInterval(5 * 60 * 60)
+        case .noSnapshot, .idle, .demoMode:
+            return nil
         }
     }
 
