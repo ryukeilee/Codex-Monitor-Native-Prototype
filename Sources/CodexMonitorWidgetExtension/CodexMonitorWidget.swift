@@ -30,7 +30,13 @@ struct CodexMonitorWidgetProvider: TimelineProvider {
 }
 
 struct CodexMonitorWidgetView: View {
+    private enum MetricValueTone {
+        case normal
+        case subdued
+    }
+
     @Environment(\.widgetFamily) private var family
+    @Environment(\.widgetContentMargins) private var widgetContentMargins
     let entry: CodexMonitorWidgetEntry
     let familyOverride: WidgetFamily?
 
@@ -47,20 +53,56 @@ struct CodexMonitorWidgetView: View {
         activeFamily == .systemSmall
     }
 
-    var body: some View {
-        dashboardLayout
-        .padding(.top, isSmall ? 14 : 11)
-        .padding(.horizontal, isSmall ? 13 : 15)
-        .padding(.bottom, isSmall ? 11 : 10)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .containerBackground(for: .widget) {
-            panelBackground
+    private var panelExpansionInsets: EdgeInsets {
+        guard !isSmall else {
+            return EdgeInsets()
         }
+
+        return widgetContentMargins
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                panelBackground
+                    .frame(
+                        width: geometry.size.width + panelExpansionInsets.leading + panelExpansionInsets.trailing,
+                        height: geometry.size.height + panelExpansionInsets.top + panelExpansionInsets.bottom
+                    )
+                    .offset(
+                        x: (panelExpansionInsets.leading - panelExpansionInsets.trailing) / 2,
+                        y: (panelExpansionInsets.top - panelExpansionInsets.bottom) / 2
+                    )
+
+                dashboardLayout
+                    .padding(.top, isSmall ? 14 : 11)
+                    .padding(.horizontal, isSmall ? 13 : 8)
+                    .padding(.bottom, isSmall ? 11 : 10)
+                    .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+        }
+        .containerBackground(for: .widget) {
+            Color.clear
+        }
+        .clipShape(ContainerRelativeShape())
     }
 
     private var dashboardLayout: some View {
         VStack(alignment: .leading, spacing: isSmall ? 6 : 6) {
             topBar
+
+            instrumentCluster
+        }
+    }
+
+    private var instrumentCluster: some View {
+        HStack(alignment: .center, spacing: isSmall ? 8 : 18) {
+            metricColumn(
+                top: ("周额度", entry.state.weeklyQuotaText),
+                bottom: ("恢复时间", shortRecoveryText),
+                alignment: .trailing
+            )
 
             energyCore(
                 diameter: isSmall ? 72 : 74,
@@ -70,10 +112,15 @@ struct CodexMonitorWidgetView: View {
                     design: .rounded
                 )
             )
-            .frame(maxWidth: .infinity)
 
-            metricBoard
+            metricColumn(
+                top: ("刷新状态", entry.state.statusText),
+                bottom: ("更新时间", updatedShortText),
+                alignment: .leading,
+                topValueTone: .subdued
+            )
         }
+        .frame(maxWidth: .infinity)
     }
 
     private var topBar: some View {
@@ -98,22 +145,25 @@ struct CodexMonitorWidgetView: View {
         .padding(.horizontal, isSmall ? 3 : 4)
     }
 
-    private var metricBoard: some View {
-        VStack(spacing: isSmall ? 6 : 6) {
-            metricRow(leading: ("周额度", entry.state.weeklyQuotaText), trailing: ("刷新状态", entry.state.statusText))
-            metricRow(leading: ("恢复时间", shortRecoveryText), trailing: ("更新时间", updatedShortText))
+    private func metricColumn(
+        top: (label: String, value: String),
+        bottom: (label: String, value: String),
+        alignment: HorizontalAlignment,
+        topValueTone: MetricValueTone = .normal,
+        bottomValueTone: MetricValueTone = .normal
+    ) -> some View {
+        VStack(alignment: alignment, spacing: isSmall ? 12 : 14) {
+            metricCell(label: top.label, value: top.value, alignment: alignment, tone: topValueTone)
+            metricCell(label: bottom.label, value: bottom.value, alignment: alignment, tone: bottomValueTone)
         }
-        .padding(.horizontal, isSmall ? 9 : 13)
-        .padding(.vertical, isSmall ? 8 : 7)
-        .background(panelFill(cornerRadius: isSmall ? 18 : 18))
-        .offset(y: isSmall ? -3 : -3)
+        .frame(maxWidth: .infinity)
     }
 
     private var panelBackground: some View {
-        RoundedRectangle(cornerRadius: activeFamily == .systemSmall ? 28 : 32, style: .continuous)
+        ContainerRelativeShape()
             .fill(Color(red: 0.24, green: 0.04, blue: 0.07))
             .overlay {
-                RoundedRectangle(cornerRadius: activeFamily == .systemSmall ? 28 : 32, style: .continuous)
+                ContainerRelativeShape()
                     .fill(
                         RadialGradient(
                             colors: [
@@ -128,13 +178,13 @@ struct CodexMonitorWidgetView: View {
                     )
             }
             .overlay {
-                RoundedRectangle(cornerRadius: activeFamily == .systemSmall ? 28 : 32, style: .continuous)
+                ContainerRelativeShape()
                     .fill(
                         LinearGradient(
                             colors: [
-                                Color.white.opacity(0.18),
-                                Color(red: 0.95, green: 0.44, blue: 0.26).opacity(0.12),
-                                Color.black.opacity(0.20)
+                                Color.white.opacity(0.09),
+                                Color(red: 0.95, green: 0.44, blue: 0.26).opacity(0.08),
+                                Color.black.opacity(0.18)
                             ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
@@ -143,7 +193,7 @@ struct CodexMonitorWidgetView: View {
                     .blendMode(.softLight)
             }
             .overlay {
-                RoundedRectangle(cornerRadius: activeFamily == .systemSmall ? 28 : 32, style: .continuous)
+                ContainerRelativeShape()
                     .fill(
                         LinearGradient(
                             colors: [
@@ -163,7 +213,7 @@ struct CodexMonitorWidgetView: View {
                 reactorBackdrop
             }
             .overlay {
-                RoundedRectangle(cornerRadius: activeFamily == .systemSmall ? 28 : 32, style: .continuous)
+                ContainerRelativeShape()
                     .fill(
                         LinearGradient(
                             colors: [
@@ -177,24 +227,24 @@ struct CodexMonitorWidgetView: View {
                     )
             }
             .overlay {
-                RoundedRectangle(cornerRadius: activeFamily == .systemSmall ? 28 : 32, style: .continuous)
+                ContainerRelativeShape()
                     .stroke(
                         LinearGradient(
                             colors: [
-                                Color.white.opacity(0.18),
-                                Color(red: 0.92, green: 0.42, blue: 0.24).opacity(0.24),
-                                Color(red: 0.42, green: 0.08, blue: 0.10).opacity(0.08)
+                                Color(red: 0.54, green: 0.11, blue: 0.10).opacity(0.20),
+                                Color(red: 0.78, green: 0.23, blue: 0.16).opacity(0.12),
+                                Color(red: 0.20, green: 0.03, blue: 0.06).opacity(0.10)
                             ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
                         ),
-                        lineWidth: 0.9
+                        lineWidth: 0.55
                     )
             }
             .overlay {
-                RoundedRectangle(cornerRadius: activeFamily == .systemSmall ? 28 : 32, style: .continuous)
+                ContainerRelativeShape()
                     .inset(by: 8)
-                    .stroke(Color.white.opacity(0.05), lineWidth: 0.7)
+                    .stroke(Color(red: 0.78, green: 0.24, blue: 0.18).opacity(0.08), lineWidth: 0.55)
             }
             .overlay {
                 Circle()
@@ -389,71 +439,45 @@ struct CodexMonitorWidgetView: View {
         .offset(y: isSmall ? -1 : -3)
     }
 
-    private func metricRow(
-        leading: (label: String, value: String),
-        trailing: (label: String, value: String)
+    private func metricCell(
+        label: String,
+        value: String,
+        alignment: HorizontalAlignment,
+        tone: MetricValueTone = .normal
     ) -> some View {
-        HStack(spacing: isSmall ? 11 : 14) {
-            metricCell(label: leading.label, value: leading.value)
-            metricCell(label: trailing.label, value: trailing.value)
-        }
-    }
-
-    private func metricCell(label: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: alignment, spacing: 4) {
             Text(shortMetricLabel(label))
-                .font(.system(size: isSmall ? 8 : 9, weight: .semibold, design: .rounded))
+                .font(.system(size: isSmall ? 8 : 10, weight: .semibold, design: .rounded))
                 .foregroundStyle(Color(red: 0.94, green: 0.83, blue: 0.71).opacity(0.86))
                 .lineLimit(1)
 
             Text(value)
-                .font(.system(size: isSmall ? 11 : 12, weight: .bold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.95))
+                .font(metricValueFont(for: tone))
+                .foregroundStyle(metricValueColor(for: tone))
                 .monospacedDigit()
                 .lineLimit(1)
                 .minimumScaleFactor(0.72)
                 .allowsTightening(true)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: alignment == .leading ? .leading : .trailing)
     }
 
-    private func panelFill(cornerRadius: CGFloat) -> some View {
-        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-            .fill(
-                LinearGradient(
-                    colors: [
-                        Color.white.opacity(isSmall ? 0.09 : 0.10),
-                        Color(red: 0.45, green: 0.08, blue: 0.12).opacity(isSmall ? 0.22 : 0.20),
-                        Color(red: 0.13, green: 0.02, blue: 0.06).opacity(isSmall ? 0.20 : 0.18)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
-            .overlay(alignment: .top) {
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(0.10),
-                                Color.clear
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-                    .frame(height: isSmall ? 18 : 20)
-                    .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
-            }
-            .overlay(
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .stroke(Color.white.opacity(isSmall ? 0.08 : 0.07), lineWidth: 0.75)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .inset(by: 1)
-                    .stroke(Color(red: 0.77, green: 0.24, blue: 0.18).opacity(isSmall ? 0.24 : 0.20), lineWidth: 0.6)
-            )
+    private func metricValueFont(for tone: MetricValueTone) -> Font {
+        switch tone {
+        case .normal:
+            return .system(size: isSmall ? 12 : 15, weight: .bold, design: .rounded)
+        case .subdued:
+            return .system(size: isSmall ? 11 : 13, weight: .semibold, design: .rounded)
+        }
+    }
+
+    private func metricValueColor(for tone: MetricValueTone) -> Color {
+        switch tone {
+        case .normal:
+            return .white.opacity(0.95)
+        case .subdued:
+            return Color(red: 0.97, green: 0.91, blue: 0.84).opacity(isSmall ? 0.80 : 0.72)
+        }
     }
 
     private var bottomArmorBands: some View {
@@ -576,6 +600,7 @@ struct CodexMonitorQuotaWidget: Widget {
         .description("显示 Codex 5小时额度、周额度、恢复时间和刷新状态。")
         .supportedFamilies([.systemSmall, .systemMedium])
         .contentMarginsDisabled()
+        .containerBackgroundRemovable()
     }
 }
 
