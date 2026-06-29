@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var popoverController: PopoverController?
     private var refreshScheduler: RefreshScheduler?
     private var sleepWakeObserver: SleepWakeObserver?
+    private var widgetTimelineBridge: WidgetTimelineBridge?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -19,6 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let launchAtLoginManager = LaunchAtLoginManager()
         let popoverController = PopoverController(appState: state, launchAtLoginManager: launchAtLoginManager)
         let statusBarController = StatusBarController(appState: state)
+        let widgetTimelineBridge = WidgetTimelineBridge(appState: state)
         AppLogger.statusBar.info("Status bar controller created")
 
         statusBarController.setTarget(self, action: #selector(togglePopover(_:)))
@@ -59,6 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.statusBarController = statusBarController
         self.refreshScheduler = scheduler
         self.sleepWakeObserver = observer
+        self.widgetTimelineBridge = widgetTimelineBridge
     }
 
     func applicationWillTerminate(_ notification: Notification) {
