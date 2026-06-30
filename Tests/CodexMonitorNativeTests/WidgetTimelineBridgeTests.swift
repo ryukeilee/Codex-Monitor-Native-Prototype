@@ -177,6 +177,49 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         XCTAssertEqual(savedStates.last?.effectiveFiveHourResetAt, resetAt)
         _ = bridge
     }
+
+    func testFailedWakeRefreshWritesCachedSnapshotAndRecoveryTimeForWidget() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.widgetWakeFailure.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let now = Date()
+        let resetAt = now.addingTimeInterval(90 * 60)
+        let initial = QuotaSnapshot(
+            weeklyQuotaPercent: 72,
+            fiveHourQuotaPercent: 69,
+            fiveHourResetAt: resetAt,
+            refreshedAt: now.addingTimeInterval(-60),
+            dataSource: .real
+        )
+        store.saveSnapshot(initial)
+
+        let appState = AppState(
+            snapshotStore: store,
+            refreshService: WidgetBridgeFailingRefreshService(error: MockRefreshError.simulatedFailure)
+        )
+
+        var savedStates: [WidgetDisplayState] = []
+        let finalStateSaved = expectation(description: "Widget bridge preserved cached data after wake failure")
+        let bridge = WidgetTimelineBridge(
+            appState: appState,
+            saveState: {
+                savedStates.append($0)
+                if $0.snapshot == initial, $0.status == .networkFailed {
+                    finalStateSaved.fulfill()
+                }
+            },
+            reloadTimelines: {}
+        )
+
+        await appState.refreshNow(trigger: .wake)
+        await fulfillment(of: [finalStateSaved], timeout: 1)
+
+        XCTAssertEqual(savedStates.last?.snapshot, initial)
+        XCTAssertEqual(savedStates.last?.status, .networkFailed)
+        XCTAssertEqual(savedStates.last?.lastSuccessAt, initial.refreshedAt)
+        XCTAssertEqual(savedStates.last?.lastAttemptAt, appState.lastAttemptAt)
+        XCTAssertEqual(savedStates.last?.effectiveFiveHourResetAt, resetAt)
+        _ = bridge
+    }
 }
 
 private struct WidgetBridgeMockRefreshService: QuotaRefreshing {

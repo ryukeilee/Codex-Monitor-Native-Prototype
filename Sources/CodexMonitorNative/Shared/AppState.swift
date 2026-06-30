@@ -180,7 +180,11 @@ final class AppState: ObservableObject {
                     kind: .requestSucceeded,
                     isUsingCachedSnapshot: false
                 )
+                let shouldRestoreSchedulerCadence = backoffInterval != defaultInterval
                 backoffInterval = defaultInterval
+                if shouldRestoreSchedulerCadence {
+                    onBackoffChanged?(backoffInterval)
+                }
                 snapshotStore.saveSnapshot(refreshed)
                 scheduleFreshnessCheck()
                 AppLogger.refresh.info("Real refresh succeeded: weekly=\(refreshed.weeklyQuotaPercent)% fiveHour=\(refreshed.fiveHourQuotaPercent)%")
@@ -197,8 +201,11 @@ final class AppState: ObservableObject {
             }
         } catch {
             // Failure path — classify and preserve
-            consecutiveFailures += 1
-            failureCount = consecutiveFailures
+            let shouldAdjustSchedulerCadence = trigger != .wake
+            if shouldAdjustSchedulerCadence {
+                consecutiveFailures += 1
+                failureCount = consecutiveFailures
+            }
 
             let classifiedStatus = classifyError(error)
             lastErrorSummary = safeErrorMessage(from: error)
@@ -212,11 +219,17 @@ final class AppState: ObservableObject {
             }
             // else: keep current snapshot (may be notConnected or mock)
 
-            // Escalate backoff
-            backoffInterval = backoffFor(consecutiveFailures: consecutiveFailures)
-            onBackoffChanged?(backoffInterval)
+            if shouldAdjustSchedulerCadence {
+                // Escalate backoff only for the regular refresh cadence.
+                backoffInterval = backoffFor(consecutiveFailures: consecutiveFailures)
+                onBackoffChanged?(backoffInterval)
+            }
 
-            AppLogger.refresh.error("Refresh failed (consecutive=\(self.consecutiveFailures)) status=\(classifiedStatus.rawValue, privacy: .public) backoff=\(self.backoffInterval)s")
+            if shouldAdjustSchedulerCadence {
+                AppLogger.refresh.error("Refresh failed (trigger=\(triggerName, privacy: .public) consecutive=\(self.consecutiveFailures)) status=\(classifiedStatus.rawValue, privacy: .public) backoff=\(self.backoffInterval)s")
+            } else {
+                AppLogger.refresh.error("Wake refresh failed; preserving scheduler cadence (consecutive=\(self.consecutiveFailures)) status=\(classifiedStatus.rawValue, privacy: .public) backoff=\(self.backoffInterval)s")
+            }
         }
     }
 
