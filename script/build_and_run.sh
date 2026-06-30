@@ -6,6 +6,17 @@ APP_NAME="CodexMonitorNative"
 BUNDLE_ID="com.ryukeilee.CodexMonitorNativePrototype"
 MIN_SYSTEM_VERSION="14.0"
 BUILD_CONFIGURATION="${BUILD_CONFIGURATION:-debug}"
+case "$BUILD_CONFIGURATION" in
+  debug)
+    XCODE_CONFIGURATION="Debug"
+    ;;
+  release)
+    XCODE_CONFIGURATION="Release"
+    ;;
+  *)
+    XCODE_CONFIGURATION="$BUILD_CONFIGURATION"
+    ;;
+esac
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
@@ -13,6 +24,7 @@ APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
 APP_RESOURCES="$APP_CONTENTS/Resources"
+APP_PLUGINS="$APP_CONTENTS/PlugIns"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
 MODULE_CACHE="$ROOT_DIR/.build/ModuleCache"
@@ -23,6 +35,15 @@ SECURITY_PATH="$ROOT_DIR/.build/security"
 ICON_SOURCE="$ROOT_DIR/Assets/AppIcon.svg"
 ICONSET_DIR="$DIST_DIR/AppIcon.iconset"
 ICON_FILE="$APP_RESOURCES/AppIcon.icns"
+APP_ENTITLEMENTS="$ROOT_DIR/Assets/CodexMonitorNative.entitlements"
+WIDGET_NAME="CodexMonitorWidgetExtension"
+WIDGET_PROJECT="$ROOT_DIR/CodexMonitorWidgetExtension.xcodeproj"
+WIDGET_SCHEME="$WIDGET_NAME"
+WIDGET_BUILD_DIR="$ROOT_DIR/.build/xcode-widget"
+WIDGET_PRODUCTS_DIR="$WIDGET_BUILD_DIR/$XCODE_CONFIGURATION"
+WIDGET_BUNDLE="$WIDGET_PRODUCTS_DIR/$WIDGET_NAME.appex"
+WIDGET_ENTITLEMENTS="$ROOT_DIR/Assets/CodexMonitorWidgetExtension.entitlements"
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 
 pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 
@@ -84,6 +105,40 @@ cat >"$INFO_PLIST" <<PLIST
 </dict>
 </plist>
 PLIST
+
+if [[ -d "$WIDGET_PROJECT" ]]; then
+  xcodebuild \
+    -project "$WIDGET_PROJECT" \
+    -scheme "$WIDGET_SCHEME" \
+    -configuration "$XCODE_CONFIGURATION" \
+    -destination "platform=macOS" \
+    -derivedDataPath "$WIDGET_BUILD_DIR/DerivedData" \
+    CONFIGURATION_BUILD_DIR="$WIDGET_PRODUCTS_DIR" \
+    CODE_SIGNING_ALLOWED=NO \
+    CODE_SIGNING_REQUIRED=NO \
+    build
+
+  mkdir -p "$APP_PLUGINS"
+  rm -rf "$APP_PLUGINS/$WIDGET_NAME.appex"
+  ditto --norsrc --noextattr "$WIDGET_BUNDLE" "$APP_PLUGINS/$WIDGET_NAME.appex"
+  /usr/bin/xattr -cr "$APP_PLUGINS/$WIDGET_NAME.appex"
+
+  /usr/bin/codesign \
+    --force \
+    --sign "$CODESIGN_IDENTITY" \
+    --timestamp=none \
+    --entitlements "$WIDGET_ENTITLEMENTS" \
+    "$APP_PLUGINS/$WIDGET_NAME.appex"
+fi
+
+/usr/bin/xattr -cr "$APP_BUNDLE"
+
+/usr/bin/codesign \
+  --force \
+  --sign "$CODESIGN_IDENTITY" \
+  --timestamp=none \
+  --entitlements "$APP_ENTITLEMENTS" \
+  "$APP_BUNDLE"
 
 open_app() {
   /usr/bin/open -n "$APP_BUNDLE"

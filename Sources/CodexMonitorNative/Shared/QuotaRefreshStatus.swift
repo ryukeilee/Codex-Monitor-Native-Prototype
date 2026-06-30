@@ -1,6 +1,6 @@
 import Foundation
 
-enum QuotaRefreshStatus: String, Equatable, Sendable {
+enum QuotaRefreshStatus: String, Codable, Equatable, Sendable {
     case idle
     case refreshing
     case success
