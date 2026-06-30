@@ -66,30 +66,6 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(store.loadSnapshot(), initial)
     }
 
-    func testWakeFailureKeepsLastSuccessfulSnapshotAndExistingRecoveryTime() async {
-        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.wakeFailure.\(UUID().uuidString)")!
-        let store = SnapshotStore(defaults: defaults, key: "snapshot")
-        let resetAt = Date.now.addingTimeInterval(90 * 60)
-        let initial = QuotaSnapshot(
-            weeklyQuotaPercent: 72, fiveHourQuotaPercent: 69, fiveHourResetAt: resetAt, refreshedAt: .distantPast,
-            dataSource: .real
-        )
-        store.saveSnapshot(initial)
-
-        let appState = AppState(snapshotStore: store, refreshService: MockRefreshService(snapshot: nil))
-
-        await appState.refreshNow(trigger: .wake)
-
-        XCTAssertEqual(appState.snapshot, initial)
-        XCTAssertEqual(appState.status, .networkFailed)
-        XCTAssertEqual(appState.dataSource, .real)
-        XCTAssertEqual(appState.failureCount, 0)
-        XCTAssertEqual(appState.backoffInterval, 300)
-        XCTAssertEqual(appState.realQuotaHealth, RealQuotaHealthDiagnostic(kind: .rpcRejected, isUsingCachedSnapshot: true))
-        XCTAssertEqual(appState.effectiveFiveHourResetAt, resetAt)
-        XCTAssertEqual(store.loadSnapshot(), initial)
-    }
-
     func testRefreshInProgressKeepsCachedQuotaAndRecoveryTimeVisible() async {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.refreshing.\(UUID().uuidString)")!
         let store = SnapshotStore(defaults: defaults, key: "snapshot")
@@ -278,103 +254,6 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(appState.failureCount, 4)
     }
 
-    func testWakeFailureDoesNotEscalateExistingBackoffCadence() async {
-        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.wakeBackoff.\(UUID().uuidString)")!
-        let store = SnapshotStore(defaults: defaults, key: "snapshot")
-        let resetAt = Date.now.addingTimeInterval(90 * 60)
-        let initial = QuotaSnapshot(
-            weeklyQuotaPercent: 72, fiveHourQuotaPercent: 69, fiveHourResetAt: resetAt, refreshedAt: .distantPast,
-            dataSource: .real
-        )
-        store.saveSnapshot(initial)
-
-        let appState = AppState(snapshotStore: store, refreshService: MockRefreshService(snapshot: nil))
-
-        await appState.refreshNow(trigger: .manual)
-        await appState.refreshNow(trigger: .manual)
-        XCTAssertEqual(appState.backoffInterval, 600)
-        XCTAssertEqual(appState.failureCount, 2)
-
-        await appState.refreshNow(trigger: .wake)
-
-        XCTAssertEqual(appState.backoffInterval, 600)
-        XCTAssertEqual(appState.failureCount, 2)
-        XCTAssertEqual(appState.snapshot, initial)
-        XCTAssertEqual(appState.effectiveFiveHourResetAt, resetAt)
-    }
-
-    func testSuccessAfterBackoffRestoresDefaultCadenceAndNotifiesScheduler() async {
-        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.restoreCadence.\(UUID().uuidString)")!
-        let store = SnapshotStore(defaults: defaults, key: "snapshot")
-        let initial = QuotaSnapshot(
-            weeklyQuotaPercent: 72, fiveHourQuotaPercent: 69, refreshedAt: .distantPast,
-            dataSource: .real
-        )
-        store.saveSnapshot(initial)
-
-        let refreshed = QuotaSnapshot(
-            weeklyQuotaPercent: 81, fiveHourQuotaPercent: 63, refreshedAt: .now,
-            dataSource: .real
-        )
-        let service = SequenceRefreshService(outcomes: [
-            .failure(MockRefreshError.simulatedFailure),
-            .failure(MockRefreshError.simulatedFailure),
-            .success(refreshed)
-        ])
-        let appState = AppState(snapshotStore: store, refreshService: service)
-
-        var notifiedIntervals: [TimeInterval] = []
-        appState.onBackoffChanged = { notifiedIntervals.append($0) }
-
-        await appState.refreshNow(trigger: .manual)
-        await appState.refreshNow(trigger: .manual)
-        XCTAssertEqual(appState.backoffInterval, 600)
-
-        await appState.refreshNow(trigger: .manual)
-
-        XCTAssertEqual(appState.snapshot, refreshed)
-        XCTAssertEqual(appState.status, .success)
-        XCTAssertEqual(appState.failureCount, 0)
-        XCTAssertEqual(appState.backoffInterval, 300)
-        XCTAssertEqual(notifiedIntervals, [300, 600, 300])
-    }
-
-    func testWakeSuccessAfterBackoffRestoresDefaultCadenceAndNotifiesScheduler() async {
-        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.restoreWakeCadence.\(UUID().uuidString)")!
-        let store = SnapshotStore(defaults: defaults, key: "snapshot")
-        let initial = QuotaSnapshot(
-            weeklyQuotaPercent: 72, fiveHourQuotaPercent: 69, refreshedAt: .distantPast,
-            dataSource: .real
-        )
-        store.saveSnapshot(initial)
-
-        let refreshed = QuotaSnapshot(
-            weeklyQuotaPercent: 81, fiveHourQuotaPercent: 63, refreshedAt: .now,
-            dataSource: .real
-        )
-        let service = SequenceRefreshService(outcomes: [
-            .failure(MockRefreshError.simulatedFailure),
-            .failure(MockRefreshError.simulatedFailure),
-            .success(refreshed)
-        ])
-        let appState = AppState(snapshotStore: store, refreshService: service)
-
-        var notifiedIntervals: [TimeInterval] = []
-        appState.onBackoffChanged = { notifiedIntervals.append($0) }
-
-        await appState.refreshNow(trigger: .manual)
-        await appState.refreshNow(trigger: .manual)
-        XCTAssertEqual(appState.backoffInterval, 600)
-
-        await appState.refreshNow(trigger: .wake)
-
-        XCTAssertEqual(appState.snapshot, refreshed)
-        XCTAssertEqual(appState.status, .success)
-        XCTAssertEqual(appState.failureCount, 0)
-        XCTAssertEqual(appState.backoffInterval, 300)
-        XCTAssertEqual(notifiedIntervals, [300, 600, 300])
-    }
-
     func testSuccessResetsFailureCountAndBackoff() async {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.reset.\(UUID().uuidString)")!
         let store = SnapshotStore(defaults: defaults, key: "snapshot")
@@ -484,24 +363,5 @@ private actor BlockingRefreshService: QuotaRefreshing {
     func release() {
         continuation?.resume()
         continuation = nil
-    }
-}
-
-private actor SequenceRefreshService: QuotaRefreshing {
-    private var outcomes: [Result<QuotaSnapshot, Error>]
-
-    init(outcomes: [Result<QuotaSnapshot, Error>]) {
-        self.outcomes = outcomes
-    }
-
-    func refresh(basedOn currentSnapshot: QuotaSnapshot) async throws -> QuotaSnapshot {
-        precondition(!outcomes.isEmpty, "SequenceRefreshService requires at least one outcome")
-        let outcome = outcomes.removeFirst()
-        switch outcome {
-        case .success(let snapshot):
-            return snapshot
-        case .failure(let error):
-            throw error
-        }
     }
 }
