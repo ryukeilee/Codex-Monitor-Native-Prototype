@@ -3,6 +3,7 @@ import SwiftUI
 
 @MainActor
 final class PopoverController: NSObject, NSPopoverDelegate {
+    private static let contentWidth: CGFloat = 318
     private let popover: NSPopover
     private let launchAtLoginManager: LaunchAtLoginManager
     private var localEventMonitor: Any?
@@ -12,7 +13,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         let popover = NSPopover()
         popover.behavior = .applicationDefined
         popover.animates = false
-        popover.contentSize = NSSize(width: 318, height: 268)
+        popover.contentSize = NSSize(width: Self.contentWidth, height: 268)
         popover.contentViewController = NSHostingController(
             rootView: StatusPopoverView(
                 appState: appState,
@@ -40,10 +41,22 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             // Re-read the login item status right before presenting the popover
             // so the checkbox reflects system state instead of a stale cached value.
             launchAtLoginManager.refreshStatus()
+            updateContentSize()
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.becomeKey()
             installOutsideClickMonitors()
         }
+    }
+
+    private func updateContentSize() {
+        guard let hostingController = popover.contentViewController as? NSHostingController<StatusPopoverView> else {
+            return
+        }
+
+        let fittingSize = hostingController.sizeThatFits(
+            in: NSSize(width: Self.contentWidth, height: .greatestFiniteMagnitude)
+        )
+        popover.contentSize = NSSize(width: Self.contentWidth, height: ceil(fittingSize.height))
     }
 
     private func closePopover() {

@@ -86,13 +86,18 @@ struct StatusPopoverView: View {
         )
     }
 
-    private var credibilityLine: String {
-        StatusPopoverFormatting.credibilityLine(
+    private var environmentInfoLine: String? {
+        StatusPopoverFormatting.environmentInfoLine(
             lastSuccess: appState.lastSuccessAt,
             lastAttempt: appState.lastAttemptAt,
             dataSource: appState.dataSource,
-            status: appState.displayStatus
+            status: appState.displayStatus,
+            showsSourceStatus: hasDisplayableSourceStatus
         )
+    }
+
+    private var hasDisplayableSourceStatus: Bool {
+        appState.dataSource == .real || appState.displayStatus == .demoMode
     }
 
     private var supportLine: String? {
@@ -101,11 +106,14 @@ struct StatusPopoverView: View {
             return "正在刷新，先显示当前快照"
         case .networkFailed, .authRequired, .parseFailed:
             if let refreshError = appState.lastErrorSummary {
-                return "\(credibilityLine) · \(refreshError)"
+                if let environmentInfoLine {
+                    return "\(environmentInfoLine) · \(refreshError)"
+                }
+                return refreshError
             }
-            return credibilityLine
+            return environmentInfoLine
         case .stale:
-            return credibilityLine
+            return environmentInfoLine
         default:
             if let refreshError = appState.lastErrorSummary {
                 return refreshError
@@ -114,6 +122,8 @@ struct StatusPopoverView: View {
             let healthLine = StatusPopoverFormatting.realQuotaHealthLine(appState.realQuotaHealth)
             switch appState.realQuotaHealth.kind {
             case .requestSucceeded:
+                return nil
+            case .waitingForFirstRequest where !hasDisplayableSourceStatus:
                 return nil
             default:
                 return healthLine

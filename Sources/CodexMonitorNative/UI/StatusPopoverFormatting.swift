@@ -114,6 +114,34 @@ enum StatusPopoverFormatting {
         return "\(updated) · \(sourceStatus)"
     }
 
+    static func environmentInfoLine(
+        lastSuccess: Date?,
+        lastAttempt: Date?,
+        dataSource: QuotaDataSource,
+        status: QuotaRefreshStatus,
+        showsSourceStatus: Bool,
+        now: Date = .now,
+        calendar: Calendar = .current,
+        locale: Locale = .current,
+        timeZone: TimeZone = .current
+    ) -> String? {
+        let updated = updatedLine(
+            lastSuccess: lastSuccess,
+            lastAttempt: lastAttempt,
+            now: now,
+            calendar: calendar,
+            locale: locale,
+            timeZone: timeZone
+        )
+
+        guard showsSourceStatus else {
+            return updated == "更新 --" ? nil : updated
+        }
+
+        let sourceStatus = sourceStatusLine(dataSource: dataSource, status: status)
+        return "\(updated) · \(sourceStatus)"
+    }
+
     static func realQuotaHealthLine(_ diagnostic: RealQuotaHealthDiagnostic) -> String {
         let suffix = fallbackSuffix(isUsingCachedSnapshot: diagnostic.isUsingCachedSnapshot)
 

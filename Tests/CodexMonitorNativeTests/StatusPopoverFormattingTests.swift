@@ -128,6 +128,62 @@ final class StatusPopoverFormattingTests: XCTestCase {
         XCTAssertEqual(formatted, "更新 今天 12:40 · 尝试 今天 12:48 · 真实数据 · 最新")
     }
 
+    func testEnvironmentInfoLineKeepsSourceStatusWhenAvailable() {
+        let calendar = Calendar(identifier: .gregorian)
+        let timeZone = TimeZone(secondsFromGMT: 0)!
+        let locale = Locale(identifier: "en_US")
+        let now = makeDate("2026-06-19T12:50:00Z")
+        let lastSuccess = makeDate("2026-06-19T12:40:00Z")
+
+        let formatted = StatusPopoverFormatting.environmentInfoLine(
+            lastSuccess: lastSuccess,
+            lastAttempt: nil,
+            dataSource: .real,
+            status: .success,
+            showsSourceStatus: true,
+            now: now,
+            calendar: calendar.setting(timeZone: timeZone),
+            locale: locale,
+            timeZone: timeZone
+        )
+
+        XCTAssertEqual(formatted, "更新 今天 12:40 · 真实数据 · 最新")
+    }
+
+    func testEnvironmentInfoLineHidesEmptySourceState() {
+        let formatted = StatusPopoverFormatting.environmentInfoLine(
+            lastSuccess: nil,
+            lastAttempt: nil,
+            dataSource: .mock,
+            status: .noSnapshot,
+            showsSourceStatus: false
+        )
+
+        XCTAssertNil(formatted)
+    }
+
+    func testEnvironmentInfoLineKeepsUpdateWithoutEmptySourceState() {
+        let calendar = Calendar(identifier: .gregorian)
+        let timeZone = TimeZone(secondsFromGMT: 0)!
+        let locale = Locale(identifier: "en_US")
+        let now = makeDate("2026-06-19T12:50:00Z")
+        let lastAttempt = makeDate("2026-06-19T12:48:00Z")
+
+        let formatted = StatusPopoverFormatting.environmentInfoLine(
+            lastSuccess: nil,
+            lastAttempt: lastAttempt,
+            dataSource: .mock,
+            status: .networkFailed,
+            showsSourceStatus: false,
+            now: now,
+            calendar: calendar.setting(timeZone: timeZone),
+            locale: locale,
+            timeZone: timeZone
+        )
+
+        XCTAssertEqual(formatted, "更新 今天 12:48")
+    }
+
     func testRealQuotaHealthLineShowsSuccess() {
         let formatted = StatusPopoverFormatting.realQuotaHealthLine(
             RealQuotaHealthDiagnostic(kind: .requestSucceeded, isUsingCachedSnapshot: false)
