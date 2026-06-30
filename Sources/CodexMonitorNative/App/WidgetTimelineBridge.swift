@@ -4,45 +4,69 @@ import WidgetKit
 
 @MainActor
 final class WidgetTimelineBridge {
+    private let saveState: @MainActor (WidgetDisplayState) -> Void
+    private let reloadTimelines: @MainActor () -> Void
     private var cancellables = Set<AnyCancellable>()
+    private var pendingSaveTask: Task<Void, Never>?
+    private weak var appState: AppState?
 
-    init(appState: AppState) {
-        let saveState: () -> Void = { [weak appState] in
-            guard let appState else { return }
-
-            WidgetDisplayStateStore.save(
-                WidgetDisplayState.make(
-                    snapshot: appState.snapshot,
-                    status: appState.displayStatus,
-                    lastSuccessAt: appState.lastSuccessAt,
-                    lastAttemptAt: appState.lastAttemptAt,
-                    effectiveFiveHourResetAt: appState.effectiveFiveHourResetAt
-                )
-            )
-
+    init(
+        appState: AppState,
+        saveState: @escaping @MainActor (WidgetDisplayState) -> Void = { WidgetDisplayStateStore.save($0) },
+        reloadTimelines: @escaping @MainActor () -> Void = {
             WidgetCenter.shared.reloadTimelines(ofKind: CodexMonitorWidgetConstants.kind)
         }
+    ) {
+        self.appState = appState
+        self.saveState = saveState
+        self.reloadTimelines = reloadTimelines
 
         appState.$snapshot
-            .receive(on: RunLoop.main)
-            .sink { _ in saveState() }
+            .sink { [weak self] _ in self?.requestSave() }
             .store(in: &cancellables)
 
         appState.$status
-            .receive(on: RunLoop.main)
-            .sink { _ in saveState() }
+            .sink { [weak self] _ in self?.requestSave() }
             .store(in: &cancellables)
 
         appState.$lastSuccessAt
-            .receive(on: RunLoop.main)
-            .sink { _ in saveState() }
+            .sink { [weak self] _ in self?.requestSave() }
             .store(in: &cancellables)
 
         appState.$lastAttemptAt
-            .receive(on: RunLoop.main)
-            .sink { _ in saveState() }
+            .sink { [weak self] _ in self?.requestSave() }
             .store(in: &cancellables)
 
-        saveState()
+        saveCurrentState()
+    }
+
+    private func requestSave() {
+        pendingSaveTask?.cancel()
+        pendingSaveTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self, !Task.isCancelled else { return }
+
+            self.saveCurrentState()
+        }
+    }
+
+    private func saveCurrentState() {
+        guard let appState else { return }
+
+        saveState(
+            WidgetDisplayState.make(
+                snapshot: appState.snapshot,
+                status: appState.displayStatus,
+                lastSuccessAt: appState.lastSuccessAt,
+                lastAttemptAt: appState.lastAttemptAt,
+                effectiveFiveHourResetAt: appState.effectiveFiveHourResetAt
+            )
+        )
+
+        reloadTimelines()
+    }
+
+    deinit {
+        pendingSaveTask?.cancel()
     }
 }
