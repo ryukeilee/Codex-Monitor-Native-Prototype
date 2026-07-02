@@ -53,15 +53,19 @@ final class WidgetTimelineBridge {
     private func saveCurrentState() {
         guard let appState else { return }
 
-        saveState(
-            WidgetDisplayState.make(
-                snapshot: appState.snapshot,
-                status: appState.displayStatus,
-                lastSuccessAt: appState.lastSuccessAt,
-                lastAttemptAt: appState.lastAttemptAt,
-                effectiveFiveHourResetAt: appState.effectiveFiveHourResetAt
-            )
+        let state = WidgetDisplayState.make(
+            snapshot: appState.snapshot,
+            status: appState.displayStatus,
+            lastSuccessAt: appState.lastSuccessAt,
+            lastAttemptAt: appState.lastAttemptAt,
+            effectiveFiveHourResetAt: appState.effectiveFiveHourResetAt
         )
+
+        saveState(state)
+
+        guard state.status != .refreshing else {
+            return
+        }
 
         reloadTimelines()
     }

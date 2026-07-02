@@ -87,7 +87,7 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         let appState = AppState(snapshotStore: store, refreshService: WidgetBridgeMockRefreshService(snapshot: refreshed))
 
         var savedStates: [WidgetDisplayState] = []
-        var reloadCount = 0
+        var reloadedStates: [WidgetDisplayState] = []
         let finalStateSaved = expectation(description: "Widget bridge saved the final success state")
         let bridge = WidgetTimelineBridge(
             appState: appState,
@@ -97,8 +97,14 @@ final class WidgetTimelineBridgeTests: XCTestCase {
                     finalStateSaved.fulfill()
                 }
             },
-            reloadTimelines: { reloadCount += 1 }
+            reloadTimelines: {
+                if let state = savedStates.last {
+                    reloadedStates.append(state)
+                }
+            }
         )
+        savedStates.removeAll()
+        reloadedStates.removeAll()
 
         await appState.refreshNow(trigger: .manual)
         await fulfillment(of: [finalStateSaved], timeout: 1)
@@ -108,7 +114,9 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         XCTAssertEqual(savedStates.last?.lastSuccessAt, refreshed.refreshedAt)
         XCTAssertEqual(savedStates.last?.lastAttemptAt, appState.lastAttemptAt)
         XCTAssertEqual(savedStates.last?.effectiveFiveHourResetAt, resetAt)
-        XCTAssertGreaterThan(reloadCount, 0)
+        XCTAssertEqual(reloadedStates.count, 1)
+        XCTAssertEqual(reloadedStates.last?.snapshot, refreshed)
+        XCTAssertEqual(reloadedStates.last?.status, .success)
         _ = bridge
     }
 
@@ -137,7 +145,9 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         let appState = AppState(snapshotStore: store, refreshService: service)
 
         var savedStates: [WidgetDisplayState] = []
+        var reloadCount = 0
         let refreshingStateSaved = expectation(description: "Widget bridge saved refreshing state with cached data")
+        let finalStateSaved = expectation(description: "Widget bridge saved final success state")
         let bridge = WidgetTimelineBridge(
             appState: appState,
             saveState: {
@@ -145,9 +155,14 @@ final class WidgetTimelineBridgeTests: XCTestCase {
                 if $0.snapshot == initial, $0.status == .refreshing, $0.lastAttemptAt != nil {
                     refreshingStateSaved.fulfill()
                 }
+                if $0.snapshot == refreshed, $0.status == .success {
+                    finalStateSaved.fulfill()
+                }
             },
-            reloadTimelines: {}
+            reloadTimelines: { reloadCount += 1 }
         )
+        savedStates.removeAll()
+        reloadCount = 0
 
         let refreshTask = Task {
             await appState.refreshNow(trigger: .manual)
@@ -159,9 +174,14 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         XCTAssertEqual(savedStates.last?.status, .refreshing)
         XCTAssertEqual(savedStates.last?.lastSuccessAt, initial.refreshedAt)
         XCTAssertEqual(savedStates.last?.effectiveFiveHourResetAt, resetAt)
+        XCTAssertEqual(reloadCount, 0)
 
         await service.release()
         await refreshTask.value
+        await fulfillment(of: [finalStateSaved], timeout: 1)
+        XCTAssertEqual(savedStates.last?.snapshot, refreshed)
+        XCTAssertEqual(savedStates.last?.status, .success)
+        XCTAssertEqual(reloadCount, 1)
         _ = bridge
     }
 
@@ -185,6 +205,7 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         )
 
         var savedStates: [WidgetDisplayState] = []
+        var reloadCount = 0
         let finalStateSaved = expectation(description: "Widget bridge saved cached data with failure status")
         let bridge = WidgetTimelineBridge(
             appState: appState,
@@ -194,8 +215,10 @@ final class WidgetTimelineBridgeTests: XCTestCase {
                     finalStateSaved.fulfill()
                 }
             },
-            reloadTimelines: {}
+            reloadTimelines: { reloadCount += 1 }
         )
+        savedStates.removeAll()
+        reloadCount = 0
 
         await appState.refreshNow(trigger: .manual)
         await fulfillment(of: [finalStateSaved], timeout: 1)
@@ -205,6 +228,7 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         XCTAssertEqual(savedStates.last?.lastSuccessAt, initial.refreshedAt)
         XCTAssertEqual(savedStates.last?.lastAttemptAt, appState.lastAttemptAt)
         XCTAssertEqual(savedStates.last?.effectiveFiveHourResetAt, resetAt)
+        XCTAssertEqual(reloadCount, 1)
         _ = bridge
     }
 
