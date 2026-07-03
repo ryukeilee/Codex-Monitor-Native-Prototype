@@ -484,10 +484,12 @@ final class StatusPopoverFormattingTests: XCTestCase {
         )
 
         XCTAssertNil(summary?.timingLine)
-        XCTAssertEqual(summary?.featuredCreditItem?.title, "到期 今天 13:10")
-        XCTAssertEqual(summary?.featuredCreditItem?.subtitle, "剩余 30分 · 授予 今天 10:10")
-        XCTAssertEqual(summary?.additionalCreditItems.map(\.title), ["到期 今天 15:10"])
-        XCTAssertEqual(summary?.additionalCreditItems.map(\.subtitle), ["剩余 2小时30分 · 授予 今天 11:10"])
+        XCTAssertEqual(summary?.featuredCreditItem?.expiryText, "今天 13:10")
+        XCTAssertEqual(summary?.featuredCreditItem?.remainingText, "剩余 30分")
+        XCTAssertEqual(summary?.featuredCreditItem?.grantedText, "今天 10:10")
+        XCTAssertEqual(summary?.additionalCreditItems.map(\.expiryText), ["今天 15:10"])
+        XCTAssertEqual(summary?.additionalCreditItems.map(\.remainingText), ["剩余 2小时30分"])
+        XCTAssertEqual(summary?.additionalCreditItems.map(\.grantedText), ["今天 11:10"])
         XCTAssertEqual(summary?.detailLines, ["详情来源：wham reset credits endpoint"])
     }
 
@@ -532,8 +534,8 @@ final class StatusPopoverFormattingTests: XCTestCase {
             timeZone: TimeZone(secondsFromGMT: 0)!
         )
 
-        XCTAssertEqual(summary?.featuredCreditItem?.title, "到期 今天 13:10")
-        XCTAssertEqual(summary?.additionalCreditItems.map(\.title), ["到期 今天 15:10", "到期 今天 18:10"])
+        XCTAssertEqual(summary?.featuredCreditItem?.expiryText, "今天 13:10")
+        XCTAssertEqual(summary?.additionalCreditItems.map(\.expiryText), ["今天 15:10", "今天 18:10"])
     }
 
     func testResetBankDisplayItemsClampToFastestThreeRowsByResetTime() {

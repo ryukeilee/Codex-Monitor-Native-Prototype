@@ -46,8 +46,8 @@ struct QuotaSummaryView: View {
                             }
 
                             if let featuredCreditItem = resetCreditsSummary.featuredCreditItem {
-                                resetCreditCard(featuredCreditItem)
-                                    .padding(.top, 2)
+                                featuredResetCreditSummary(featuredCreditItem)
+                                    .padding(.top, 4)
                             }
 
                             if !resetCreditsSummary.additionalCreditItems.isEmpty {
@@ -57,11 +57,11 @@ struct QuotaSummaryView: View {
                                 ) {
                                     VStack(alignment: .leading, spacing: 8) {
                                         if let featuredCreditItem = resetCreditsSummary.featuredCreditItem {
-                                            resetCreditCard(featuredCreditItem)
+                                            resetCreditDetailRow(featuredCreditItem)
                                         }
 
                                         ForEach(resetCreditsSummary.additionalCreditItems) { creditItem in
-                                            resetCreditCard(creditItem)
+                                            resetCreditDetailRow(creditItem)
                                         }
                                     }
                                     .padding(.top, 8)
@@ -162,22 +162,40 @@ struct QuotaSummaryView: View {
     }
 
     @ViewBuilder
-    private func resetCreditCard(_ creditItem: StatusPopoverFormatting.ResetCreditDisplayItem) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(creditItem.title)
+    private func featuredResetCreditSummary(_ creditItem: StatusPopoverFormatting.ResetCreditDisplayItem) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("最早到期 \(creditItem.expiryText)")
                 .font(.subheadline.weight(.semibold))
                 .fixedSize(horizontal: false, vertical: true)
 
-            if let subtitle = creditItem.subtitle {
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            Text(creditItem.remainingText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
-        .background(Color.secondary.opacity(0.06))
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    @ViewBuilder
+    private func resetCreditDetailRow(_ creditItem: StatusPopoverFormatting.ResetCreditDisplayItem) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("到期 \(creditItem.expiryText)")
+                .font(.subheadline.weight(.semibold))
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text(detailSubtitle(for: creditItem))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func detailSubtitle(for creditItem: StatusPopoverFormatting.ResetCreditDisplayItem) -> String {
+        if let grantedText = creditItem.grantedText {
+            return "\(creditItem.remainingText) · 授予 \(grantedText)"
+        }
+
+        return creditItem.remainingText
     }
 }

@@ -29,8 +29,9 @@ enum StatusPopoverFormatting {
 
     struct ResetCreditDisplayItem: Equatable, Identifiable {
         let id: String
-        let title: String
-        let subtitle: String?
+        let expiryText: String
+        let remainingText: String
+        let grantedText: String?
     }
 
     struct ResetCreditsSummary: Equatable {
@@ -656,22 +657,23 @@ enum StatusPopoverFormatting {
                 countdownText = "暂不可用"
             }
 
-            var subtitleParts = ["剩余 \(countdownText)"]
+            let subtitleParts = ["剩余 \(countdownText)"]
+            var grantedText: String?
             if let grantedAt = detail.grantedAt {
-                let grantedText = shortTimestamp(
+                grantedText = shortTimestamp(
                     for: grantedAt,
                     now: now,
                     calendar: calendar,
                     locale: locale,
                     timeZone: timeZone
                 )
-                subtitleParts.append("授予 \(grantedText)")
             }
 
             return ResetCreditDisplayItem(
                 id: detail.id,
-                title: "到期 \(expiryText)",
-                subtitle: subtitleParts.joined(separator: " · ")
+                expiryText: expiryText,
+                remainingText: subtitleParts.joined(separator: " · "),
+                grantedText: grantedText
             )
         }
     }
