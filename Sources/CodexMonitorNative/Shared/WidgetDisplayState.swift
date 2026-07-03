@@ -12,7 +12,18 @@ struct WidgetDisplayState: Codable, Equatable {
     let lastSuccessAt: Date?
     let lastAttemptAt: Date?
     let effectiveFiveHourResetAt: Date?
+    let resetCreditFooterLine: String?
     let savedAt: Date
+
+    private enum CodingKeys: String, CodingKey {
+        case snapshot
+        case status
+        case lastSuccessAt
+        case lastAttemptAt
+        case effectiveFiveHourResetAt
+        case resetCreditFooterLine
+        case savedAt
+    }
 
     static func make(
         snapshot: QuotaSnapshot,
@@ -20,6 +31,7 @@ struct WidgetDisplayState: Codable, Equatable {
         lastSuccessAt: Date?,
         lastAttemptAt: Date?,
         effectiveFiveHourResetAt: Date?,
+        resetCreditFooterLine: String? = nil,
         savedAt: Date = .now
     ) -> WidgetDisplayState {
         WidgetDisplayState(
@@ -28,7 +40,40 @@ struct WidgetDisplayState: Codable, Equatable {
             lastSuccessAt: lastSuccessAt,
             lastAttemptAt: lastAttemptAt,
             effectiveFiveHourResetAt: effectiveFiveHourResetAt,
+            resetCreditFooterLine: resetCreditFooterLine ?? Self.makeResetCreditFooterLine(for: snapshot),
             savedAt: savedAt
+        )
+    }
+
+    init(
+        snapshot: QuotaSnapshot,
+        status: QuotaRefreshStatus,
+        lastSuccessAt: Date?,
+        lastAttemptAt: Date?,
+        effectiveFiveHourResetAt: Date?,
+        resetCreditFooterLine: String?,
+        savedAt: Date
+    ) {
+        self.snapshot = snapshot
+        self.status = status
+        self.lastSuccessAt = lastSuccessAt
+        self.lastAttemptAt = lastAttemptAt
+        self.effectiveFiveHourResetAt = effectiveFiveHourResetAt
+        self.resetCreditFooterLine = resetCreditFooterLine
+        self.savedAt = savedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let snapshot = try container.decode(QuotaSnapshot.self, forKey: .snapshot)
+        self.init(
+            snapshot: snapshot,
+            status: try container.decode(QuotaRefreshStatus.self, forKey: .status),
+            lastSuccessAt: try container.decodeIfPresent(Date.self, forKey: .lastSuccessAt),
+            lastAttemptAt: try container.decodeIfPresent(Date.self, forKey: .lastAttemptAt),
+            effectiveFiveHourResetAt: try container.decodeIfPresent(Date.self, forKey: .effectiveFiveHourResetAt),
+            resetCreditFooterLine: try container.decodeIfPresent(String.self, forKey: .resetCreditFooterLine) ?? Self.makeResetCreditFooterLine(for: snapshot),
+            savedAt: try container.decode(Date.self, forKey: .savedAt)
         )
     }
 
@@ -38,6 +83,7 @@ struct WidgetDisplayState: Codable, Equatable {
         lastSuccessAt: nil,
         lastAttemptAt: nil,
         effectiveFiveHourResetAt: nil,
+        resetCreditFooterLine: nil,
         savedAt: .now
     )
 
@@ -67,6 +113,53 @@ struct WidgetDisplayState: Codable, Equatable {
             lastAttempt: lastAttemptAt,
             now: now
         )
+    }
+
+    var earliestResetCreditExpiresAt: Date? {
+        snapshot.resetCreditDetails
+            .filter { normalizedResetCreditStatus($0.status) == "available" }
+            .compactMap(\.expiresAt)
+            .min()
+    }
+
+    private func normalizedResetCreditStatus(_ status: String) -> String {
+        status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    var resetCreditFooterText: String? {
+        resetCreditFooterLine ?? earliestResetCreditLine()
+    }
+
+    func earliestResetCreditLine(
+        locale: Locale = .autoupdatingCurrent,
+        timeZone: TimeZone = .autoupdatingCurrent
+    ) -> String? {
+        guard let earliestResetCreditExpiresAt else {
+            return nil
+        }
+
+        let formatter = DateFormatter()
+        formatter.locale = locale
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "M/d HH:mm"
+        return "最早重置 \(formatter.string(from: earliestResetCreditExpiresAt))"
+    }
+
+    private static func makeResetCreditFooterLine(for snapshot: QuotaSnapshot) -> String? {
+        let earliestExpiry = snapshot.resetCreditDetails
+            .filter { $0.status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "available" }
+            .compactMap(\.expiresAt)
+            .min()
+
+        guard let earliestExpiry else {
+            return nil
+        }
+
+        let formatter = DateFormatter()
+        formatter.locale = .autoupdatingCurrent
+        formatter.timeZone = .autoupdatingCurrent
+        formatter.dateFormat = "M/d HH:mm"
+        return "最早重置 \(formatter.string(from: earliestExpiry))"
     }
 }
 

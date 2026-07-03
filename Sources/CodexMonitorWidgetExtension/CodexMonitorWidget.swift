@@ -36,7 +36,6 @@ struct CodexMonitorWidgetView: View {
     }
 
     @Environment(\.widgetFamily) private var family
-    @Environment(\.widgetContentMargins) private var widgetContentMargins
     let entry: CodexMonitorWidgetEntry
     let familyOverride: WidgetFamily?
 
@@ -53,39 +52,21 @@ struct CodexMonitorWidgetView: View {
         activeFamily == .systemSmall
     }
 
-    private var panelExpansionInsets: EdgeInsets {
-        guard !isSmall else {
-            return EdgeInsets()
-        }
-
-        return widgetContentMargins
-    }
-
     var body: some View {
-        GeometryReader { geometry in
-            ZStack {
-                panelBackground
-                    .frame(
-                        width: geometry.size.width + panelExpansionInsets.leading + panelExpansionInsets.trailing,
-                        height: geometry.size.height + panelExpansionInsets.top + panelExpansionInsets.bottom
-                    )
-                    .offset(
-                        x: (panelExpansionInsets.leading - panelExpansionInsets.trailing) / 2,
-                        y: (panelExpansionInsets.top - panelExpansionInsets.bottom) / 2
-                    )
-
-                dashboardLayout
-                    .padding(.top, isSmall ? 14 : 11)
-                    .padding(.horizontal, isSmall ? 13 : 8)
-                    .padding(.bottom, isSmall ? 11 : 10)
-                    .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
+        dashboardLayout
+            .padding(.top, isSmall ? 14 : 11)
+            .padding(.horizontal, isSmall ? 13 : 8)
+            .padding(.bottom, isSmall ? 11 : 10)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .overlay(alignment: .bottom) {
+                if let resetCreditFooterText {
+                    footerDock(resetCreditFooterText)
+                        .padding(.bottom, isSmall ? 12 : 14)
+                }
             }
-            .frame(width: geometry.size.width, height: geometry.size.height)
-        }
-        .containerBackground(for: .widget) {
-            Color.clear
-        }
-        .clipShape(ContainerRelativeShape())
+            .containerBackground(for: .widget) {
+                panelBackground
+            }
     }
 
     private var dashboardLayout: some View {
@@ -560,6 +541,34 @@ struct CodexMonitorWidgetView: View {
         }
 
         return condensedTimeText(from: line)
+    }
+
+    private var resetCreditFooterText: String? {
+        guard let line = entry.state.resetCreditFooterText else {
+            return nil
+        }
+
+        if line.hasPrefix("最早重置 ") {
+            return String(line.dropFirst("最早重置 ".count))
+        }
+
+        return line
+    }
+
+    private var footerDockHeight: CGFloat {
+        isSmall ? 12 : 13
+    }
+
+    private func footerDock(_ line: String) -> some View {
+        Text(line)
+            .font(.system(size: isSmall ? 8.5 : 9, weight: .medium, design: .rounded))
+            .foregroundStyle(Color(red: 0.98, green: 0.93, blue: 0.86).opacity(isSmall ? 0.58 : 0.62))
+            .monospacedDigit()
+            .multilineTextAlignment(.center)
+            .lineLimit(1)
+            .minimumScaleFactor(0.84)
+            .allowsTightening(true)
+            .frame(maxWidth: .infinity, minHeight: footerDockHeight, alignment: .center)
     }
 
     private func condensedTimeText(from line: String) -> String {

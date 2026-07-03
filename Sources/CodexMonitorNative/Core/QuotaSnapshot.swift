@@ -10,6 +10,34 @@ struct ResetCreditRawField: Codable, Equatable {
     let value: String
 }
 
+struct ResetCreditDiagnosticSnapshot: Codable, Equatable {
+    let summary: String
+}
+
+enum ResetCreditDetailsState: String, Codable, Equatable {
+    case unavailable
+    case appServerCountOnly
+    case detailed
+}
+
+struct ResetCreditStatusSummary: Codable, Equatable, Identifiable {
+    let status: String
+    let count: Int
+
+    var id: String { status }
+}
+
+struct ResetCreditDetailSnapshot: Codable, Equatable, Identifiable {
+    let ordinal: Int
+    let status: String
+    let grantedAt: Date?
+    let expiresAt: Date?
+
+    var id: String {
+        "reset-credit-\(ordinal)"
+    }
+}
+
 struct ResetCreditTimeSnapshot: Codable, Equatable, Identifiable {
     let label: String
     let date: Date
@@ -104,6 +132,10 @@ struct QuotaSnapshot: Codable, Equatable {
     let weeklyQuotaPercent: Int
     let fiveHourQuotaPercent: Int
     let resetAvailableCount: Int?
+    let resetCreditDetailsState: ResetCreditDetailsState
+    let resetCreditDiagnostic: ResetCreditDiagnosticSnapshot?
+    let resetCreditDetails: [ResetCreditDetailSnapshot]
+    let resetCreditStatusSummary: [ResetCreditStatusSummary]
     let resetCreditTimeEntries: [ResetCreditTimeSnapshot]
     let resetCreditRawFields: [ResetCreditRawField]
     let fiveHourResetAt: Date?
@@ -117,6 +149,10 @@ struct QuotaSnapshot: Codable, Equatable {
         weeklyQuotaPercent: Int,
         fiveHourQuotaPercent: Int,
         resetAvailableCount: Int? = nil,
+        resetCreditDetailsState: ResetCreditDetailsState = .appServerCountOnly,
+        resetCreditDiagnostic: ResetCreditDiagnosticSnapshot? = nil,
+        resetCreditDetails: [ResetCreditDetailSnapshot] = [],
+        resetCreditStatusSummary: [ResetCreditStatusSummary] = [],
         resetCreditTimeEntries: [ResetCreditTimeSnapshot] = [],
         resetCreditRawFields: [ResetCreditRawField] = [],
         fiveHourResetAt: Date? = nil,
@@ -129,6 +165,10 @@ struct QuotaSnapshot: Codable, Equatable {
         self.weeklyQuotaPercent = max(0, min(100, weeklyQuotaPercent))
         self.fiveHourQuotaPercent = max(0, min(100, fiveHourQuotaPercent))
         self.resetAvailableCount = resetAvailableCount
+        self.resetCreditDetailsState = resetCreditDetailsState
+        self.resetCreditDiagnostic = resetCreditDiagnostic
+        self.resetCreditDetails = resetCreditDetails
+        self.resetCreditStatusSummary = resetCreditStatusSummary
         self.resetCreditTimeEntries = resetCreditTimeEntries
         self.resetCreditRawFields = resetCreditRawFields
         self.fiveHourResetAt = fiveHourResetAt
@@ -139,12 +179,16 @@ struct QuotaSnapshot: Codable, Equatable {
         self.schemaVersion = schemaVersion
     }
 
-    static let currentSchemaVersion = 4
+    static let currentSchemaVersion = 6
 
     static let fallback = QuotaSnapshot(
         weeklyQuotaPercent: 0,
         fiveHourQuotaPercent: 0,
         resetAvailableCount: nil,
+        resetCreditDetailsState: .appServerCountOnly,
+        resetCreditDiagnostic: nil,
+        resetCreditDetails: [],
+        resetCreditStatusSummary: [],
         resetCreditTimeEntries: [],
         resetCreditRawFields: [],
         fiveHourResetAt: nil,
@@ -158,6 +202,10 @@ struct QuotaSnapshot: Codable, Equatable {
         weeklyQuotaPercent: 0,
         fiveHourQuotaPercent: 0,
         resetAvailableCount: nil,
+        resetCreditDetailsState: .appServerCountOnly,
+        resetCreditDiagnostic: nil,
+        resetCreditDetails: [],
+        resetCreditStatusSummary: [],
         resetCreditTimeEntries: [],
         resetCreditRawFields: [],
         fiveHourResetAt: nil,
@@ -171,6 +219,10 @@ struct QuotaSnapshot: Codable, Equatable {
         case weeklyQuotaPercent
         case fiveHourQuotaPercent
         case resetAvailableCount
+        case resetCreditDetailsState
+        case resetCreditDiagnostic
+        case resetCreditDetails
+        case resetCreditStatusSummary
         case resetCreditTimeEntries
         case resetCreditRawFields
         case fiveHourResetAt
@@ -186,6 +238,10 @@ struct QuotaSnapshot: Codable, Equatable {
         let weeklyQuotaPercent = try container.decode(Int.self, forKey: .weeklyQuotaPercent)
         let fiveHourQuotaPercent = try container.decode(Int.self, forKey: .fiveHourQuotaPercent)
         let resetAvailableCount = try container.decodeIfPresent(Int.self, forKey: .resetAvailableCount)
+        let resetCreditDetailsState = try container.decodeIfPresent(ResetCreditDetailsState.self, forKey: .resetCreditDetailsState) ?? .appServerCountOnly
+        let resetCreditDiagnostic = try container.decodeIfPresent(ResetCreditDiagnosticSnapshot.self, forKey: .resetCreditDiagnostic)
+        let resetCreditDetails = try container.decodeIfPresent([ResetCreditDetailSnapshot].self, forKey: .resetCreditDetails) ?? []
+        let resetCreditStatusSummary = try container.decodeIfPresent([ResetCreditStatusSummary].self, forKey: .resetCreditStatusSummary) ?? []
         let resetCreditTimeEntries = try container.decodeIfPresent([ResetCreditTimeSnapshot].self, forKey: .resetCreditTimeEntries) ?? []
         let resetCreditRawFields = try container.decodeIfPresent([ResetCreditRawField].self, forKey: .resetCreditRawFields) ?? []
         let fiveHourResetAt = try container.decodeIfPresent(Date.self, forKey: .fiveHourResetAt)
@@ -199,6 +255,10 @@ struct QuotaSnapshot: Codable, Equatable {
             weeklyQuotaPercent: weeklyQuotaPercent,
             fiveHourQuotaPercent: fiveHourQuotaPercent,
             resetAvailableCount: resetAvailableCount,
+            resetCreditDetailsState: resetCreditDetailsState,
+            resetCreditDiagnostic: resetCreditDiagnostic,
+            resetCreditDetails: resetCreditDetails,
+            resetCreditStatusSummary: resetCreditStatusSummary,
             resetCreditTimeEntries: resetCreditTimeEntries,
             resetCreditRawFields: resetCreditRawFields,
             fiveHourResetAt: fiveHourResetAt,

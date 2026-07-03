@@ -1,5 +1,9 @@
 import Foundation
 
+protocol RealQuotaRefreshing: Sendable {
+    func fetchQuota() async throws -> QuotaSnapshot
+}
+
 enum RealQuotaError: LocalizedError {
     case codexNotFound
     case spawnFailed(String)
@@ -289,7 +293,7 @@ actor CodexRPCClient {
     }
 }
 
-struct RealQuotaProvider {
+struct RealQuotaProvider: RealQuotaRefreshing {
     private struct ParsedResetMetadata {
         let resetAt: Date?
         let resolvedFieldName: String?
@@ -299,8 +303,6 @@ struct RealQuotaProvider {
 
     private struct ParsedResetCredits {
         let availableCount: Int?
-        let timeEntries: [ResetCreditTimeSnapshot]
-        let rawFields: [ResetCreditRawField]
     }
 
     private let codexPath: String
@@ -387,8 +389,12 @@ struct RealQuotaProvider {
             weeklyQuotaPercent: weeklyRemaining,
             fiveHourQuotaPercent: fiveHourRemaining,
             resetAvailableCount: resetCredits.availableCount,
-            resetCreditTimeEntries: resetCredits.timeEntries,
-            resetCreditRawFields: resetCredits.rawFields,
+            resetCreditDetailsState: .appServerCountOnly,
+            resetCreditDiagnostic: nil,
+            resetCreditDetails: [],
+            resetCreditStatusSummary: [],
+            resetCreditTimeEntries: [],
+            resetCreditRawFields: [],
             fiveHourResetAt: fiveHourResetAt,
             resetBanks: parseResetBanks(
                 from: rateLimitsByLimitId,
@@ -534,91 +540,21 @@ struct RealQuotaProvider {
 
     private static func parseResetCredits(from rawValue: Any?) -> ParsedResetCredits {
         guard let container = rawValue as? [String: Any] else {
-            return ParsedResetCredits(availableCount: nil, timeEntries: [], rawFields: [])
+            return ParsedResetCredits(availableCount: nil)
         }
 
-        var rawFields: [ResetCreditRawField] = []
         var availableCount: Int?
-        var timeEntries: [ResetCreditTimeSnapshot] = []
 
-        func walk(_ value: Any, path: String) {
-            if let nested = value as? [String: Any] {
-                for key in nested.keys.sorted() {
-                    guard let child = nested[key] else { continue }
-                    walk(child, path: "\(path).\(key)")
-                }
-                return
-            }
-
-            if let nested = value as? [Any] {
-                for (index, child) in nested.enumerated() {
-                    walk(child, path: "\(path)[\(index)]")
-                }
-                return
-            }
-
-            let valueText = stringify(value)
-            rawFields.append(ResetCreditRawField(path: path, value: valueText))
-
-            if path == "rateLimitResetCredits.availableCount" {
-                if let count = value as? Int {
-                    availableCount = count
-                } else if let number = value as? NSNumber {
-                    availableCount = number.intValue
-                } else if let string = value as? String, let count = Int(string) {
-                    availableCount = count
-                }
-            }
-
-            guard let label = resetCreditTimeLabel(for: path), let date = parseDate(value) else {
-                return
-            }
-
-            timeEntries.append(
-                ResetCreditTimeSnapshot(
-                    label: label,
-                    date: date,
-                    sourcePath: path
-                )
-            )
+        let rawAvailableCount = container["availableCount"] ?? container["available_count"]
+        if let count = rawAvailableCount as? Int {
+            availableCount = count
+        } else if let number = rawAvailableCount as? NSNumber {
+            availableCount = number.intValue
+        } else if let string = rawAvailableCount as? String, let count = Int(string) {
+            availableCount = count
         }
 
-        walk(container, path: "rateLimitResetCredits")
-
-        let sortedEntries = timeEntries
-            .sorted { lhs, rhs in
-                if lhs.date != rhs.date {
-                    return lhs.date < rhs.date
-                }
-                if lhs.label != rhs.label {
-                    return lhs.label < rhs.label
-                }
-                return lhs.sourcePath < rhs.sourcePath
-            }
-            .prefix(3)
-
-        return ParsedResetCredits(
-            availableCount: availableCount,
-            timeEntries: Array(sortedEntries),
-            rawFields: rawFields
-        )
-    }
-
-    private static func resetCreditTimeLabel(for path: String) -> String? {
-        let terminal = path
-            .split(separator: ".")
-            .last
-            .map(String.init)?
-            .replacingOccurrences(of: #"\[\d+\]"#, with: "", options: .regularExpression)
-
-        switch terminal {
-        case "expiresAt", "expireAt":
-            return "到期时间"
-        case "restoresAt", "restoreAt", "resetAt", "resetsAt", "nextResetAt":
-            return "恢复时间"
-        default:
-            return nil
-        }
+        return ParsedResetCredits(availableCount: availableCount)
     }
 
     private static func stringify(_ rawValue: Any) -> String {

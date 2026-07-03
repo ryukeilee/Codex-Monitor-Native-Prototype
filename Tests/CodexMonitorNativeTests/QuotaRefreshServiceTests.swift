@@ -1,0 +1,105 @@
+import XCTest
+@testable import CodexMonitorNative
+
+final class QuotaRefreshServiceTests: XCTestCase {
+    func testRefreshEnrichesAppServerCountOnlySnapshotWithResetCreditDetails() async throws {
+        let earlyExpiry = makeDate("2026-06-19T18:00:00Z")
+        let lateExpiry = makeDate("2026-06-20T12:00:00Z")
+        let appServerSnapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 70,
+            fiveHourQuotaPercent: 64,
+            resetAvailableCount: 1,
+            resetCreditDetailsState: .appServerCountOnly,
+            fiveHourResetAt: makeDate("2026-06-19T14:10:00Z"),
+            refreshedAt: makeDate("2026-06-19T12:40:00Z"),
+            dataSource: .real
+        )
+        let details = ResetCreditsDetailPayload(
+            availableCount: 2,
+            availableCredits: [
+                ResetCreditDetailSnapshot(
+                    ordinal: 1,
+                    status: "available",
+                    grantedAt: makeDate("2026-06-19T10:00:00Z"),
+                    expiresAt: earlyExpiry
+                ),
+                ResetCreditDetailSnapshot(
+                    ordinal: 2,
+                    status: "available",
+                    grantedAt: makeDate("2026-06-19T12:00:00Z"),
+                    expiresAt: lateExpiry
+                )
+            ],
+            statusSummary: [ResetCreditStatusSummary(status: "available", count: 2)]
+        )
+
+        let service = QuotaRefreshService(
+            realProvider: StubRealQuotaProvider(snapshot: appServerSnapshot),
+            resetCreditsDetailProvider: SucceedingResetCreditsProvider(payload: details),
+            mockProvider: MockQuotaProvider()
+        )
+
+        let refreshed = try await service.refresh(basedOn: QuotaSnapshot.notConnected)
+
+        XCTAssertEqual(refreshed.resetAvailableCount, 2)
+        XCTAssertEqual(refreshed.resetCreditDetailsState, .detailed)
+        XCTAssertNil(refreshed.resetCreditDiagnostic)
+        XCTAssertEqual(refreshed.resetCreditDetails.compactMap(\.expiresAt), [earlyExpiry, lateExpiry])
+        XCTAssertEqual(refreshed.resetCreditDetails.compactMap(\.expiresAt).min(), earlyExpiry)
+        XCTAssertEqual(refreshed.resetCreditStatusSummary, [ResetCreditStatusSummary(status: "available", count: 2)])
+    }
+
+    func testRefreshFallsBackToAppServerCountWhenResetCreditDetailsFail() async throws {
+        let appServerSnapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 70,
+            fiveHourQuotaPercent: 64,
+            resetAvailableCount: 5,
+            resetCreditDetailsState: .appServerCountOnly,
+            fiveHourResetAt: makeDate("2026-06-19T14:10:00Z"),
+            refreshedAt: makeDate("2026-06-19T12:40:00Z"),
+            dataSource: .real
+        )
+
+        let service = QuotaRefreshService(
+            realProvider: StubRealQuotaProvider(snapshot: appServerSnapshot),
+            resetCreditsDetailProvider: FailingResetCreditsProvider(),
+            mockProvider: MockQuotaProvider()
+        )
+
+        let refreshed = try await service.refresh(basedOn: QuotaSnapshot.notConnected)
+
+        XCTAssertEqual(refreshed.resetAvailableCount, 5)
+        XCTAssertEqual(refreshed.resetCreditDetailsState, ResetCreditDetailsState.unavailable)
+        XCTAssertEqual(refreshed.resetCreditDiagnostic?.summary, "HTTP 状态码 503")
+        XCTAssertTrue(refreshed.resetCreditDetails.isEmpty)
+        XCTAssertTrue(refreshed.resetCreditStatusSummary.isEmpty)
+    }
+
+    private func makeDate(_ iso8601: String) -> Date {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: iso8601)!
+    }
+}
+
+private struct StubRealQuotaProvider: RealQuotaRefreshing, Sendable {
+    let snapshot: QuotaSnapshot
+
+    func fetchQuota() async throws -> QuotaSnapshot {
+        snapshot
+    }
+}
+
+private struct FailingResetCreditsProvider: ResetCreditsDetailRefreshing, Sendable {
+    func fetchDetails() async throws -> ResetCreditsDetailPayload {
+        throw ResetCreditsDetailError.unexpectedStatusCode(503)
+    }
+}
+
+private struct SucceedingResetCreditsProvider: ResetCreditsDetailRefreshing, Sendable {
+    let payload: ResetCreditsDetailPayload
+
+    func fetchDetails() async throws -> ResetCreditsDetailPayload {
+        payload
+    }
+}

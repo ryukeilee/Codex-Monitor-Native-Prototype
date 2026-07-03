@@ -38,10 +38,9 @@ final class RealQuotaProviderTests: XCTestCase {
         XCTAssertEqual(snapshot?.fiveHourQuotaPercent, 43)
         XCTAssertEqual(snapshot?.weeklyQuotaPercent, 52)
         XCTAssertEqual(snapshot?.resetAvailableCount, 5)
-        XCTAssertEqual(
-            snapshot?.resetCreditRawFields,
-            [ResetCreditRawField(path: "rateLimitResetCredits.availableCount", value: "5")]
-        )
+        XCTAssertEqual(snapshot?.resetCreditDetailsState, .appServerCountOnly)
+        XCTAssertTrue(snapshot?.resetCreditDetails.isEmpty ?? false)
+        XCTAssertTrue(snapshot?.resetCreditStatusSummary.isEmpty ?? false)
         XCTAssertTrue(snapshot?.resetCreditTimeEntries.isEmpty ?? false)
         XCTAssertEqual(snapshot?.resetBanks.map(\.id), [
             "codex.primary",
@@ -68,11 +67,13 @@ final class RealQuotaProviderTests: XCTestCase {
         let snapshot = RealQuotaProvider.parseRateLimits(response: response)
 
         XCTAssertEqual(snapshot?.resetAvailableCount, 5)
+        XCTAssertEqual(snapshot?.resetCreditDetailsState, .appServerCountOnly)
+        XCTAssertTrue(snapshot?.resetCreditDetails.isEmpty ?? false)
         XCTAssertTrue(snapshot?.resetCreditTimeEntries.isEmpty ?? false)
         XCTAssertEqual(snapshot?.resetBanks.first?.resolvedResetFieldName, "resetAt")
     }
 
-    func testParseRateLimitsUsesOnlyResetCreditFieldsForCreditTimes() {
+    func testParseRateLimitsDoesNotUseAppServerResetCreditDates() {
         let response: [String: Any] = [
             "rateLimitResetCredits": [
                 "availableCount": 5,
@@ -97,12 +98,12 @@ final class RealQuotaProviderTests: XCTestCase {
 
         let snapshot = RealQuotaProvider.parseRateLimits(response: response)
 
-        XCTAssertEqual(snapshot?.resetCreditTimeEntries.map(\.label), ["恢复时间", "恢复时间", "到期时间"])
-        XCTAssertEqual(snapshot?.resetCreditTimeEntries.map(\.sourcePath), [
-            "rateLimitResetCredits.restoresAt[0]",
-            "rateLimitResetCredits.restoresAt[1]",
-            "rateLimitResetCredits.expiresAt[0]"
-        ])
+        XCTAssertEqual(snapshot?.resetAvailableCount, 5)
+        XCTAssertEqual(snapshot?.resetCreditDetailsState, .appServerCountOnly)
+        XCTAssertTrue(snapshot?.resetCreditDetails.isEmpty ?? false)
+        XCTAssertTrue(snapshot?.resetCreditStatusSummary.isEmpty ?? false)
+        XCTAssertTrue(snapshot?.resetCreditTimeEntries.isEmpty ?? false)
+        XCTAssertTrue(snapshot?.resetCreditRawFields.isEmpty ?? false)
     }
 
     func testParseRateLimitsUsesFallbackWeeklyBankWhenSecondaryMissing() {
