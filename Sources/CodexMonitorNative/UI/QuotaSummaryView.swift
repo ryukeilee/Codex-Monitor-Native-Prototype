@@ -28,8 +28,8 @@ struct QuotaSummaryView: View {
                 }
 
                 if let resetCreditsSummary {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Reset Credits")
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("重置次数")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
 
@@ -71,9 +71,6 @@ struct QuotaSummaryView: View {
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(12)
-                        .background(Color.secondary.opacity(0.08))
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
                         if !resetCreditsSummary.detailLines.isEmpty {
                             DisclosureGroup("原始字段与诊断") {
@@ -189,6 +186,9 @@ struct QuotaSummaryView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(Color.secondary.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     private func detailSubtitle(for creditItem: StatusPopoverFormatting.ResetCreditDisplayItem) -> String {

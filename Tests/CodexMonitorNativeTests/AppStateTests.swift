@@ -259,8 +259,8 @@ final class AppStateTests: XCTestCase {
             timeZone: TimeZone(secondsFromGMT: 0)!
         )
 
-        XCTAssertEqual(summary?.countLine, "30 天内剩余重置速率限制次数未知（未暴露）")
-        XCTAssertEqual(summary?.timingLine, "到期/恢复时间未知（未暴露）")
+        XCTAssertEqual(summary?.countLine, "剩余重置次数未知（未暴露）")
+        XCTAssertEqual(summary?.timingLine, "到期时间暂不可用")
     }
 
     func testConsecutiveFailuresEscalateBackoff() async {

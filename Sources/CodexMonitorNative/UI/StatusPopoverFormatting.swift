@@ -371,9 +371,9 @@ enum StatusPopoverFormatting {
 
         let countLine: String
         if let count = snapshot.resetAvailableCount {
-            countLine = "30 天内剩余重置速率限制次数：\(count)"
+            countLine = "剩余重置次数：\(count)"
         } else {
-            countLine = "30 天内剩余重置速率限制次数未知（未暴露）"
+            countLine = "剩余重置次数未知（未暴露）"
         }
 
         let creditItems = resetCreditDisplayItems(

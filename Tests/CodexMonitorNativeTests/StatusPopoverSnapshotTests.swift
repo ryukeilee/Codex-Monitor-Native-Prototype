@@ -97,6 +97,7 @@ final class StatusPopoverSnapshotTests: XCTestCase {
         XCTAssertTrue(source.contains("DisclosureGroup(\"原始字段与诊断\")"))
         XCTAssertTrue(source.contains("DisclosureGroup("))
         XCTAssertTrue(source.contains("查看全部（"))
+        XCTAssertTrue(source.contains("Text(\"重置次数\")"))
         XCTAssertTrue(source.contains("featuredResetCreditSummary("))
         XCTAssertTrue(source.contains("Text(\"最早到期"))
     }

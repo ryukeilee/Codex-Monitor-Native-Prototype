@@ -365,7 +365,7 @@ final class StatusPopoverFormattingTests: XCTestCase {
             status: .success
         )
 
-        XCTAssertEqual(summary?.countLine, "30 天内剩余重置速率限制次数：5")
+        XCTAssertEqual(summary?.countLine, "剩余重置次数：5")
         XCTAssertEqual(summary?.timingLine, "到期时间暂不可用")
         XCTAssertNil(summary?.featuredCreditItem)
         XCTAssertTrue(summary?.additionalCreditItems.isEmpty ?? false)
@@ -386,7 +386,7 @@ final class StatusPopoverFormattingTests: XCTestCase {
             status: .success
         )
 
-        XCTAssertEqual(summary?.countLine, "30 天内剩余重置速率限制次数未知（未暴露）")
+        XCTAssertEqual(summary?.countLine, "剩余重置次数未知（未暴露）")
         XCTAssertEqual(summary?.timingLine, "到期时间暂不可用")
         XCTAssertEqual(summary?.detailLines, ["详情来源暂不可用，当前仅显示 app-server 次数"])
     }
@@ -654,7 +654,7 @@ final class StatusPopoverFormattingTests: XCTestCase {
             status: .networkFailed
         )
 
-        XCTAssertEqual(summary?.countLine, "30 天内剩余重置速率限制次数：2")
+        XCTAssertEqual(summary?.countLine, "剩余重置次数：2")
         XCTAssertEqual(
             summary?.detailLines,
             [
