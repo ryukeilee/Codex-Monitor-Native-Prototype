@@ -7,24 +7,94 @@ import XCTest
 @MainActor
 final class StatusPopoverSnapshotTests: XCTestCase {
     func testRenderStatusPopoverSnapshot() async throws {
+        let outputURL = URL(fileURLWithPath: "/private/tmp/codex-monitor-status-popover.png")
+        try await renderSnapshot(
+            snapshot: QuotaSnapshot(
+                weeklyQuotaPercent: 71,
+                fiveHourQuotaPercent: 64,
+                resetAvailableCount: 5,
+                fiveHourResetAt: makeDate("2026-06-26T14:10:00Z"),
+                refreshedAt: makeDate("2026-06-26T11:40:00Z"),
+                dataSource: .real
+            ),
+            outputURL: outputURL
+        )
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outputURL.path))
+    }
+
+    func testRenderStatusPopoverWithResetBanksSnapshot() async throws {
+        let refreshedAt = makeDate("2026-06-26T11:40:00Z")
+        let outputURL = URL(fileURLWithPath: "/private/tmp/codex-monitor-status-popover-reset-banks.png")
+        try await renderSnapshot(
+            snapshot: QuotaSnapshot(
+                weeklyQuotaPercent: 71,
+                fiveHourQuotaPercent: 64,
+                resetAvailableCount: 5,
+                fiveHourResetAt: makeDate("2026-06-26T14:10:00Z"),
+                resetBanks: [
+                    ResetBankSnapshot(
+                        limitId: "codex",
+                        windowId: "primary",
+                        displayName: "5小时额度",
+                        remainingPercent: 64,
+                        resetAt: makeDate("2026-06-26T14:10:00Z"),
+                        rawResetFields: []
+                    ),
+                    ResetBankSnapshot(
+                        limitId: "codex",
+                        windowId: "secondary",
+                        displayName: "周额度",
+                        remainingPercent: 71,
+                        resetAt: nil,
+                        rawResetFields: []
+                    ),
+                    ResetBankSnapshot(
+                        limitId: "bonus",
+                        windowId: "primary",
+                        displayName: "bonus.primary",
+                        remainingPercent: 80,
+                        resetAt: nil,
+                        rawResetFields: [ResetBankRawField(name: "windowResetAt", value: "<null>")]
+                    )
+                ],
+                refreshedAt: refreshedAt,
+                dataSource: .real
+            ),
+            outputURL: outputURL
+        )
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outputURL.path))
+    }
+
+    func testQuotaSummaryViewSourceDoesNotRenderRateLimitBanksSection() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = repoRoot.appendingPathComponent("Sources/CodexMonitorNative/UI/QuotaSummaryView.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        XCTAssertFalse(source.contains("Rate Limit Banks（最快 3 条）"))
+        XCTAssertFalse(source.contains("rateLimitBankDiagnosticsSummary("))
+        XCTAssertFalse(source.contains("resetBankItems"))
+    }
+
+    private func renderSnapshot(snapshot: QuotaSnapshot, outputURL: URL) async throws {
+        let hostingView = try await makeHostingView(snapshot: snapshot)
+        try saveSnapshot(of: hostingView, to: outputURL)
+    }
+
+    private func makeHostingView(snapshot: QuotaSnapshot) async throws -> NSHostingView<AnyView> {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.snapshot.\(UUID().uuidString)")!
         let store = SnapshotStore(defaults: defaults, key: "snapshot")
-        let refreshedAt = makeDate("2026-06-26T11:40:00Z")
-        let resetAt = makeDate("2026-06-26T14:10:00Z")
-        let snapshot = QuotaSnapshot(
-            weeklyQuotaPercent: 71,
-            fiveHourQuotaPercent: 64,
-            fiveHourResetAt: resetAt,
-            refreshedAt: refreshedAt,
-            dataSource: .real
-        )
         store.saveSnapshot(snapshot)
 
         let appState = AppState(snapshotStore: store, refreshService: SnapshotRefreshService(snapshot: snapshot))
         await appState.refreshNow(trigger: .manual)
 
         let launchManager = SnapshotLoginItemManager(status: .enabled)
-        let view = ZStack {
+        let view = AnyView(ZStack {
             Color(nsColor: .windowBackgroundColor)
             StatusPopoverView(
                 appState: appState,
@@ -32,16 +102,16 @@ final class StatusPopoverSnapshotTests: XCTestCase {
                 onRefresh: {},
                 onQuit: {}
             )
-        }
+        })
 
         let hostingView = NSHostingView(rootView: view)
-        hostingView.frame = NSRect(x: 0, y: 0, width: 314, height: 240)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 314, height: 640)
+        hostingView.layoutSubtreeIfNeeded()
+        let fittingHeight = max(240, hostingView.fittingSize.height.rounded(.up))
+        hostingView.frame = NSRect(x: 0, y: 0, width: 314, height: fittingHeight)
         hostingView.layoutSubtreeIfNeeded()
 
-        let outputURL = URL(fileURLWithPath: "/private/tmp/codex-monitor-status-popover.png")
-        try saveSnapshot(of: hostingView, to: outputURL)
-
-        XCTAssertTrue(FileManager.default.fileExists(atPath: outputURL.path))
+        return hostingView
     }
 
     private func saveSnapshot(of view: NSView, to url: URL) throws {

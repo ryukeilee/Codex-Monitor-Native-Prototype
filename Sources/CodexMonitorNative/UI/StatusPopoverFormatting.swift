@@ -11,6 +11,28 @@ enum StatusPopoverFormatting {
         let remainingText: String
     }
 
+    struct ResetBankDisplayItem: Equatable, Identifiable {
+        let id: String
+        let resetText: String
+        let remainingText: String
+        let sourceText: String?
+        let detailText: String?
+    }
+
+    struct ResetCreditTimeDisplayItem: Equatable, Identifiable {
+        let id: String
+        let label: String
+        let resetText: String
+        let remainingText: String
+        let sourceText: String
+    }
+
+    struct ResetCreditsSummary: Equatable {
+        let countLine: String
+        let timingLine: String?
+        let detailLines: [String]
+    }
+
     static func shortTimestamp(
         for date: Date,
         now: Date = .now,
@@ -240,8 +262,12 @@ enum StatusPopoverFormatting {
         locale: Locale = .current,
         timeZone: TimeZone = .current
     ) -> RecoveryDetails {
-        guard showsQuotaValues(for: status), let resetAt else {
+        guard showsQuotaValues(for: status) else {
             return RecoveryDetails(resetText: "--", remainingText: "--")
+        }
+
+        guard let resetAt else {
+            return RecoveryDetails(resetText: "未知（未暴露）", remainingText: "未暴露")
         }
 
         let resetText = shortTimestamp(
@@ -253,6 +279,104 @@ enum StatusPopoverFormatting {
         )
         let remainingText = relativeRecoveryLine(for: resetAt, now: now)
         return RecoveryDetails(resetText: resetText, remainingText: remainingText)
+    }
+
+    static func resetBankDisplayItems(
+        snapshot: QuotaSnapshot,
+        status: QuotaRefreshStatus,
+        now: Date = .now,
+        calendar: Calendar = .current,
+        locale: Locale = .current,
+        timeZone: TimeZone = .current
+    ) -> [ResetBankDisplayItem] {
+        guard showsQuotaValues(for: status), snapshot.dataSource == .real else {
+            return []
+        }
+
+        return snapshot.resetBanks
+            .sorted(by: compareResetBankDisplayOrder)
+            .prefix(3)
+            .map { bank in
+            let details = recoveryDetails(
+                resetAt: bank.resetAt,
+                status: status,
+                now: now,
+                calendar: calendar,
+                locale: locale,
+                timeZone: timeZone
+            )
+
+            return ResetBankDisplayItem(
+                id: bank.id,
+                resetText: details.resetText,
+                remainingText: details.remainingText,
+                sourceText: bankSourceText(for: bank),
+                detailText: bankDetailText(for: bank)
+            )
+        }
+    }
+
+    static func resetCreditTimeDisplayItems(
+        snapshot: QuotaSnapshot,
+        status: QuotaRefreshStatus,
+        now: Date = .now,
+        calendar: Calendar = .current,
+        locale: Locale = .current,
+        timeZone: TimeZone = .current
+    ) -> [ResetCreditTimeDisplayItem] {
+        guard showsQuotaValues(for: status), snapshot.dataSource == .real else {
+            return []
+        }
+
+        return snapshot.resetCreditTimeEntries.map { entry in
+            let details = recoveryDetails(
+                resetAt: entry.date,
+                status: status,
+                now: now,
+                calendar: calendar,
+                locale: locale,
+                timeZone: timeZone
+            )
+
+            return ResetCreditTimeDisplayItem(
+                id: entry.id,
+                label: entry.label,
+                resetText: details.resetText,
+                remainingText: details.remainingText,
+                sourceText: "来源：\(entry.sourcePath)"
+            )
+        }
+    }
+
+    static func resetCreditsSummary(
+        snapshot: QuotaSnapshot,
+        status: QuotaRefreshStatus,
+        now: Date = .now,
+        calendar: Calendar = .current,
+        locale: Locale = .current,
+        timeZone: TimeZone = .current
+    ) -> ResetCreditsSummary? {
+        guard showsQuotaValues(for: status), snapshot.dataSource == .real else {
+            return nil
+        }
+
+        let countLine: String
+        if let count = snapshot.resetAvailableCount {
+            countLine = "30 天内剩余重置速率限制次数：\(count)"
+        } else {
+            countLine = "30 天内剩余重置速率限制次数未知（未暴露）"
+        }
+
+        let timingLine = snapshot.resetCreditTimeEntries.isEmpty
+            ? "到期/恢复时间未知（未暴露）"
+            : "官方已暴露 reset credits 时间字段（见原始字段）"
+        let detailLines = resetCreditDetailLines(snapshot: snapshot)
+
+        return ResetCreditsSummary(
+            countLine: countLine,
+            timingLine: timingLine,
+            detailLines: detailLines
+        )
     }
 
     static func quotaTooltip(
@@ -381,5 +505,63 @@ enum StatusPopoverFormatting {
 
     private static func fallbackSuffix(isUsingCachedSnapshot: Bool) -> String {
         isUsingCachedSnapshot ? "，显示上次成功数据" : "，当前无可用快照"
+    }
+
+    private static func compareResetBankDisplayOrder(_ lhs: ResetBankSnapshot, _ rhs: ResetBankSnapshot) -> Bool {
+        switch (lhs.resetAt, rhs.resetAt) {
+        case let (left?, right?):
+            if left != right {
+                return left < right
+            }
+        case (_?, nil):
+            return true
+        case (nil, _?):
+            return false
+        case (nil, nil):
+            break
+        }
+
+        if lhs.displayName != rhs.displayName {
+            return lhs.displayName < rhs.displayName
+        }
+
+        return lhs.id < rhs.id
+    }
+
+    private static func bankSourceText(for bank: ResetBankSnapshot) -> String? {
+        guard let fieldName = bank.resolvedResetFieldName else {
+            return nil
+        }
+
+        return "来源：rateLimitsByLimitId.\(bank.limitId).\(bank.windowId).\(fieldName)"
+    }
+
+    private static func bankDetailText(for bank: ResetBankSnapshot) -> String? {
+        switch bank.resetTimeStatus {
+        case .actual:
+            return nil
+        case .unexposed:
+            return "诊断：重置时间未知/未暴露"
+        case .parseFailed:
+            let rawFieldText = bank.rawResetFields
+                .map { "rateLimitsByLimitId.\(bank.limitId).\(bank.windowId).\($0.name)=\($0.value)" }
+                .joined(separator: " · ")
+            if rawFieldText.isEmpty {
+                return "诊断：解析失败"
+            }
+            return "诊断：解析失败 · 原始字段：\(rawFieldText)"
+        }
+    }
+
+    private static func resetCreditDetailLines(snapshot: QuotaSnapshot) -> [String] {
+        guard !snapshot.resetCreditRawFields.isEmpty else {
+            return ["原始字段：未暴露 rateLimitResetCredits.*"]
+        }
+
+        return [
+            "原始字段：" + snapshot.resetCreditRawFields
+                .map { "\($0.path)=\($0.value)" }
+                .joined(separator: " · ")
+        ]
     }
 }

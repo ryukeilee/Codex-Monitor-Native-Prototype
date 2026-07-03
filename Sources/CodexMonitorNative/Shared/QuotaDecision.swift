@@ -56,6 +56,6 @@ enum QuotaDecisionEngine {
             return nil
         }
 
-        return snapshot.fiveHourResetAt ?? snapshot.refreshedAt.addingTimeInterval(5 * 60 * 60)
+        return snapshot.fiveHourResetAt
     }
 }

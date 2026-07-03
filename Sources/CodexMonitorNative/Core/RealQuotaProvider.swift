@@ -290,6 +290,19 @@ actor CodexRPCClient {
 }
 
 struct RealQuotaProvider {
+    private struct ParsedResetMetadata {
+        let resetAt: Date?
+        let resolvedFieldName: String?
+        let status: ResetBankResetTimeStatus
+        let rawFields: [ResetBankRawField]
+    }
+
+    private struct ParsedResetCredits {
+        let availableCount: Int?
+        let timeEntries: [ResetCreditTimeSnapshot]
+        let rawFields: [ResetCreditRawField]
+    }
+
     private let codexPath: String
     private let timeoutSeconds: Double
 
@@ -331,7 +344,8 @@ struct RealQuotaProvider {
         }
 
         let fiveHourRemaining = Int((100.0 - primaryUsedPercent).rounded())
-        let fiveHourResetAt = parseResetDate(from: primary)
+        let fiveHourResetAt = parseResetMetadata(from: primary).resetAt
+        let resetCredits = parseResetCredits(from: response["rateLimitResetCredits"])
 
         // Secondary (weekly) window
         let secondary: [String: Any]? = codexBucket["secondary"] as? [String: Any]
@@ -367,28 +381,262 @@ struct RealQuotaProvider {
 
         AppLogger.codexRPC.info("Parsed real quota: weekly=\(weeklyRemaining)% fiveHour=\(fiveHourRemaining)%")
 
+        let usesFallbackWeeklySource = secondary == nil && fallbackSecondary != nil
+
         return QuotaSnapshot(
             weeklyQuotaPercent: weeklyRemaining,
             fiveHourQuotaPercent: fiveHourRemaining,
+            resetAvailableCount: resetCredits.availableCount,
+            resetCreditTimeEntries: resetCredits.timeEntries,
+            resetCreditRawFields: resetCredits.rawFields,
             fiveHourResetAt: fiveHourResetAt,
+            resetBanks: parseResetBanks(
+                from: rateLimitsByLimitId,
+                usesFallbackWeeklySource: usesFallbackWeeklySource
+            ),
             refreshedAt: .now,
             dataSource: .real,
             errorMessage: nil
         )
     }
 
-    private static func parseResetDate(from window: [String: Any]) -> Date? {
+    private static func parseResetBanks(
+        from rateLimitsByLimitId: [String: Any],
+        usesFallbackWeeklySource: Bool
+    ) -> [ResetBankSnapshot] {
+        var banks: [ResetBankSnapshot] = []
+
+        for limitId in rateLimitsByLimitId.keys.sorted() {
+            guard let bucket = rateLimitsByLimitId[limitId] as? [String: Any] else {
+                continue
+            }
+
+            for windowId in bucket.keys.sorted() {
+                if shouldSkipResetBank(
+                    limitId: limitId,
+                    windowId: windowId,
+                    usesFallbackWeeklySource: usesFallbackWeeklySource
+                ) {
+                    continue
+                }
+
+                guard let window = bucket[windowId] as? [String: Any],
+                      let usedPercent = window["usedPercent"] as? Double,
+                      usedPercent.isFinite,
+                      usedPercent >= 0,
+                      usedPercent <= 100 else {
+                    AppLogger.codexRPC.debug("Skipping reset bank \(limitId, privacy: .public).\(windowId, privacy: .public): missing or invalid usedPercent")
+                    continue
+                }
+
+                let remainingPercent = Int((100.0 - usedPercent).rounded())
+                let reset = parseResetMetadata(from: window)
+                banks.append(
+                    ResetBankSnapshot(
+                        limitId: limitId,
+                        windowId: windowId,
+                        displayName: resetBankDisplayName(limitId: limitId, windowId: windowId),
+                        remainingPercent: remainingPercent,
+                        resetAt: reset.resetAt,
+                        resolvedResetFieldName: reset.resolvedFieldName,
+                        resetTimeStatus: reset.status,
+                        rawResetFields: reset.rawFields
+                    )
+                )
+            }
+        }
+
+        return banks
+            .sorted(by: compareResetBanks)
+            .prefix(3)
+            .map { $0 }
+    }
+
+    private static func compareResetBanks(_ lhs: ResetBankSnapshot, _ rhs: ResetBankSnapshot) -> Bool {
+        switch (lhs.resetAt, rhs.resetAt) {
+        case let (left?, right?):
+            if left != right {
+                return left < right
+            }
+        case (_?, nil):
+            return true
+        case (nil, _?):
+            return false
+        case (nil, nil):
+            break
+        }
+
+        if lhs.displayName != rhs.displayName {
+            return lhs.displayName < rhs.displayName
+        }
+
+        return lhs.id < rhs.id
+    }
+
+    private static func resetBankDisplayName(limitId: String, windowId: String) -> String {
+        switch (limitId, windowId) {
+        case ("codex", "primary"):
+            return "5小时额度"
+        case ("codex", "secondary"), ("codex_other", "primary"):
+            return "周额度"
+        default:
+            return "\(limitId).\(windowId)"
+        }
+    }
+
+    private static func shouldSkipResetBank(
+        limitId: String,
+        windowId: String,
+        usesFallbackWeeklySource: Bool
+    ) -> Bool {
+        if limitId == "codex_other", windowId == "primary" {
+            return !usesFallbackWeeklySource
+        }
+
+        return false
+    }
+
+    private static func parseResetMetadata(from window: [String: Any]) -> ParsedResetMetadata {
+        var rawFields: [ResetBankRawField] = []
+        var parsedDate: Date?
+        var resolvedFieldName: String?
+
         for key in ["resetAt", "resetsAt", "nextResetAt", "windowResetAt"] {
             guard let rawValue = window[key] else {
                 continue
             }
 
-            if let parsed = parseDate(rawValue) {
-                return parsed
+            rawFields.append(ResetBankRawField(name: key, value: stringify(rawValue)))
+            if parsedDate == nil {
+                parsedDate = parseDate(rawValue)
+                if parsedDate != nil {
+                    resolvedFieldName = key
+                }
             }
         }
 
-        return nil
+        let status: ResetBankResetTimeStatus
+        if parsedDate != nil {
+            status = .actual
+        } else if rawFields.isEmpty {
+            status = .unexposed
+        } else {
+            status = .parseFailed
+        }
+
+        return ParsedResetMetadata(
+            resetAt: parsedDate,
+            resolvedFieldName: resolvedFieldName,
+            status: status,
+            rawFields: rawFields
+        )
+    }
+
+    private static func parseResetCredits(from rawValue: Any?) -> ParsedResetCredits {
+        guard let container = rawValue as? [String: Any] else {
+            return ParsedResetCredits(availableCount: nil, timeEntries: [], rawFields: [])
+        }
+
+        var rawFields: [ResetCreditRawField] = []
+        var availableCount: Int?
+        var timeEntries: [ResetCreditTimeSnapshot] = []
+
+        func walk(_ value: Any, path: String) {
+            if let nested = value as? [String: Any] {
+                for key in nested.keys.sorted() {
+                    guard let child = nested[key] else { continue }
+                    walk(child, path: "\(path).\(key)")
+                }
+                return
+            }
+
+            if let nested = value as? [Any] {
+                for (index, child) in nested.enumerated() {
+                    walk(child, path: "\(path)[\(index)]")
+                }
+                return
+            }
+
+            let valueText = stringify(value)
+            rawFields.append(ResetCreditRawField(path: path, value: valueText))
+
+            if path == "rateLimitResetCredits.availableCount" {
+                if let count = value as? Int {
+                    availableCount = count
+                } else if let number = value as? NSNumber {
+                    availableCount = number.intValue
+                } else if let string = value as? String, let count = Int(string) {
+                    availableCount = count
+                }
+            }
+
+            guard let label = resetCreditTimeLabel(for: path), let date = parseDate(value) else {
+                return
+            }
+
+            timeEntries.append(
+                ResetCreditTimeSnapshot(
+                    label: label,
+                    date: date,
+                    sourcePath: path
+                )
+            )
+        }
+
+        walk(container, path: "rateLimitResetCredits")
+
+        let sortedEntries = timeEntries
+            .sorted { lhs, rhs in
+                if lhs.date != rhs.date {
+                    return lhs.date < rhs.date
+                }
+                if lhs.label != rhs.label {
+                    return lhs.label < rhs.label
+                }
+                return lhs.sourcePath < rhs.sourcePath
+            }
+            .prefix(3)
+
+        return ParsedResetCredits(
+            availableCount: availableCount,
+            timeEntries: Array(sortedEntries),
+            rawFields: rawFields
+        )
+    }
+
+    private static func resetCreditTimeLabel(for path: String) -> String? {
+        let terminal = path
+            .split(separator: ".")
+            .last
+            .map(String.init)?
+            .replacingOccurrences(of: #"\[\d+\]"#, with: "", options: .regularExpression)
+
+        switch terminal {
+        case "expiresAt", "expireAt":
+            return "到期时间"
+        case "restoresAt", "restoreAt", "resetAt", "resetsAt", "nextResetAt":
+            return "恢复时间"
+        default:
+            return nil
+        }
+    }
+
+    private static func stringify(_ rawValue: Any) -> String {
+        if let string = rawValue as? String {
+            return string
+        }
+
+        if let number = rawValue as? NSNumber {
+            return number.stringValue
+        }
+
+        if JSONSerialization.isValidJSONObject(rawValue),
+           let data = try? JSONSerialization.data(withJSONObject: rawValue, options: [.sortedKeys]),
+           let string = String(data: data, encoding: .utf8) {
+            return string
+        }
+
+        return String(describing: rawValue)
     }
 
     private static func parseDate(_ rawValue: Any) -> Date? {

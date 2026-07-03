@@ -104,7 +104,7 @@ final class StatusBarController {
 
         switch status {
         case .success, .stale, .refreshing, .networkFailed, .authRequired, .parseFailed:
-            return snapshot.fiveHourResetAt ?? snapshot.refreshedAt.addingTimeInterval(5 * 60 * 60)
+            return snapshot.fiveHourResetAt
         case .noSnapshot, .idle, .demoMode:
             return nil
         }

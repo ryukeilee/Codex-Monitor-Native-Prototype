@@ -14,9 +14,29 @@ struct QuotaSummaryView: View {
                     metricBlock(title: "周额度", value: weeklyQuotaText)
                 }
 
-                HStack(alignment: .top, spacing: 16) {
-                    metricBlock(title: "恢复时间", value: fiveHourRecoveryText)
-                    metricBlock(title: "剩余", value: recoveryCountdownText)
+                if let resetCreditsSummary {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Reset Credits")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+
+                        Text(resetCreditsSummary.countLine)
+                            .font(.subheadline.weight(.semibold))
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        if let timingLine = resetCreditsSummary.timingLine {
+                            Text(timingLine)
+                                .font(.subheadline.weight(.semibold))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+
+                        ForEach(resetCreditsSummary.detailLines, id: \.self) { detailLine in
+                            Text(detailLine)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -43,31 +63,23 @@ struct QuotaSummaryView: View {
         )
     }
 
-    private var fiveHourRecoveryText: String {
-        recoveryParts.resetText
-    }
-
-    private var recoveryCountdownText: String {
-        recoveryParts.remainingText
-    }
-
-    private var recoveryParts: (resetText: String, remainingText: String) {
-        let details = StatusPopoverFormatting.recoveryDetails(
-            resetAt: appState.effectiveFiveHourResetAt,
+    private var resetCreditsSummary: StatusPopoverFormatting.ResetCreditsSummary? {
+        StatusPopoverFormatting.resetCreditsSummary(
+            snapshot: appState.snapshot,
             status: appState.displayStatus
         )
-        return (details.resetText, details.remainingText)
     }
 
     @ViewBuilder
-    private func metricBlock(title: String, value: String) -> some View {
+    private func metricBlock(title: String, value: String, allowsMultiline: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             Text(value)
                 .font(.subheadline.weight(.semibold))
-                .lineLimit(1)
+                .lineLimit(allowsMultiline ? 2 : 1)
+                .fixedSize(horizontal: false, vertical: allowsMultiline)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

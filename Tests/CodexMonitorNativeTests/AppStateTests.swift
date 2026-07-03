@@ -222,6 +222,47 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(loaded?.schemaVersion, 1)
     }
 
+    func testSchemaV3RealSnapshotMigratesResetBanksAndClampsToThreeEntries() {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.migrate.v3.\(UUID().uuidString)")!
+        let refreshedAt = Date(timeIntervalSince1970: 1_718_000_000)
+        let resetAt = refreshedAt.addingTimeInterval(90 * 60)
+        let legacyJSON = """
+        {"weeklyQuotaPercent":80,"fiveHourQuotaPercent":55,"fiveHourResetAt":\(resetAt.timeIntervalSince1970),"refreshedAt":\(refreshedAt.timeIntervalSince1970),"dataSource":"real","errorMessage":null,"schemaVersion":3,"resetBanks":[{"limitId":"d","windowId":"primary","displayName":"d.primary","remainingPercent":10,"resetAt":\(refreshedAt.addingTimeInterval(4 * 60 * 60).timeIntervalSince1970),"rawResetFields":[]},{"limitId":"b","windowId":"primary","displayName":"b.primary","remainingPercent":20,"resetAt":\(refreshedAt.addingTimeInterval(2 * 60 * 60).timeIntervalSince1970),"rawResetFields":[]},{"limitId":"c","windowId":"primary","displayName":"c.primary","remainingPercent":30,"resetAt":\(refreshedAt.addingTimeInterval(3 * 60 * 60).timeIntervalSince1970),"rawResetFields":[]},{"limitId":"a","windowId":"primary","displayName":"a.primary","remainingPercent":40,"resetAt":\(refreshedAt.addingTimeInterval(60 * 60).timeIntervalSince1970),"rawResetFields":[]}]}
+        """
+        defaults.set(Data(legacyJSON.utf8), forKey: "snapshot")
+
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let loaded = store.loadSnapshot()
+
+        XCTAssertEqual(loaded?.schemaVersion, QuotaSnapshot.currentSchemaVersion)
+        XCTAssertEqual(loaded?.resetBanks.count, 3)
+        XCTAssertEqual(loaded?.resetBanks.map(\.id), ["a.primary", "b.primary", "c.primary"])
+    }
+
+    func testSchemaV3RealSnapshotWithoutResetCreditsStillShowsUnknownResetCreditTiming() {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.migrate.synth.\(UUID().uuidString)")!
+        let refreshedAt = Date(timeIntervalSince1970: 1_718_000_000)
+        let resetAt = refreshedAt.addingTimeInterval(90 * 60)
+        let legacyJSON = """
+        {"weeklyQuotaPercent":80,"fiveHourQuotaPercent":55,"fiveHourResetAt":\(resetAt.timeIntervalSince1970),"refreshedAt":\(refreshedAt.timeIntervalSince1970),"dataSource":"real","errorMessage":null,"schemaVersion":3}
+        """
+        defaults.set(Data(legacyJSON.utf8), forKey: "snapshot")
+
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let appState = AppState(snapshotStore: store, refreshService: MockRefreshService(snapshot: nil))
+        let summary = StatusPopoverFormatting.resetCreditsSummary(
+            snapshot: appState.snapshot,
+            status: appState.displayStatus,
+            now: refreshedAt,
+            calendar: Calendar(identifier: .gregorian),
+            locale: Locale(identifier: "en_US"),
+            timeZone: TimeZone(secondsFromGMT: 0)!
+        )
+
+        XCTAssertEqual(summary?.countLine, "30 天内剩余重置速率限制次数未知（未暴露）")
+        XCTAssertEqual(summary?.timingLine, "到期/恢复时间未知（未暴露）")
+    }
+
     func testConsecutiveFailuresEscalateBackoff() async {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.backoff.\(UUID().uuidString)")!
         let store = SnapshotStore(defaults: defaults, key: "snapshot")

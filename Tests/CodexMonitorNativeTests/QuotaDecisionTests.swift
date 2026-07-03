@@ -58,17 +58,16 @@ final class QuotaDecisionTests: XCTestCase {
         XCTAssertEqual(decision.recommendation, "暂停大任务，等待恢复")
     }
 
-    func testRecoveryFallsBackToFiveHoursAfterRefreshWhenResetTimeIsMissing() {
-        let refreshedAt = Date(timeIntervalSince1970: 1_718_000_000)
+    func testRecoveryDoesNotFabricateResetTimeWhenMissing() {
         let snapshot = QuotaSnapshot(
             weeklyQuotaPercent: 60,
             fiveHourQuotaPercent: 50,
-            refreshedAt: refreshedAt,
+            refreshedAt: Date(timeIntervalSince1970: 1_718_000_000),
             dataSource: .real
         )
 
         let resetAt = QuotaDecisionEngine.effectiveFiveHourResetAt(for: snapshot, hasUsableRealData: true)
 
-        XCTAssertEqual(resetAt, refreshedAt.addingTimeInterval(5 * 60 * 60))
+        XCTAssertNil(resetAt)
     }
 }
