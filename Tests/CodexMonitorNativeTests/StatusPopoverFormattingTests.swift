@@ -354,6 +354,8 @@ final class StatusPopoverFormattingTests: XCTestCase {
             weeklyQuotaPercent: 52,
             fiveHourQuotaPercent: 37,
             resetAvailableCount: 5,
+            resetCreditDetailsState: .unavailable,
+            resetCreditDiagnostic: ResetCreditDiagnosticSnapshot(summary: "HTTP 状态码 503"),
             refreshedAt: .now,
             dataSource: .real
         )
@@ -364,14 +366,17 @@ final class StatusPopoverFormattingTests: XCTestCase {
         )
 
         XCTAssertEqual(summary?.countLine, "30 天内剩余重置速率限制次数：5")
-        XCTAssertEqual(summary?.timingLine, "到期/恢复时间未知（未暴露）")
-        XCTAssertEqual(summary?.detailLines, ["原始字段：未暴露 rateLimitResetCredits.*"])
+        XCTAssertEqual(summary?.timingLine, "到期时间暂不可用")
+        XCTAssertNil(summary?.featuredCreditItem)
+        XCTAssertTrue(summary?.additionalCreditItems.isEmpty ?? false)
+        XCTAssertEqual(summary?.detailLines, ["详情失败：HTTP 状态码 503"])
     }
 
     func testResetCreditsSummaryShowsUnknownWhenCountMissing() {
         let snapshot = QuotaSnapshot(
             weeklyQuotaPercent: 52,
             fiveHourQuotaPercent: 37,
+            resetCreditDetailsState: .unavailable,
             refreshedAt: .now,
             dataSource: .real
         )
@@ -382,8 +387,29 @@ final class StatusPopoverFormattingTests: XCTestCase {
         )
 
         XCTAssertEqual(summary?.countLine, "30 天内剩余重置速率限制次数未知（未暴露）")
-        XCTAssertEqual(summary?.timingLine, "到期/恢复时间未知（未暴露）")
-        XCTAssertEqual(summary?.detailLines, ["原始字段：未暴露 rateLimitResetCredits.*"])
+        XCTAssertEqual(summary?.timingLine, "到期时间暂不可用")
+        XCTAssertEqual(summary?.detailLines, ["详情来源暂不可用，当前仅显示 app-server 次数"])
+    }
+
+    func testResetCreditsSummaryShowsSanitizedFailureReasonWithoutSecrets() {
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 52,
+            fiveHourQuotaPercent: 37,
+            resetAvailableCount: 5,
+            resetCreditDetailsState: .unavailable,
+            resetCreditDiagnostic: ResetCreditDiagnosticSnapshot(summary: "tokens 缺失"),
+            refreshedAt: .now,
+            dataSource: .real
+        )
+
+        let summary = StatusPopoverFormatting.resetCreditsSummary(
+            snapshot: snapshot,
+            status: .success
+        )
+
+        XCTAssertEqual(summary?.detailLines, ["详情失败：tokens 缺失"])
+        XCTAssertFalse(summary?.detailLines.joined(separator: " ").contains("Bearer") ?? true)
+        XCTAssertFalse(summary?.detailLines.joined(separator: " ").contains("credit-") ?? true)
     }
 
     func testResetCreditsSummaryDoesNotUseRateLimitBankResetTimeAsCreditTime() {
@@ -391,8 +417,7 @@ final class StatusPopoverFormattingTests: XCTestCase {
             weeklyQuotaPercent: 52,
             fiveHourQuotaPercent: 37,
             resetAvailableCount: 5,
-            resetCreditTimeEntries: [],
-            resetCreditRawFields: [ResetCreditRawField(path: "rateLimitResetCredits.availableCount", value: "5")],
+            resetCreditDetailsState: .appServerCountOnly,
             fiveHourResetAt: makeDate("2026-06-19T14:10:00Z"),
             resetBanks: [
                 ResetBankSnapshot(
@@ -420,37 +445,36 @@ final class StatusPopoverFormattingTests: XCTestCase {
         )
 
         XCTAssertTrue(items.isEmpty)
-        XCTAssertEqual(summary?.timingLine, "到期/恢复时间未知（未暴露）")
+        XCTAssertEqual(summary?.timingLine, "到期时间暂不可用")
     }
 
-    func testResetCreditTimeDisplayItemsOnlyShowOfficialCreditTimes() {
+    func testResetCreditsSummaryShowsWhamExpiryRowsAndCountdown() {
         let now = makeDate("2026-06-19T12:40:00Z")
         let snapshot = QuotaSnapshot(
             weeklyQuotaPercent: 52,
             fiveHourQuotaPercent: 37,
             resetAvailableCount: 5,
-            resetCreditTimeEntries: [
-                ResetCreditTimeSnapshot(
-                    label: "恢复时间",
-                    date: makeDate("2026-06-19T13:10:00Z"),
-                    sourcePath: "rateLimitResetCredits.restoresAt[0]"
+            resetCreditDetailsState: .detailed,
+            resetCreditDetails: [
+                ResetCreditDetailSnapshot(
+                    ordinal: 2,
+                    status: "available",
+                    grantedAt: makeDate("2026-06-19T11:10:00Z"),
+                    expiresAt: makeDate("2026-06-19T15:10:00Z")
                 ),
-                ResetCreditTimeSnapshot(
-                    label: "到期时间",
-                    date: makeDate("2026-06-19T15:10:00Z"),
-                    sourcePath: "rateLimitResetCredits.expiresAt[0]"
+                ResetCreditDetailSnapshot(
+                    ordinal: 1,
+                    status: "available",
+                    grantedAt: makeDate("2026-06-19T10:10:00Z"),
+                    expiresAt: makeDate("2026-06-19T13:10:00Z")
                 )
             ],
-            resetCreditRawFields: [
-                ResetCreditRawField(path: "rateLimitResetCredits.availableCount", value: "5"),
-                ResetCreditRawField(path: "rateLimitResetCredits.restoresAt[0]", value: "2026-06-19T13:10:00Z"),
-                ResetCreditRawField(path: "rateLimitResetCredits.expiresAt[0]", value: "2026-06-19T15:10:00Z")
-            ],
+            resetCreditStatusSummary: [ResetCreditStatusSummary(status: "available", count: 2)],
             refreshedAt: .now,
             dataSource: .real
         )
 
-        let items = StatusPopoverFormatting.resetCreditTimeDisplayItems(
+        let summary = StatusPopoverFormatting.resetCreditsSummary(
             snapshot: snapshot,
             status: .success,
             now: now,
@@ -459,44 +483,47 @@ final class StatusPopoverFormattingTests: XCTestCase {
             timeZone: TimeZone(secondsFromGMT: 0)!
         )
 
-        XCTAssertEqual(items.map(\.label), ["恢复时间", "到期时间"])
-        XCTAssertEqual(items.map(\.resetText), ["今天 13:10", "今天 15:10"])
-        XCTAssertEqual(items.map(\.sourceText), [
-            "来源：rateLimitResetCredits.restoresAt[0]",
-            "来源：rateLimitResetCredits.expiresAt[0]"
-        ])
+        XCTAssertNil(summary?.timingLine)
+        XCTAssertEqual(summary?.featuredCreditItem?.title, "到期 今天 13:10")
+        XCTAssertEqual(summary?.featuredCreditItem?.subtitle, "剩余 30分 · 授予 今天 10:10")
+        XCTAssertEqual(summary?.additionalCreditItems.map(\.title), ["到期 今天 15:10"])
+        XCTAssertEqual(summary?.additionalCreditItems.map(\.subtitle), ["剩余 2小时30分 · 授予 今天 11:10"])
+        XCTAssertEqual(summary?.detailLines, ["详情来源：wham reset credits endpoint"])
     }
 
-    func testResetBankDisplayItemsSortKnownTimesAheadOfUnknownAndKeepDiagnostics() {
+    func testResetCreditsSummaryKeepsAllCreditsInLowPrioritySectionSortedByExpiry() {
         let now = makeDate("2026-06-19T12:40:00Z")
         let snapshot = QuotaSnapshot(
             weeklyQuotaPercent: 52,
             fiveHourQuotaPercent: 37,
-            fiveHourResetAt: makeDate("2026-06-19T14:10:00Z"),
-            resetBanks: [
-                ResetBankSnapshot(
-                    limitId: "codex_other",
-                    windowId: "primary",
-                    displayName: "周额度",
-                    remainingPercent: 52,
-                    resetAt: nil,
-                    rawResetFields: [ResetBankRawField(name: "nextResetAt", value: "null")]
+            resetAvailableCount: 3,
+            resetCreditDetailsState: .detailed,
+            resetCreditDetails: [
+                ResetCreditDetailSnapshot(
+                    ordinal: 3,
+                    status: "available",
+                    grantedAt: makeDate("2026-06-19T11:30:00Z"),
+                    expiresAt: makeDate("2026-06-19T18:10:00Z")
                 ),
-                ResetBankSnapshot(
-                    limitId: "codex",
-                    windowId: "primary",
-                    displayName: "5小时额度",
-                    remainingPercent: 37,
-                    resetAt: makeDate("2026-06-19T14:10:00Z"),
-                    resolvedResetFieldName: "resetAt",
-                    rawResetFields: []
+                ResetCreditDetailSnapshot(
+                    ordinal: 1,
+                    status: "available",
+                    grantedAt: makeDate("2026-06-19T10:10:00Z"),
+                    expiresAt: makeDate("2026-06-19T13:10:00Z")
+                ),
+                ResetCreditDetailSnapshot(
+                    ordinal: 2,
+                    status: "available",
+                    grantedAt: makeDate("2026-06-19T10:40:00Z"),
+                    expiresAt: makeDate("2026-06-19T15:10:00Z")
                 )
             ],
+            resetCreditStatusSummary: [ResetCreditStatusSummary(status: "available", count: 3)],
             refreshedAt: .now,
             dataSource: .real
         )
 
-        let items = StatusPopoverFormatting.resetBankDisplayItems(
+        let summary = StatusPopoverFormatting.resetCreditsSummary(
             snapshot: snapshot,
             status: .success,
             now: now,
@@ -505,15 +532,8 @@ final class StatusPopoverFormattingTests: XCTestCase {
             timeZone: TimeZone(secondsFromGMT: 0)!
         )
 
-        XCTAssertEqual(items.map(\.id), ["codex.primary", "codex_other.primary"])
-        XCTAssertEqual(items[0].resetText, "今天 14:10")
-        XCTAssertEqual(items[0].remainingText, "1小时30分")
-        XCTAssertEqual(items[0].sourceText, "来源：rateLimitsByLimitId.codex.primary.resetAt")
-        XCTAssertNil(items[0].detailText)
-        XCTAssertEqual(items[1].resetText, "未知（未暴露）")
-        XCTAssertEqual(items[1].remainingText, "未暴露")
-        XCTAssertNil(items[1].sourceText)
-        XCTAssertEqual(items[1].detailText, "诊断：解析失败 · 原始字段：rateLimitsByLimitId.codex_other.primary.nextResetAt=null")
+        XCTAssertEqual(summary?.featuredCreditItem?.title, "到期 今天 13:10")
+        XCTAssertEqual(summary?.additionalCreditItems.map(\.title), ["到期 今天 15:10", "到期 今天 18:10"])
     }
 
     func testResetBankDisplayItemsClampToFastestThreeRowsByResetTime() {
@@ -604,24 +624,26 @@ final class StatusPopoverFormattingTests: XCTestCase {
         XCTAssertNil(items.first?.detailText)
     }
 
-    func testResetCreditsSummaryFlagsWhenOfficialCreditTimesExist() {
-        let now = makeDate("2026-06-19T12:40:00Z")
+    func testResetCreditsSummaryHidesNonAvailableStatesInDiagnostics() {
         let snapshot = QuotaSnapshot(
             weeklyQuotaPercent: 52,
             fiveHourQuotaPercent: 37,
-            resetAvailableCount: 5,
-            resetCreditTimeEntries: [
-                ResetCreditTimeSnapshot(
-                    label: "恢复时间",
-                    date: makeDate("2026-06-19T13:10:00Z"),
-                    sourcePath: "rateLimitResetCredits.restoresAt[0]"
+            resetAvailableCount: 2,
+            resetCreditDetailsState: .detailed,
+            resetCreditDetails: [
+                ResetCreditDetailSnapshot(
+                    ordinal: 1,
+                    status: "available",
+                    grantedAt: nil,
+                    expiresAt: makeDate("2026-06-19T13:10:00Z")
                 )
             ],
-            resetCreditRawFields: [
-                ResetCreditRawField(path: "rateLimitResetCredits.availableCount", value: "5"),
-                ResetCreditRawField(path: "rateLimitResetCredits.restoresAt[0]", value: "2026-06-19T13:10:00Z")
+            resetCreditStatusSummary: [
+                ResetCreditStatusSummary(status: "available", count: 1),
+                ResetCreditStatusSummary(status: "expired", count: 1),
+                ResetCreditStatusSummary(status: "redeemed", count: 2)
             ],
-            refreshedAt: now,
+            refreshedAt: .now,
             dataSource: .real
         )
 
@@ -630,11 +652,13 @@ final class StatusPopoverFormattingTests: XCTestCase {
             status: .networkFailed
         )
 
-        XCTAssertEqual(summary?.countLine, "30 天内剩余重置速率限制次数：5")
-        XCTAssertEqual(summary?.timingLine, "官方已暴露 reset credits 时间字段（见原始字段）")
+        XCTAssertEqual(summary?.countLine, "30 天内剩余重置速率限制次数：2")
         XCTAssertEqual(
             summary?.detailLines,
-            ["原始字段：rateLimitResetCredits.availableCount=5 · rateLimitResetCredits.restoresAt[0]=2026-06-19T13:10:00Z"]
+            [
+                "详情来源：wham reset credits endpoint",
+                "已隐藏非 available 状态：redeemed 2 条 · expired 1 条"
+            ]
         )
     }
 

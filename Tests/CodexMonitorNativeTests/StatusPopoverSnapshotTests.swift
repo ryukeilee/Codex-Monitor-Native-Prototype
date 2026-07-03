@@ -13,6 +13,22 @@ final class StatusPopoverSnapshotTests: XCTestCase {
                 weeklyQuotaPercent: 71,
                 fiveHourQuotaPercent: 64,
                 resetAvailableCount: 5,
+                resetCreditDetailsState: .detailed,
+                resetCreditDetails: [
+                    ResetCreditDetailSnapshot(
+                        ordinal: 1,
+                        status: "available",
+                        grantedAt: makeDate("2026-06-26T09:10:00Z"),
+                        expiresAt: makeDate("2026-06-26T13:10:00Z")
+                    ),
+                    ResetCreditDetailSnapshot(
+                        ordinal: 2,
+                        status: "available",
+                        grantedAt: makeDate("2026-06-26T10:10:00Z"),
+                        expiresAt: makeDate("2026-06-26T18:10:00Z")
+                    )
+                ],
+                resetCreditStatusSummary: [ResetCreditStatusSummary(status: "available", count: 2)],
                 fiveHourResetAt: makeDate("2026-06-26T14:10:00Z"),
                 refreshedAt: makeDate("2026-06-26T11:40:00Z"),
                 dataSource: .real
@@ -78,6 +94,22 @@ final class StatusPopoverSnapshotTests: XCTestCase {
         XCTAssertFalse(source.contains("Rate Limit Banks（最快 3 条）"))
         XCTAssertFalse(source.contains("rateLimitBankDiagnosticsSummary("))
         XCTAssertFalse(source.contains("resetBankItems"))
+        XCTAssertTrue(source.contains("DisclosureGroup(\"原始字段与诊断\")"))
+        XCTAssertTrue(source.contains("DisclosureGroup("))
+        XCTAssertTrue(source.contains("查看全部（"))
+    }
+
+    func testStatusPopoverViewSourceUsesCollapsedDiagnosticsSection() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = repoRoot.appendingPathComponent("Sources/CodexMonitorNative/UI/StatusPopoverView.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        XCTAssertTrue(source.contains("DisclosureGroup(\"详情与诊断\""))
+        XCTAssertTrue(source.contains("@State private var showsDiagnostics = false"))
+        XCTAssertTrue(source.contains("if let refreshSummaryLine"))
     }
 
     private func renderSnapshot(snapshot: QuotaSnapshot, outputURL: URL) async throws {

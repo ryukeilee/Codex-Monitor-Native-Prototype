@@ -27,9 +27,17 @@ enum StatusPopoverFormatting {
         let sourceText: String
     }
 
+    struct ResetCreditDisplayItem: Equatable, Identifiable {
+        let id: String
+        let title: String
+        let subtitle: String?
+    }
+
     struct ResetCreditsSummary: Equatable {
         let countLine: String
         let timingLine: String?
+        let featuredCreditItem: ResetCreditDisplayItem?
+        let additionalCreditItems: [ResetCreditDisplayItem]
         let detailLines: [String]
     }
 
@@ -367,14 +375,25 @@ enum StatusPopoverFormatting {
             countLine = "30 天内剩余重置速率限制次数未知（未暴露）"
         }
 
-        let timingLine = snapshot.resetCreditTimeEntries.isEmpty
-            ? "到期/恢复时间未知（未暴露）"
-            : "官方已暴露 reset credits 时间字段（见原始字段）"
+        let creditItems = resetCreditDisplayItems(
+            snapshot: snapshot,
+            status: status,
+            now: now,
+            calendar: calendar,
+            locale: locale,
+            timeZone: timeZone
+        )
+        let timingLine = resetCreditTimingLine(
+            snapshot: snapshot,
+            creditItems: creditItems
+        )
         let detailLines = resetCreditDetailLines(snapshot: snapshot)
 
         return ResetCreditsSummary(
             countLine: countLine,
             timingLine: timingLine,
+            featuredCreditItem: creditItems.first,
+            additionalCreditItems: Array(creditItems.dropFirst()),
             detailLines: detailLines
         )
     }
@@ -554,14 +573,136 @@ enum StatusPopoverFormatting {
     }
 
     private static func resetCreditDetailLines(snapshot: QuotaSnapshot) -> [String] {
-        guard !snapshot.resetCreditRawFields.isEmpty else {
-            return ["原始字段：未暴露 rateLimitResetCredits.*"]
+        var details: [String] = []
+
+        switch snapshot.resetCreditDetailsState {
+        case .detailed:
+            details.append("详情来源：wham reset credits endpoint")
+        case .unavailable:
+            if let diagnostic = snapshot.resetCreditDiagnostic?.summary {
+                details.append("详情失败：\(diagnostic)")
+            } else {
+                details.append("详情来源暂不可用，当前仅显示 app-server 次数")
+            }
+        case .appServerCountOnly:
+            details.append("当前仅显示 app-server 次数")
         }
 
-        return [
-            "原始字段：" + snapshot.resetCreditRawFields
-                .map { "\($0.path)=\($0.value)" }
-                .joined(separator: " · ")
-        ]
+        let hiddenStatuses = snapshot.resetCreditStatusSummary
+            .sorted { lhs, rhs in
+                if lhs.count != rhs.count {
+                    return lhs.count > rhs.count
+                }
+                return lhs.status < rhs.status
+            }
+            .filter { $0.status != "available" && $0.count > 0 }
+            .map { "\($0.status) \($0.count) 条" }
+            .joined(separator: " · ")
+
+        if !hiddenStatuses.isEmpty {
+            details.append("已隐藏非 available 状态：\(hiddenStatuses)")
+        }
+
+        return details
+    }
+
+    private static func resetCreditTimingLine(
+        snapshot: QuotaSnapshot,
+        creditItems: [ResetCreditDisplayItem]
+    ) -> String? {
+        switch snapshot.resetCreditDetailsState {
+        case .unavailable:
+            return "到期时间暂不可用"
+        case .appServerCountOnly:
+            return "到期时间暂不可用"
+        case .detailed:
+            if let count = snapshot.resetAvailableCount, count == 0 {
+                return "当前没有可用 reset credit"
+            }
+
+            return creditItems.isEmpty ? "到期时间暂不可用" : nil
+        }
+    }
+
+    private static func resetCreditDisplayItems(
+        snapshot: QuotaSnapshot,
+        status: QuotaRefreshStatus,
+        now: Date,
+        calendar: Calendar,
+        locale: Locale,
+        timeZone: TimeZone
+    ) -> [ResetCreditDisplayItem] {
+        guard showsQuotaValues(for: status), snapshot.dataSource == .real else {
+            return []
+        }
+
+        return snapshot.resetCreditDetails
+            .sorted(by: compareResetCreditDetails)
+            .map { detail in
+            let expiryText: String
+            let countdownText: String
+
+            if let expiresAt = detail.expiresAt {
+                expiryText = shortTimestamp(
+                    for: expiresAt,
+                    now: now,
+                    calendar: calendar,
+                    locale: locale,
+                    timeZone: timeZone
+                )
+                countdownText = relativeRecoveryLine(for: expiresAt, now: now)
+            } else {
+                expiryText = "到期时间暂不可用"
+                countdownText = "暂不可用"
+            }
+
+            var subtitleParts = ["剩余 \(countdownText)"]
+            if let grantedAt = detail.grantedAt {
+                let grantedText = shortTimestamp(
+                    for: grantedAt,
+                    now: now,
+                    calendar: calendar,
+                    locale: locale,
+                    timeZone: timeZone
+                )
+                subtitleParts.append("授予 \(grantedText)")
+            }
+
+            return ResetCreditDisplayItem(
+                id: detail.id,
+                title: "到期 \(expiryText)",
+                subtitle: subtitleParts.joined(separator: " · ")
+            )
+        }
+    }
+
+    private static func compareResetCreditDetails(_ lhs: ResetCreditDetailSnapshot, _ rhs: ResetCreditDetailSnapshot) -> Bool {
+        switch (lhs.expiresAt, rhs.expiresAt) {
+        case let (left?, right?):
+            if left != right {
+                return left < right
+            }
+        case (_?, nil):
+            return true
+        case (nil, _?):
+            return false
+        case (nil, nil):
+            break
+        }
+
+        switch (lhs.grantedAt, rhs.grantedAt) {
+        case let (left?, right?):
+            if left != right {
+                return left < right
+            }
+        case (_?, nil):
+            return true
+        case (nil, _?):
+            return false
+        case (nil, nil):
+            break
+        }
+
+        return lhs.ordinal < rhs.ordinal
     }
 }

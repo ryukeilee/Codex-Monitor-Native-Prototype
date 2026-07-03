@@ -5,6 +5,7 @@ struct StatusPopoverView: View {
     @ObservedObject var launchAtLoginManager: LaunchAtLoginManager
     let onRefresh: () -> Void
     let onQuit: () -> Void
+    @State private var showsDiagnostics = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -14,11 +15,30 @@ struct StatusPopoverView: View {
 
             QuotaSummaryView(appState: appState)
 
-            if let supportLine {
-                Text(supportLine)
-                    .font(.caption2)
+            if let refreshSummaryLine {
+                Text(refreshSummaryLine)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
+            }
+
+            if hasDiagnosticsContent {
+                DisclosureGroup("详情与诊断", isExpanded: $showsDiagnostics) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        if let supportLine {
+                            Text(supportLine)
+                        }
+
+                        if let loginError = launchAtLoginManager.lastErrorSummary {
+                            Text(loginError)
+                        }
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 4)
+                }
+                .font(.caption)
+                .tint(.secondary)
             }
 
             HStack(alignment: .firstTextBaseline, spacing: 10) {
@@ -39,13 +59,6 @@ struct StatusPopoverView: View {
                     .disabled(launchAtLoginManager.isUpdating)
                     .controlSize(.small)
                     .accessibilityLabel("开机启动")
-            }
-
-            if let loginError = launchAtLoginManager.lastErrorSummary {
-                Text(loginError)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
             }
 
             Divider()
@@ -129,5 +142,26 @@ struct StatusPopoverView: View {
                 return healthLine
             }
         }
+    }
+
+    private var refreshSummaryLine: String? {
+        switch appState.displayStatus {
+        case .refreshing:
+            return "正在刷新，主额度与 reset credits 保持当前快照"
+        case .networkFailed:
+            return "刷新失败，当前显示上次成功快照"
+        case .authRequired:
+            return "需要重新登录 Codex，当前显示上次成功快照"
+        case .parseFailed:
+            return "响应暂时不可解析，当前显示上次成功快照"
+        case .stale:
+            return "当前显示的数据已过期，建议手动刷新"
+        default:
+            return nil
+        }
+    }
+
+    private var hasDiagnosticsContent: Bool {
+        supportLine != nil || launchAtLoginManager.lastErrorSummary != nil
     }
 }
