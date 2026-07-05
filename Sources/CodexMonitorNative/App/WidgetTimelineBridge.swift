@@ -8,6 +8,8 @@ final class WidgetTimelineBridge {
     private let reloadTimelines: @MainActor () -> Void
     private var cancellables = Set<AnyCancellable>()
     private var pendingSaveTask: Task<Void, Never>?
+    private var lastSavedState: WidgetDisplayState?
+    private var lastReloadedState: WidgetDisplayState?
     private weak var appState: AppState?
 
     init(
@@ -61,13 +63,21 @@ final class WidgetTimelineBridge {
             effectiveFiveHourResetAt: appState.effectiveFiveHourResetAt
         )
 
-        saveState(state)
+        if lastSavedState?.isEquivalent(to: state) != true {
+            saveState(state)
+            lastSavedState = state
+        }
 
         guard state.status != .refreshing else {
             return
         }
 
+        guard lastReloadedState?.isEquivalent(to: state) != true else {
+            return
+        }
+
         reloadTimelines()
+        lastReloadedState = state
     }
 
     deinit {

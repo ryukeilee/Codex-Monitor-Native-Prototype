@@ -161,6 +161,15 @@ struct WidgetDisplayState: Codable, Equatable {
         formatter.dateFormat = "M/d HH:mm"
         return "最早重置 \(formatter.string(from: earliestExpiry))"
     }
+
+    func isEquivalent(to other: WidgetDisplayState) -> Bool {
+        snapshot == other.snapshot &&
+        status == other.status &&
+        lastSuccessAt == other.lastSuccessAt &&
+        lastAttemptAt == other.lastAttemptAt &&
+        effectiveFiveHourResetAt == other.effectiveFiveHourResetAt &&
+        resetCreditFooterLine == other.resetCreditFooterLine
+    }
 }
 
 enum WidgetDisplayStateStore {

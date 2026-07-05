@@ -31,8 +31,7 @@ final class RefreshScheduler {
         guard newInterval != interval else { return }
         AppLogger.refresh.info("Updating refresh interval: \(self.interval, format: .fixed(precision: 0)) → \(newInterval, format: .fixed(precision: 0)) seconds")
         interval = newInterval
-        // Restart timer to apply new interval immediately
-        stop()
+        guard !isPaused else { return }
         scheduleTimer()
     }
 
@@ -56,6 +55,7 @@ final class RefreshScheduler {
     // MARK: - Private
 
     private func scheduleTimer() {
+        timer?.invalidate()
         let onTick = self.onTick
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in

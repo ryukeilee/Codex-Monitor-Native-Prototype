@@ -185,6 +185,38 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         _ = bridge
     }
 
+    func testBridgeStartupDeduplicatesInitialSaveAndReload() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.widgetStartupDedup.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let now = Date()
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 72,
+            fiveHourQuotaPercent: 69,
+            fiveHourResetAt: now.addingTimeInterval(60 * 60),
+            refreshedAt: now,
+            dataSource: .real
+        )
+        store.saveSnapshot(snapshot)
+
+        let appState = AppState(snapshotStore: store, refreshService: WidgetBridgeMockRefreshService(snapshot: snapshot))
+        var savedStates: [WidgetDisplayState] = []
+        var reloadCount = 0
+        let bridge = WidgetTimelineBridge(
+            appState: appState,
+            saveState: { savedStates.append($0) },
+            reloadTimelines: { reloadCount += 1 }
+        )
+
+        await Task.yield()
+        await Task.yield()
+
+        XCTAssertEqual(savedStates.count, 1)
+        XCTAssertEqual(reloadCount, 1)
+        XCTAssertEqual(savedStates.last?.snapshot, snapshot)
+        XCTAssertEqual(savedStates.last?.status, .success)
+        _ = bridge
+    }
+
     func testManualRefreshWritesFinalSuccessStateForWidget() async {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.widgetSuccess.\(UUID().uuidString)")!
         let store = SnapshotStore(defaults: defaults, key: "snapshot")

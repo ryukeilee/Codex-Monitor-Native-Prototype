@@ -182,7 +182,7 @@ final class AppState: ObservableObject {
                     kind: .requestSucceeded,
                     isUsingCachedSnapshot: false
                 )
-                backoffInterval = defaultInterval
+                setBackoffInterval(defaultInterval)
                 snapshotStore.saveSnapshot(refreshed)
                 scheduleFreshnessCheck()
                 AppLogger.refresh.info("Real refresh succeeded: weekly=\(refreshed.weeklyQuotaPercent)% fiveHour=\(refreshed.fiveHourQuotaPercent)%")
@@ -215,8 +215,7 @@ final class AppState: ObservableObject {
             // else: keep current snapshot (may be notConnected or mock)
 
             // Escalate backoff
-            backoffInterval = backoffFor(consecutiveFailures: consecutiveFailures)
-            onBackoffChanged?(backoffInterval)
+            setBackoffInterval(backoffFor(consecutiveFailures: consecutiveFailures))
 
             AppLogger.refresh.error("Refresh failed (consecutive=\(self.consecutiveFailures)) status=\(classifiedStatus.rawValue, privacy: .public) backoff=\(self.backoffInterval)s")
         }
@@ -301,6 +300,12 @@ final class AppState: ObservableObject {
         default:
             return 900                   // 15 min
         }
+    }
+
+    private func setBackoffInterval(_ newInterval: TimeInterval) {
+        guard backoffInterval != newInterval else { return }
+        backoffInterval = newInterval
+        onBackoffChanged?(newInterval)
     }
 
     // MARK: - Safe error messages

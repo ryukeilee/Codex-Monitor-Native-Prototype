@@ -372,6 +372,36 @@ final class AppStateTests: XCTestCase {
         await first.value
         await second.value
     }
+
+    func testSuccessNotifiesSchedulerWhenBackoffResetsToDefault() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.backoffResetNotify.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let initial = QuotaSnapshot(
+            weeklyQuotaPercent: 72, fiveHourQuotaPercent: 69, refreshedAt: .distantPast,
+            dataSource: .real
+        )
+        store.saveSnapshot(initial)
+
+        let refreshed = QuotaSnapshot(
+            weeklyQuotaPercent: 81, fiveHourQuotaPercent: 74, refreshedAt: .now,
+            dataSource: .real
+        )
+        let service = SequenceRefreshService(results: [
+            .failure(MockRefreshError.simulatedFailure),
+            .failure(MockRefreshError.simulatedFailure),
+            .success(refreshed)
+        ])
+        let appState = AppState(snapshotStore: store, refreshService: service)
+        var intervals: [TimeInterval] = []
+        appState.onBackoffChanged = { intervals.append($0) }
+
+        await appState.refreshNow(trigger: .manual)
+        await appState.refreshNow(trigger: .manual)
+        await appState.refreshNow(trigger: .manual)
+
+        XCTAssertEqual(intervals, [600, 300])
+        XCTAssertEqual(appState.backoffInterval, 300)
+    }
 }
 
 private struct MockRefreshService: QuotaRefreshing {
@@ -418,5 +448,22 @@ private actor BlockingRefreshService: QuotaRefreshing {
     func release() {
         continuation?.resume()
         continuation = nil
+    }
+}
+
+private actor SequenceRefreshService: QuotaRefreshing {
+    private var results: [Result<QuotaSnapshot, Error>]
+
+    init(results: [Result<QuotaSnapshot, Error>]) {
+        self.results = results
+    }
+
+    func refresh(basedOn currentSnapshot: QuotaSnapshot) async throws -> QuotaSnapshot {
+        guard !results.isEmpty else {
+            throw MockRefreshError.simulatedFailure
+        }
+
+        let result = results.removeFirst()
+        return try result.get()
     }
 }
