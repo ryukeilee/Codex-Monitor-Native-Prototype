@@ -94,10 +94,13 @@ final class StatusPopoverSnapshotTests: XCTestCase {
         XCTAssertFalse(source.contains("Rate Limit Banks（最快 3 条）"))
         XCTAssertFalse(source.contains("rateLimitBankDiagnosticsSummary("))
         XCTAssertFalse(source.contains("resetBankItems"))
-        XCTAssertTrue(source.contains("DisclosureGroup(\"原始字段与诊断\")"))
+        XCTAssertTrue(source.contains("DisclosureGroup(\"字段\")"))
         XCTAssertTrue(source.contains("DisclosureGroup("))
-        XCTAssertTrue(source.contains("查看全部（"))
-        XCTAssertTrue(source.contains("Text(\"重置次数\")"))
+        XCTAssertTrue(source.contains("\"全部 \\("))
+        XCTAssertFalse(source.contains("Text(\"当前状态\")"))
+        XCTAssertFalse(source.contains("Text(\"重置次数\")"))
+        XCTAssertFalse(source.contains("查看全部（"))
+        XCTAssertFalse(source.contains("DisclosureGroup(\"原始字段与诊断\")"))
         XCTAssertTrue(source.contains("featuredResetCreditSummary("))
         XCTAssertTrue(source.contains("Text(\"最早到期"))
     }
@@ -110,7 +113,8 @@ final class StatusPopoverSnapshotTests: XCTestCase {
         let sourceURL = repoRoot.appendingPathComponent("Sources/CodexMonitorNative/UI/StatusPopoverView.swift")
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
 
-        XCTAssertTrue(source.contains("DisclosureGroup(\"详情与诊断\""))
+        XCTAssertTrue(source.contains("DisclosureGroup(\"诊断\""))
+        XCTAssertFalse(source.contains("DisclosureGroup(\"详情与诊断\""))
         XCTAssertTrue(source.contains("@State private var showsDiagnostics = false"))
         XCTAssertTrue(source.contains("if let refreshSummaryLine"))
     }

@@ -23,7 +23,7 @@ struct StatusPopoverView: View {
             }
 
             if hasDiagnosticsContent {
-                DisclosureGroup("详情与诊断", isExpanded: $showsDiagnostics) {
+                DisclosureGroup("诊断", isExpanded: $showsDiagnostics) {
                     VStack(alignment: .leading, spacing: 6) {
                         if let supportLine {
                             Text(supportLine)

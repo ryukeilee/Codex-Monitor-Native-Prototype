@@ -140,20 +140,18 @@ enum StatusPopoverFormatting {
 
     static func freshnessSummary(for status: QuotaRefreshStatus, isUsingCachedSnapshot: Bool) -> String? {
         switch status {
-        case .success:
-            return "数据为最近一次成功读取结果"
+        case .success, .stale:
+            return nil
         case .refreshing:
             return isUsingCachedSnapshot
-                ? "正在读取新数据，主额度与 reset credits 暂用上次成功快照"
-                : "正在读取新数据，尚无可用真实快照"
+                ? "读取中，暂用上次快照"
+                : "读取中"
         case .networkFailed:
-            return isUsingCachedSnapshot ? "读取失败，当前显示上次成功快照" : "读取失败，当前无可用真实快照"
+            return isUsingCachedSnapshot ? "读取失败，显示上次快照" : "读取失败，无可用快照"
         case .authRequired:
-            return isUsingCachedSnapshot ? "需要重新登录 Codex，当前显示上次成功快照" : "需要重新登录 Codex，当前无可用真实快照"
+            return isUsingCachedSnapshot ? "需要登录，显示上次快照" : "需要登录，无可用快照"
         case .parseFailed:
-            return isUsingCachedSnapshot ? "响应暂时不可解析，当前显示上次成功快照" : "响应暂时不可解析，当前无可用真实快照"
-        case .stale:
-            return "当前显示上次成功快照，数据已超过新鲜度窗口"
+            return isUsingCachedSnapshot ? "响应异常，显示上次快照" : "响应异常，无可用快照"
         case .noSnapshot:
             return "尚未读取到真实数据"
         case .idle, .demoMode:
@@ -413,9 +411,9 @@ enum StatusPopoverFormatting {
 
         let countLine: String
         if let count = snapshot.resetAvailableCount {
-            countLine = "剩余重置次数：\(count)"
+            countLine = "重置次数 \(count)"
         } else {
-            countLine = "剩余重置次数未知（未暴露）"
+            countLine = "重置次数未知"
         }
 
         let creditItems = resetCreditDisplayItems(

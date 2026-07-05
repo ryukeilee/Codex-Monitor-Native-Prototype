@@ -241,11 +241,11 @@ final class StatusPopoverFormattingTests: XCTestCase {
     func testFreshnessSummaryDoesNotClaimCachedDataWhenNoneExists() {
         XCTAssertEqual(
             StatusPopoverFormatting.freshnessSummary(for: .networkFailed, isUsingCachedSnapshot: false),
-            "读取失败，当前无可用真实快照"
+            "读取失败，无可用快照"
         )
         XCTAssertEqual(
             StatusPopoverFormatting.freshnessSummary(for: .networkFailed, isUsingCachedSnapshot: true),
-            "读取失败，当前显示上次成功快照"
+            "读取失败，显示上次快照"
         )
     }
 
@@ -400,7 +400,7 @@ final class StatusPopoverFormattingTests: XCTestCase {
             status: .success
         )
 
-        XCTAssertEqual(summary?.countLine, "剩余重置次数：5")
+        XCTAssertEqual(summary?.countLine, "重置次数 5")
         XCTAssertEqual(summary?.timingLine, "到期时间暂不可用")
         XCTAssertNil(summary?.featuredCreditItem)
         XCTAssertTrue(summary?.additionalCreditItems.isEmpty ?? false)
@@ -421,7 +421,7 @@ final class StatusPopoverFormattingTests: XCTestCase {
             status: .success
         )
 
-        XCTAssertEqual(summary?.countLine, "剩余重置次数未知（未暴露）")
+        XCTAssertEqual(summary?.countLine, "重置次数未知")
         XCTAssertEqual(summary?.timingLine, "到期时间暂不可用")
         XCTAssertEqual(summary?.detailLines, ["详情来源暂不可用，当前仅显示 app-server 次数"])
     }
@@ -689,7 +689,7 @@ final class StatusPopoverFormattingTests: XCTestCase {
             status: .networkFailed
         )
 
-        XCTAssertEqual(summary?.countLine, "剩余重置次数：2")
+        XCTAssertEqual(summary?.countLine, "重置次数 2")
         XCTAssertEqual(
             summary?.detailLines,
             [

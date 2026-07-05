@@ -8,10 +8,6 @@ struct QuotaSummaryView: View {
         GroupBox {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .center, spacing: 8) {
-                    Text("当前状态")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-
                     Text(freshnessText)
                         .font(.caption.weight(.semibold))
                         .padding(.horizontal, 8)
@@ -29,10 +25,6 @@ struct QuotaSummaryView: View {
 
                 if let resetCreditsSummary {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("重置次数")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-
                         VStack(alignment: .leading, spacing: 6) {
                             Text(resetCreditsSummary.countLine)
                                 .font(.headline.weight(.semibold))
@@ -52,7 +44,7 @@ struct QuotaSummaryView: View {
 
                             if !resetCreditsSummary.additionalCreditItems.isEmpty {
                                 DisclosureGroup(
-                                    "查看全部（\(resetCreditsSummary.additionalCreditItems.count + (resetCreditsSummary.featuredCreditItem == nil ? 0 : 1))）",
+                                    "全部 \(resetCreditsSummary.additionalCreditItems.count + (resetCreditsSummary.featuredCreditItem == nil ? 0 : 1))",
                                     isExpanded: $showsAllResetCredits
                                 ) {
                                     VStack(alignment: .leading, spacing: 8) {
@@ -73,7 +65,7 @@ struct QuotaSummaryView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
 
                         if !resetCreditsSummary.detailLines.isEmpty {
-                            DisclosureGroup("原始字段与诊断") {
+                            DisclosureGroup("字段") {
                                 VStack(alignment: .leading, spacing: 6) {
                                     ForEach(resetCreditsSummary.detailLines, id: \.self) { detailLine in
                                         Text(detailLine)
