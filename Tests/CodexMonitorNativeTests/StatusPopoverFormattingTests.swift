@@ -209,9 +209,44 @@ final class StatusPopoverFormattingTests: XCTestCase {
     }
 
     func testTitleSummaryMatchesStatusState() {
-        XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .success), "已更新")
-        XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .stale), "数据过期")
+        XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .success), "最新数据")
+        XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .refreshing), "读取中")
+        XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .stale), "使用上次数据")
         XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .networkFailed), "网络异常")
+    }
+
+    func testFreshnessTitleDistinguishesPrimaryDataStates() {
+        XCTAssertEqual(
+            StatusPopoverFormatting.freshnessTitle(for: .success, isUsingCachedSnapshot: false),
+            "最新数据"
+        )
+        XCTAssertEqual(
+            StatusPopoverFormatting.freshnessTitle(for: .refreshing, isUsingCachedSnapshot: true),
+            "读取中"
+        )
+        XCTAssertEqual(
+            StatusPopoverFormatting.freshnessTitle(for: .stale, isUsingCachedSnapshot: true),
+            "使用上次数据"
+        )
+        XCTAssertEqual(
+            StatusPopoverFormatting.freshnessTitle(for: .networkFailed, isUsingCachedSnapshot: true),
+            "使用上次数据"
+        )
+        XCTAssertEqual(
+            StatusPopoverFormatting.freshnessTitle(for: .networkFailed, isUsingCachedSnapshot: false),
+            "读取失败"
+        )
+    }
+
+    func testFreshnessSummaryDoesNotClaimCachedDataWhenNoneExists() {
+        XCTAssertEqual(
+            StatusPopoverFormatting.freshnessSummary(for: .networkFailed, isUsingCachedSnapshot: false),
+            "读取失败，当前无可用真实快照"
+        )
+        XCTAssertEqual(
+            StatusPopoverFormatting.freshnessSummary(for: .networkFailed, isUsingCachedSnapshot: true),
+            "读取失败，当前显示上次成功快照"
+        )
     }
 
     func testRelativeRecoveryLineShowsRemainingDuration() {

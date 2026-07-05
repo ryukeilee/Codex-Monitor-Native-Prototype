@@ -95,7 +95,10 @@ struct QuotaSummaryView: View {
     }
 
     private var freshnessText: String {
-        StatusPopoverFormatting.titleSummary(for: appState.displayStatus)
+        StatusPopoverFormatting.freshnessTitle(
+            for: appState.displayStatus,
+            isUsingCachedSnapshot: appState.isUsingCachedSnapshot
+        )
     }
 
     private var fiveHourQuotaText: String {

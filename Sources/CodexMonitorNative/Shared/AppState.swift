@@ -44,6 +44,8 @@ final class AppState: ObservableObject {
     private var freshnessTask: Task<Void, Never>?
 
     var isRefreshing: Bool { status == .refreshing }
+    var isUsingCachedSnapshot: Bool { realQuotaHealth.isUsingCachedSnapshot }
+
     var isDataStale: Bool {
         guard snapshot.dataSource == .real, let lastSuccessAt else {
             return false

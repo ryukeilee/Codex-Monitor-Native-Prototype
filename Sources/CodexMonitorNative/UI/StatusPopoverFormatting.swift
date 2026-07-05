@@ -99,11 +99,11 @@ enum StatusPopoverFormatting {
     static func titleSummary(for status: QuotaRefreshStatus) -> String {
         switch status {
         case .success:
-            return "已更新"
+            return "最新数据"
         case .refreshing:
-            return "正在刷新"
+            return "读取中"
         case .stale:
-            return "数据过期"
+            return "使用上次数据"
         case .networkFailed:
             return "网络异常"
         case .authRequired:
@@ -116,6 +116,48 @@ enum StatusPopoverFormatting {
             return "演示数据"
         case .idle:
             return "等待刷新"
+        }
+    }
+
+    static func freshnessTitle(for status: QuotaRefreshStatus, isUsingCachedSnapshot: Bool) -> String {
+        switch status {
+        case .success:
+            return "最新数据"
+        case .refreshing:
+            return "读取中"
+        case .stale:
+            return "使用上次数据"
+        case .networkFailed, .authRequired, .parseFailed:
+            return isUsingCachedSnapshot ? "使用上次数据" : "读取失败"
+        case .noSnapshot:
+            return "等待同步"
+        case .demoMode:
+            return "演示数据"
+        case .idle:
+            return "等待刷新"
+        }
+    }
+
+    static func freshnessSummary(for status: QuotaRefreshStatus, isUsingCachedSnapshot: Bool) -> String? {
+        switch status {
+        case .success:
+            return "数据为最近一次成功读取结果"
+        case .refreshing:
+            return isUsingCachedSnapshot
+                ? "正在读取新数据，主额度与 reset credits 暂用上次成功快照"
+                : "正在读取新数据，尚无可用真实快照"
+        case .networkFailed:
+            return isUsingCachedSnapshot ? "读取失败，当前显示上次成功快照" : "读取失败，当前无可用真实快照"
+        case .authRequired:
+            return isUsingCachedSnapshot ? "需要重新登录 Codex，当前显示上次成功快照" : "需要重新登录 Codex，当前无可用真实快照"
+        case .parseFailed:
+            return isUsingCachedSnapshot ? "响应暂时不可解析，当前显示上次成功快照" : "响应暂时不可解析，当前无可用真实快照"
+        case .stale:
+            return "当前显示上次成功快照，数据已超过新鲜度窗口"
+        case .noSnapshot:
+            return "尚未读取到真实数据"
+        case .idle, .demoMode:
+            return nil
         }
     }
 

@@ -61,9 +61,23 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(appState.status, .networkFailed)
         XCTAssertEqual(appState.dataSource, .real)
         XCTAssertEqual(appState.failureCount, 1)
+        XCTAssertTrue(appState.isUsingCachedSnapshot)
         XCTAssertEqual(appState.realQuotaHealth, RealQuotaHealthDiagnostic(kind: .rpcRejected, isUsingCachedSnapshot: true))
         XCTAssertEqual(appState.effectiveFiveHourResetAt, resetAt)
         XCTAssertEqual(store.loadSnapshot(), initial)
+    }
+
+    func testFailedRefreshWithoutCachedSnapshotReportsNoCachedData() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.failure.noCache.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let appState = AppState(snapshotStore: store, refreshService: MockRefreshService(snapshot: nil))
+
+        await appState.refreshNow(trigger: .manual)
+
+        XCTAssertEqual(appState.snapshot, .notConnected)
+        XCTAssertEqual(appState.status, .networkFailed)
+        XCTAssertFalse(appState.isUsingCachedSnapshot)
+        XCTAssertEqual(appState.realQuotaHealth, RealQuotaHealthDiagnostic(kind: .rpcRejected, isUsingCachedSnapshot: false))
     }
 
     func testRefreshInProgressKeepsCachedQuotaAndRecoveryTimeVisible() async {

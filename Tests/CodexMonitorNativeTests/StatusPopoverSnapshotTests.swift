@@ -115,6 +115,24 @@ final class StatusPopoverSnapshotTests: XCTestCase {
         XCTAssertTrue(source.contains("if let refreshSummaryLine"))
     }
 
+    func testStatusPopoverViewSourceUsesCompactLaunchAtLoginWhenEnabled() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = repoRoot.appendingPathComponent("Sources/CodexMonitorNative/UI/StatusPopoverView.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+
+        XCTAssertTrue(source.contains("usesCompactLaunchAtLoginSection"))
+        XCTAssertTrue(source.contains("launchAtLoginManager.statusInfo == .enabled"))
+        XCTAssertTrue(source.contains("Text(\"开机启动 · 已启用\")"))
+        XCTAssertFalse(source.contains("Text(\"开机启动已启用\")"))
+        XCTAssertTrue(source.contains("launchAtLoginToggle(controlSize: .mini, isLowEmphasis: true)"))
+        XCTAssertTrue(source.contains("launchAtLoginToggle(controlSize: .small, isLowEmphasis: false)"))
+        XCTAssertTrue(source.contains(".opacity(isLowEmphasis ? 0.62 : 1)"))
+        XCTAssertTrue(source.contains(".scaleEffect(isLowEmphasis ? 0.86 : 1)"))
+    }
+
     private func renderSnapshot(snapshot: QuotaSnapshot, outputURL: URL) async throws {
         let hostingView = try await makeHostingView(snapshot: snapshot)
         try saveSnapshot(of: hostingView, to: outputURL)

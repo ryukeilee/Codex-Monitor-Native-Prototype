@@ -84,6 +84,9 @@ final class LaunchAtLoginManager: ObservableObject {
         let status = serviceStatus()
         statusInfo = status
         isEnabled = status.isEnabled
+        if status == .enabled {
+            lastErrorSummary = nil
+        }
         AppLogger.system.info("Launch at login status refreshed: \(String(describing: status), privacy: .public)")
     }
 

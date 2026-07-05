@@ -41,28 +41,10 @@ struct StatusPopoverView: View {
                 .tint(.secondary)
             }
 
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("开机启动")
-                        .font(.subheadline.weight(.medium))
-
-                    Text(launchAtLoginManager.helperText)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-
-                Spacer(minLength: 8)
-
-                Toggle("", isOn: launchAtLoginBinding)
-                    .labelsHidden()
-                    .disabled(launchAtLoginManager.isUpdating)
-                    .controlSize(.small)
-                    .accessibilityLabel("开机启动")
-            }
+            launchAtLoginSection
 
             Divider()
-                .opacity(0.55)
+                .opacity(usesCompactLaunchAtLoginSection ? 0.35 : 0.55)
 
             HStack(alignment: .center, spacing: 8) {
                 Button(action: onRefresh) {
@@ -97,6 +79,52 @@ struct StatusPopoverView: View {
                 launchAtLoginManager.setLaunchAtLogin(newValue)
             }
         )
+    }
+
+    @ViewBuilder
+    private var launchAtLoginSection: some View {
+        if usesCompactLaunchAtLoginSection {
+            HStack(alignment: .center, spacing: 8) {
+                Text("开机启动 · 已启用")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+
+                Spacer(minLength: 8)
+
+                launchAtLoginToggle(controlSize: .mini, isLowEmphasis: true)
+            }
+        } else {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("开机启动")
+                        .font(.subheadline.weight(.medium))
+
+                    Text(launchAtLoginManager.helperText)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 8)
+
+                launchAtLoginToggle(controlSize: .small, isLowEmphasis: false)
+            }
+        }
+    }
+
+    private var usesCompactLaunchAtLoginSection: Bool {
+        launchAtLoginManager.statusInfo == .enabled
+    }
+
+    private func launchAtLoginToggle(controlSize: ControlSize, isLowEmphasis: Bool) -> some View {
+        Toggle("", isOn: launchAtLoginBinding)
+            .labelsHidden()
+            .disabled(launchAtLoginManager.isUpdating)
+            .controlSize(controlSize)
+            .opacity(isLowEmphasis ? 0.62 : 1)
+            .scaleEffect(isLowEmphasis ? 0.86 : 1)
+            .accessibilityLabel("开机启动")
     }
 
     private var environmentInfoLine: String? {
@@ -145,20 +173,10 @@ struct StatusPopoverView: View {
     }
 
     private var refreshSummaryLine: String? {
-        switch appState.displayStatus {
-        case .refreshing:
-            return "正在刷新，主额度与 reset credits 保持当前快照"
-        case .networkFailed:
-            return "刷新失败，当前显示上次成功快照"
-        case .authRequired:
-            return "需要重新登录 Codex，当前显示上次成功快照"
-        case .parseFailed:
-            return "响应暂时不可解析，当前显示上次成功快照"
-        case .stale:
-            return "当前显示的数据已过期，建议手动刷新"
-        default:
-            return nil
-        }
+        StatusPopoverFormatting.freshnessSummary(
+            for: appState.displayStatus,
+            isUsingCachedSnapshot: appState.isUsingCachedSnapshot
+        )
     }
 
     private var hasDiagnosticsContent: Bool {
