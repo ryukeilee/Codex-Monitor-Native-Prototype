@@ -1,6 +1,6 @@
 # Codex Monitor Native
 
-一个面向 macOS 菜单栏的 Codex 额度监视器。它以原生 SwiftUI/AppKit 方式运行，常驻菜单栏，优先用最少的界面提供当前周额度、5 小时额度和数据可信度信息。
+一个面向 macOS 菜单栏的 Codex 额度监视器。它以原生 SwiftUI/AppKit 方式运行，常驻菜单栏，提供当前周额度、5 小时额度和数据可信度信息；仓库同时包含一个 widget extension 工程用于扩展展示。
 
 仓库当前重点不是继续堆功能，而是保持这几个行为稳定可验证：
 
@@ -27,6 +27,7 @@
 
 - macOS 14 或更高版本。
 - 本机可执行 `swift build` / `swift test`。
+- 本机可执行 `xcodebuild`，用于打包 widget extension。
 - 若要读取真实额度，需要本机可用的 `codex` 可执行文件，并支持 `codex app-server --stdio`。
 
 真实数据依赖说明：
@@ -105,7 +106,7 @@ Popover 里有两层关键信息：
 
 ## 构建、运行与安装
 
-仓库是 Swift Package，可直接用 SwiftPM 构建；当前没有提交 `.xcodeproj` 或 `.xcworkspace`。
+主应用是 Swift Package，可直接用 SwiftPM 构建；仓库另外提交了 `CodexMonitorWidgetExtension.xcodeproj`，供打包脚本构建 widget extension。
 
 ### 构建
 
@@ -125,6 +126,11 @@ swift test
 ```bash
 ./script/build_and_run.sh
 ```
+
+说明：
+
+- 脚本会先构建 SwiftPM 主应用，再在工程存在时构建 `CodexMonitorWidgetExtension`。
+- 脚本会在 `dist/` 里重新生成 `.app`，注入 entitlements，并做本地 codesign 后启动。
 
 常用变体：
 
@@ -169,6 +175,7 @@ CODEX_MONITOR_FORCE_REFRESH_FAILURE=1 ./script/build_and_run.sh
 - 失败后会保留最近一次成功的真实快照。
 - 手动刷新入口存在于 Popover，刷新时会保留当前真实快照直到新结果返回。
 - 启动后自动刷新、定时刷新、失败退避和唤醒后刷新都有代码与测试覆盖。
+- widget 展示桥接和布局相关逻辑有独立测试覆盖。
 
 对应补充文档：
 
