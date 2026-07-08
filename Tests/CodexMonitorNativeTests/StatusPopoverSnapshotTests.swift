@@ -114,8 +114,10 @@ final class StatusPopoverSnapshotTests: XCTestCase {
         let source = try String(contentsOf: sourceURL, encoding: .utf8)
 
         XCTAssertTrue(source.contains("DisclosureGroup(\"诊断\""))
+        XCTAssertTrue(source.contains("DisclosureGroup(\"自检\""))
         XCTAssertFalse(source.contains("DisclosureGroup(\"详情与诊断\""))
         XCTAssertTrue(source.contains("@State private var showsDiagnostics = false"))
+        XCTAssertTrue(source.contains("@State private var showsSelfCheck = false"))
         XCTAssertTrue(source.contains("if let refreshSummaryLine"))
     }
 

@@ -5,6 +5,8 @@ MODE="${1:-run}"
 APP_NAME="CodexMonitorNative"
 BUNDLE_ID="com.ryukeilee.CodexMonitorNativePrototype"
 MIN_SYSTEM_VERSION="14.0"
+APP_MARKETING_VERSION="${APP_MARKETING_VERSION:-0.1.0}"
+APP_BUILD_VERSION="${APP_BUILD_VERSION:-1}"
 BUILD_CONFIGURATION="${BUILD_CONFIGURATION:-debug}"
 case "$BUILD_CONFIGURATION" in
   debug)
@@ -96,6 +98,10 @@ cat >"$INFO_PLIST" <<PLIST
   <string>$APP_NAME</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>$APP_MARKETING_VERSION</string>
+  <key>CFBundleVersion</key>
+  <string>$APP_BUILD_VERSION</string>
   <key>LSMinimumSystemVersion</key>
   <string>$MIN_SYSTEM_VERSION</string>
   <key>LSUIElement</key>

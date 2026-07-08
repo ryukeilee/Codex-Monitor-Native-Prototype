@@ -5,7 +5,23 @@ struct StatusPopoverView: View {
     @ObservedObject var launchAtLoginManager: LaunchAtLoginManager
     let onRefresh: () -> Void
     let onQuit: () -> Void
+    let onLayoutChange: () -> Void
     @State private var showsDiagnostics = false
+    @State private var showsSelfCheck = false
+
+    init(
+        appState: AppState,
+        launchAtLoginManager: LaunchAtLoginManager,
+        onRefresh: @escaping () -> Void,
+        onQuit: @escaping () -> Void,
+        onLayoutChange: @escaping () -> Void = {}
+    ) {
+        self.appState = appState
+        self.launchAtLoginManager = launchAtLoginManager
+        self.onRefresh = onRefresh
+        self.onQuit = onQuit
+        self.onLayoutChange = onLayoutChange
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -21,6 +37,12 @@ struct StatusPopoverView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
             }
+
+            DisclosureGroup("自检", isExpanded: $showsSelfCheck) {
+                selfCheckSection
+            }
+            .font(.caption)
+            .tint(.secondary)
 
             if hasDiagnosticsContent {
                 DisclosureGroup("诊断", isExpanded: $showsDiagnostics) {
@@ -69,6 +91,12 @@ struct StatusPopoverView: View {
         }
         .padding(12)
         .frame(width: 314)
+        .onChange(of: showsSelfCheck) { _, _ in
+            onLayoutChange()
+        }
+        .onChange(of: showsDiagnostics) { _, _ in
+            onLayoutChange()
+        }
     }
 
     private var launchAtLoginBinding: Binding<Bool> {
@@ -139,6 +167,35 @@ struct StatusPopoverView: View {
 
     private var hasDisplayableSourceStatus: Bool {
         appState.dataSource == .real || appState.displayStatus == .demoMode
+    }
+
+    private var selfCheckSnapshot: StatusSelfCheckSnapshot {
+        StatusSelfCheckSnapshot.capture(appState: appState)
+    }
+
+    private var selfCheckSection: some View {
+        let snapshot = selfCheckSnapshot
+        return VStack(alignment: .leading, spacing: 6) {
+            selfCheckRow(title: "版本", value: snapshot.version)
+            selfCheckRow(title: "安装", value: snapshot.installPath)
+            selfCheckRow(title: "最近刷新", value: snapshot.refreshSummary)
+            selfCheckRow(title: "Widget", value: snapshot.widgetSummary)
+        }
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .padding(.top, 4)
+    }
+
+    private func selfCheckRow(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(title)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.primary)
+
+            Text(value)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private var supportLine: String? {

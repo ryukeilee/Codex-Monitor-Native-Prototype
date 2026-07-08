@@ -14,18 +14,29 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         popover.behavior = .applicationDefined
         popover.animates = false
         popover.contentSize = NSSize(width: Self.contentWidth, height: 268)
-        popover.contentViewController = NSHostingController(
-            rootView: StatusPopoverView(
-                appState: appState,
-                launchAtLoginManager: launchAtLoginManager,
-                onRefresh: {
-                    appState.refresh(trigger: .manual)
-                },
-                onQuit: {
-                    NSApp.terminate(nil)
+        var hostingController: NSHostingController<StatusPopoverView>?
+        let rootView = StatusPopoverView(
+            appState: appState,
+            launchAtLoginManager: launchAtLoginManager,
+            onRefresh: {
+                appState.refresh(trigger: .manual)
+            },
+            onQuit: {
+                NSApp.terminate(nil)
+            },
+            onLayoutChange: {
+                guard popover.isShown, let hostingController else {
+                    return
                 }
-            )
+
+                let fittingSize = hostingController.sizeThatFits(
+                    in: NSSize(width: Self.contentWidth, height: .greatestFiniteMagnitude)
+                )
+                popover.contentSize = NSSize(width: Self.contentWidth, height: ceil(fittingSize.height))
+            }
         )
+        hostingController = NSHostingController(rootView: rootView)
+        popover.contentViewController = hostingController
 
         self.popover = popover
         self.launchAtLoginManager = launchAtLoginManager
