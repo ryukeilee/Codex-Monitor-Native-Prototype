@@ -73,85 +73,236 @@ enum RealQuotaError: LocalizedError {
     }
 }
 
+protocol CodexRPCCancellable: Sendable {
+    func cancel()
+}
+
+protocol CodexRPCTimeoutScheduling: Sendable {
+    func schedule(after seconds: Double, action: @escaping @Sendable () -> Void) -> any CodexRPCCancellable
+}
+
+protocol CodexRPCTransport: Sendable {
+    func start(
+        stdout: @escaping @Sendable (Data) -> Void,
+        stderr: @escaping @Sendable (Data) -> Void,
+        termination: @escaping @Sendable (Int32) -> Void
+    ) throws
+    func write(_ data: Data)
+    func shutdownAndWait() throws
+}
+
+enum ProcessCleanupError: Error, Equatable {
+    case forceKillFailed
+    case processDidNotExit
+}
+
+protocol ProcessRPCProcess: AnyObject, Sendable {
+    var isRunning: Bool { get }
+    var terminationStatus: Int32 { get }
+    var terminationHandler: (@Sendable (any ProcessRPCProcess) -> Void)? { get set }
+    func configure(codexPath: String, stdin: Pipe, stdout: Pipe, stderr: Pipe)
+    func run() throws
+    func terminate()
+    func kill() -> Bool
+}
+
+private final class FoundationProcessRPCProcess: ProcessRPCProcess, @unchecked Sendable {
+    private let process = Process()
+    private var handler: (@Sendable (any ProcessRPCProcess) -> Void)?
+
+    var isRunning: Bool { process.isRunning }
+    var terminationStatus: Int32 { process.terminationStatus }
+    var terminationHandler: (@Sendable (any ProcessRPCProcess) -> Void)? {
+        get { handler }
+        set {
+            handler = newValue
+            if newValue == nil {
+                process.terminationHandler = nil
+            } else {
+                process.terminationHandler = { [weak self] _ in
+                    guard let self else { return }
+                    self.handler?(self)
+                }
+            }
+        }
+    }
+
+    func configure(codexPath: String, stdin: Pipe, stdout: Pipe, stderr: Pipe) {
+        process.executableURL = URL(fileURLWithPath: codexPath)
+        process.arguments = ["app-server", "--stdio"]
+        process.standardInput = stdin
+        process.standardOutput = stdout
+        process.standardError = stderr
+    }
+
+    func run() throws { try process.run() }
+    func terminate() { process.terminate() }
+    func kill() -> Bool {
+        Darwin.kill(process.processIdentifier, SIGKILL) == 0 || errno == ESRCH
+    }
+}
+
+private final class DispatchTimeoutScheduler: CodexRPCTimeoutScheduling, @unchecked Sendable {
+    func schedule(after seconds: Double, action: @escaping @Sendable () -> Void) -> any CodexRPCCancellable {
+        let work = DispatchWorkItem(block: action)
+        DispatchQueue.global().asyncAfter(deadline: .now() + seconds, execute: work)
+        return DispatchTimeoutToken(work: work)
+    }
+}
+
+private final class DispatchTimeoutToken: CodexRPCCancellable, @unchecked Sendable {
+    private let work: DispatchWorkItem
+
+    init(work: DispatchWorkItem) {
+        self.work = work
+    }
+
+    func cancel() {
+        work.cancel()
+    }
+}
+
+final class ProcessRPCTransport: CodexRPCTransport, @unchecked Sendable {
+    private let process: any ProcessRPCProcess
+    private let stdinPipe = Pipe()
+    private let stdoutPipe = Pipe()
+    private let stderrPipe = Pipe()
+    private var hasStarted = false
+    private let shutdownGraceSeconds: TimeInterval
+
+    init(codexPath: String, shutdownGraceSeconds: TimeInterval = 1) {
+        self.process = FoundationProcessRPCProcess()
+        self.shutdownGraceSeconds = shutdownGraceSeconds
+        process.configure(codexPath: codexPath, stdin: stdinPipe, stdout: stdoutPipe, stderr: stderrPipe)
+    }
+
+    init(process: any ProcessRPCProcess, shutdownGraceSeconds: TimeInterval = 1) {
+        self.process = process
+        self.shutdownGraceSeconds = shutdownGraceSeconds
+    }
+
+    func start(
+        stdout: @escaping @Sendable (Data) -> Void,
+        stderr: @escaping @Sendable (Data) -> Void,
+        termination: @escaping @Sendable (Int32) -> Void
+    ) throws {
+        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if !chunk.isEmpty { stdout(chunk) }
+        }
+        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if !chunk.isEmpty { stderr(chunk) }
+        }
+        process.terminationHandler = { proc in termination(proc.terminationStatus) }
+        try process.run()
+        hasStarted = true
+    }
+
+    func write(_ data: Data) {
+        stdinPipe.fileHandleForWriting.write(data)
+    }
+
+    func shutdownAndWait() throws {
+        stdoutPipe.fileHandleForReading.readabilityHandler = nil
+        stderrPipe.fileHandleForReading.readabilityHandler = nil
+        stdinPipe.fileHandleForWriting.closeFile()
+        stdoutPipe.fileHandleForReading.closeFile()
+        stderrPipe.fileHandleForReading.closeFile()
+
+        guard hasStarted else { return }
+        if process.isRunning {
+            process.terminate()
+            waitForExit()
+        }
+        if process.isRunning {
+            guard process.kill() else {
+                process.terminationHandler = nil
+                throw ProcessCleanupError.forceKillFailed
+            }
+            waitForExit()
+        }
+        process.terminationHandler = nil
+        if process.isRunning {
+            throw ProcessCleanupError.processDidNotExit
+        }
+    }
+
+    private func waitForExit() {
+        let deadline = Date().addingTimeInterval(shutdownGraceSeconds)
+        while process.isRunning, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.001)
+        }
+    }
+}
+
 actor CodexRPCClient {
-    private let process: Process
-    private let stdinPipe: Pipe
-    private let stdoutPipe: Pipe
-    private let stderrPipe: Pipe
+    private enum PendingResponse {
+        case initialize
+        case rateLimits
+    }
+
+    private let transport: any CodexRPCTransport
+    private let timeoutScheduler: any CodexRPCTimeoutScheduling
 
     private var stdoutBuffer = Data()
     private var stderrData = Data()
     private var nextId = 1
     private var hasResumed = false
-    private var pendingResolve: ((Data) -> Void)?
+    private var pendingResponse: PendingResponse?
     private var completion: ((Result<QuotaSnapshot, Error>) -> Void)?
-    private var timeoutWork: DispatchWorkItem?
+    private var timeoutWork: (any CodexRPCCancellable)?
 
     init(codexPath: String) throws {
-        process = Process()
-        stdinPipe = Pipe()
-        stdoutPipe = Pipe()
-        stderrPipe = Pipe()
+        transport = ProcessRPCTransport(codexPath: codexPath)
+        timeoutScheduler = DispatchTimeoutScheduler()
+    }
 
-        process.executableURL = URL(fileURLWithPath: codexPath)
-        process.arguments = ["app-server", "--stdio"]
-        process.standardInput = stdinPipe
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
+    init(transport: any CodexRPCTransport, timeoutScheduler: any CodexRPCTimeoutScheduling) {
+        self.transport = transport
+        self.timeoutScheduler = timeoutScheduler
     }
 
     func fetchQuota(timeoutSeconds: Double) async throws -> QuotaSnapshot {
-        try await withCheckedThrowingContinuation { continuation in
-            self.completion = { result in
-                switch result {
-                case .success(let snapshot):
-                    continuation.resume(returning: snapshot)
-                case .failure(let error):
-                    continuation.resume(throwing: error)
+        try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { continuation in
+                completion = { result in
+                    switch result {
+                    case .success(let snapshot): continuation.resume(returning: snapshot)
+                    case .failure(let error): continuation.resume(throwing: error)
+                    }
+                }
+                if Task.isCancelled {
+                    complete(.failure(CancellationError()))
+                } else {
+                    setupAndRun(timeoutSeconds: timeoutSeconds)
                 }
             }
-
-            Task { setupAndRun(timeoutSeconds: timeoutSeconds) }
-        }
+        }, onCancel: {
+            Task { await self.cancel() }
+        })
     }
 
     private func setupAndRun(timeoutSeconds: Double) {
-        stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            guard let self else { return }
-            let chunk = handle.availableData
-            guard !chunk.isEmpty else { return }
-            Task { await self.handleStdoutChunk(chunk) }
-        }
-
-        stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            guard let self else { return }
-            let chunk = handle.availableData
-            if !chunk.isEmpty {
-                Task { await self.handleStderrChunk(chunk) }
-            }
-        }
-
-        process.terminationHandler = { [weak self] proc in
-            guard let self else { return }
-            Task { await self.handleTermination(status: proc.terminationStatus) }
-        }
-
         do {
-            try process.run()
+            try transport.start(
+                stdout: { [weak self] chunk in Task { await self?.handleStdoutChunk(chunk) } },
+                stderr: { [weak self] chunk in Task { await self?.handleStderrChunk(chunk) } },
+                termination: { [weak self] status in Task { await self?.handleTermination(status: status) } }
+            )
         } catch {
             complete(.failure(RealQuotaError.spawnFailed(error.localizedDescription)))
             return
         }
 
         // Set up timeout
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            Task { await self.handleTimeout() }
+        timeoutWork = timeoutScheduler.schedule(after: timeoutSeconds) { [weak self] in
+            Task { await self?.handleTimeout() }
         }
-        timeoutWork = work
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeoutSeconds, execute: work)
 
-        // Step 1: Send initialize
+        // Step 1: Install the response handler before sending initialize so a
+        // fast app-server response cannot arrive in the gap.
+        pendingResponse = .initialize
         sendRequest(method: "initialize", params: [
             "clientInfo": [
                 "name": "codex-monitor-native",
@@ -159,12 +310,6 @@ actor CodexRPCClient {
                 "version": "0.2.0"
             ]
         ])
-
-        // Step 2: Wait for initialize response, then send initialized + rate limits request
-        pendingResolve = { [weak self] _ in
-            guard let self else { return }
-            Task { await self.handleInitialized() }
-        }
     }
 
     private func handleInitialized() {
@@ -174,17 +319,11 @@ actor CodexRPCClient {
             writeLine(notifLine)
         }
 
+        pendingResponse = .rateLimits
         sendRequest(method: "account/rateLimits/read")
-
-        pendingResolve = { [weak self] responseData in
-            guard let self else { return }
-            Task { await self.handleRateLimitsResponse(responseData) }
-        }
     }
 
     private func handleRateLimitsResponse(_ responseData: Data) {
-        timeoutWork?.cancel()
-
         guard let message = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
               let result = message["result"] as? [String: Any] else {
             complete(.failure(RealQuotaError.parseFailed("Invalid JSON response")))
@@ -251,17 +390,27 @@ actor CodexRPCClient {
         }
 
         if message["result"] != nil {
-            pendingResolve?(messageData)
-            pendingResolve = nil
+            let response = pendingResponse
+            pendingResponse = nil
+            switch response {
+            case .initialize:
+                handleInitialized()
+            case .rateLimits:
+                handleRateLimitsResponse(messageData)
+            case nil:
+                break
+            }
         }
     }
 
     private func sendRequest(method: String, params: [String: Any]? = nil) {
-        let dict: [String: Any] = [
+        var dict: [String: Any] = [
             "id": nextId,
-            "method": method,
-            "params": params as Any
+            "method": method
         ]
+        if let params {
+            dict["params"] = params
+        }
         nextId += 1
 
         guard let jsonData = try? JSONSerialization.data(withJSONObject: dict, options: []),
@@ -275,21 +424,29 @@ actor CodexRPCClient {
 
     private func writeLine(_ line: String) {
         guard let lineData = (line + "\n").data(using: .utf8) else { return }
-        stdinPipe.fileHandleForWriting.write(lineData)
+        transport.write(lineData)
+    }
+
+    private func cancel() {
+        complete(.failure(CancellationError()))
     }
 
     private func complete(_ result: Result<QuotaSnapshot, Error>) {
         guard !hasResumed else { return }
         hasResumed = true
-
-        if process.isRunning {
-            process.terminate()
+        pendingResponse = nil
+        timeoutWork?.cancel()
+        timeoutWork = nil
+        let finalResult: Result<QuotaSnapshot, Error>
+        do {
+            try transport.shutdownAndWait()
+            finalResult = result
+        } catch {
+            finalResult = .failure(error)
         }
-
-        stdoutPipe.fileHandleForReading.readabilityHandler = nil
-        stderrPipe.fileHandleForReading.readabilityHandler = nil
-
-        completion?(result)
+        let completion = completion
+        self.completion = nil
+        completion?(finalResult)
     }
 }
 

@@ -4,6 +4,110 @@ import XCTest
 
 @MainActor
 final class SleepWakeObserverTests: XCTestCase {
+    func testStopInvalidatesWakeDeliveredBeforeOuterTaskRuns() async {
+        let notificationCenter = NotificationCenter()
+        let dispatcher = ControlledMainTaskDispatcher()
+        var callbackCount = 0
+        let observer = SleepWakeObserver(
+            notificationCenter: notificationCenter,
+            wakeDelaySeconds: 0,
+            dispatchTask: dispatcher.dispatch,
+            onWake: { callbackCount += 1 }
+        )
+
+        observer.start()
+        notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+        XCTAssertEqual(dispatcher.pendingCount, 1)
+
+        observer.stop()
+        await dispatcher.runAll()
+
+        XCTAssertEqual(callbackCount, 0)
+        XCTAssertEqual(dispatcher.pendingCount, 0)
+    }
+
+    func testStopInvalidatesSleepDeliveredBeforeOuterTaskRuns() async {
+        let notificationCenter = NotificationCenter()
+        let dispatcher = ControlledMainTaskDispatcher()
+        var callbackCount = 0
+        let observer = SleepWakeObserver(
+            notificationCenter: notificationCenter,
+            wakeDelaySeconds: 0,
+            onSleep: { callbackCount += 1 },
+            dispatchTask: dispatcher.dispatch,
+            onWake: {}
+        )
+
+        observer.start()
+        notificationCenter.post(name: NSWorkspace.willSleepNotification, object: nil)
+        XCTAssertEqual(dispatcher.pendingCount, 1)
+
+        observer.stop()
+        await dispatcher.runAll()
+
+        XCTAssertEqual(callbackCount, 0)
+        XCTAssertEqual(dispatcher.pendingCount, 0)
+    }
+    func testDeinitCancelsPendingWakeAndRemovesObservers() async {
+        let notificationCenter = NotificationCenter()
+        let gate = WakeDelayGate()
+        let noCallback = expectation(description: "no callback after deinit")
+        noCallback.isInverted = true
+        var observer: SleepWakeObserver? = SleepWakeObserver(
+            notificationCenter: notificationCenter,
+            wakeDelaySeconds: 1,
+            sleep: { _ in await gate.wait() },
+            onWake: { noCallback.fulfill() }
+        )
+        weak var weakObserver = observer
+
+        observer?.start()
+        notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+        await gate.waitUntilSleeping()
+        observer = nil
+
+        XCTAssertNil(weakObserver)
+        await gate.release()
+        await fulfillment(of: [noCallback], timeout: 0.05)
+    }
+
+    func testStopCancelsPendingWakeBeforeItsDelayCompletes() async {
+        let notificationCenter = NotificationCenter()
+        let gate = WakeDelayGate()
+        let noCallback = expectation(description: "no callback after stop")
+        noCallback.isInverted = true
+        let observer = SleepWakeObserver(
+            notificationCenter: notificationCenter,
+            wakeDelaySeconds: 1,
+            sleep: { _ in await gate.wait() },
+            onWake: { noCallback.fulfill() }
+        )
+
+        observer.start()
+        notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+        await gate.waitUntilSleeping()
+        observer.stop()
+        await gate.release()
+        await fulfillment(of: [noCallback], timeout: 0.05)
+    }
+    func testRepeatedWakeNotificationsCoalesceIntoOneCallback() async {
+        let notificationCenter = NotificationCenter()
+        let fired = expectation(description: "one wake callback")
+        let noSecondCallback = expectation(description: "no second wake callback")
+        noSecondCallback.isInverted = true
+        var callbackCount = 0
+        let observer = SleepWakeObserver(notificationCenter: notificationCenter, wakeDelaySeconds: 0) {
+            callbackCount += 1
+            if callbackCount == 1 { fired.fulfill() } else { noSecondCallback.fulfill() }
+        }
+
+        observer.start()
+        notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+        notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+        await fulfillment(of: [fired, noSecondCallback], timeout: 0.1)
+        observer.stop()
+    }
+
     func testWakeNotificationInvokesHandlerAfterDelay() async {
         let notificationCenter = NotificationCenter()
         let fired = expectation(description: "wake handler invoked")
@@ -40,5 +144,43 @@ final class SleepWakeObserverTests: XCTestCase {
 
         await fulfillment(of: [fired], timeout: 1.0)
         observer.stop()
+    }
+}
+
+private final class ControlledMainTaskDispatcher: @unchecked Sendable {
+    private var pending: [@MainActor @Sendable () -> Void] = []
+
+    var pendingCount: Int { pending.count }
+
+    func dispatch(_ action: @escaping @MainActor @Sendable () -> Void) {
+        pending.append(action)
+    }
+
+    func runAll() async {
+        let actions = pending
+        pending.removeAll()
+        for action in actions { await MainActor.run { action() } }
+        await Task.yield()
+    }
+}
+
+private actor WakeDelayGate {
+    private var sleeper: CheckedContinuation<Void, Never>?
+    private var started: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        started?.resume()
+        started = nil
+        await withCheckedContinuation { sleeper = $0 }
+    }
+
+    func waitUntilSleeping() async {
+        if sleeper != nil { return }
+        await withCheckedContinuation { started = $0 }
+    }
+
+    func release() {
+        sleeper?.resume()
+        sleeper = nil
     }
 }

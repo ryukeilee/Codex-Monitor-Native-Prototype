@@ -41,7 +41,8 @@ final class AppState: ObservableObject {
     private var consecutiveFailures: Int = 0
     private let defaultInterval: TimeInterval = 300
     private let staleAfterInterval: TimeInterval = 20 * 60
-    private var freshnessTask: Task<Void, Never>?
+    private let taskResources = AppStateTaskResources()
+    private var activeRefreshID: UUID?
 
     var isRefreshing: Bool { status == .refreshing }
     var isUsingCachedSnapshot: Bool { realQuotaHealth.isUsingCachedSnapshot }
@@ -142,22 +143,69 @@ final class AppState: ObservableObject {
     // MARK: - Refresh
 
     func refresh(trigger: RefreshTrigger) {
-        Task {
-            await refreshNow(trigger: trigger)
-        }
+        _ = startManagedRefresh(trigger: trigger)
     }
 
     func refreshNow(trigger: RefreshTrigger) async {
-        guard status != .refreshing else {
-            AppLogger.refresh.info("Ignored refresh request because a refresh is already in progress")
+        guard let refreshTask = startManagedRefresh(trigger: trigger) else {
+            AppLogger.refresh.info("Ignored refresh request because a refresh is already queued or in progress")
+            if let refreshTask = taskResources.refreshTask {
+                await refreshTask.value
+            }
             return
         }
+        await refreshTask.value
+    }
 
+    @discardableResult
+    private func startManagedRefresh(trigger: RefreshTrigger) -> Task<Void, Never>? {
+        guard taskResources.refreshTask == nil else {
+            return nil
+        }
+        let refreshID = UUID()
+        activeRefreshID = refreshID
+        let baselineSnapshot = beginRefresh(trigger: trigger)
+        let refreshAction = refreshAction
+        let refreshTask = Task { [weak self] in
+            let result: Result<QuotaSnapshot, Error>
+            do {
+                result = .success(try await refreshAction(baselineSnapshot))
+            } catch {
+                result = .failure(error)
+            }
+            self?.finishManagedRefresh(result, refreshID: refreshID)
+        }
+        taskResources.refreshTask = refreshTask
+        return refreshTask
+    }
+
+    /// Cancels the managed refresh and immediately leaves presentation state usable.
+    /// A provider that ignores cancellation may finish later, but cannot retain the
+    /// refresh slot or leave the app/widget in the refreshing state.
+    func shutdown() {
+        taskResources.refreshTask?.cancel()
+        taskResources.refreshTask = nil
+        taskResources.freshnessTask?.cancel()
+        taskResources.freshnessTask = nil
+        activeRefreshID = nil
+        guard status == .refreshing else { return }
+
+        if let real = latestRealSnapshot {
+            snapshot = real
+            status = real.isFresh(referenceDate: .now, staleAfterInterval: staleAfterInterval) ? .success : .stale
+            realQuotaHealth = RealQuotaHealthDiagnostic(kind: .waitingForFirstRequest, isUsingCachedSnapshot: true)
+        } else {
+            status = snapshot.dataSource == .mock ? .demoMode : .noSnapshot
+            realQuotaHealth = RealQuotaHealthDiagnostic(kind: .waitingForFirstRequest, isUsingCachedSnapshot: false)
+        }
+        lastErrorSummary = nil
+    }
+
+    private func beginRefresh(trigger: RefreshTrigger) -> QuotaSnapshot {
         let triggerName = triggerName(for: trigger)
-
         status = .refreshing
         lastAttemptAt = .now
-        freshnessTask?.cancel()
+        taskResources.freshnessTask?.cancel()
         realQuotaHealth = RealQuotaHealthDiagnostic(
             kind: .requestInProgress,
             isUsingCachedSnapshot: latestRealSnapshot != nil
@@ -165,11 +213,19 @@ final class AppState: ObservableObject {
 
         let baselineSnapshot = latestRealSnapshot ?? snapshot
         AppLogger.refresh.info("Starting \(triggerName, privacy: .public) refresh (baseline source=\(baselineSnapshot.dataSource.rawValue, privacy: .public))")
+        return baselineSnapshot
+    }
 
-        do {
-            let refreshed = try await refreshAction(baselineSnapshot)
+    private func finishManagedRefresh(_ result: Result<QuotaSnapshot, Error>, refreshID: UUID) {
+        guard activeRefreshID == refreshID else { return }
+        applyRefreshResult(result)
+        taskResources.refreshTask = nil
+        activeRefreshID = nil
+    }
 
-            // Success path
+    private func applyRefreshResult(_ result: Result<QuotaSnapshot, Error>) {
+        switch result {
+        case .success(let refreshed):
             if refreshed.dataSource == .real {
                 latestRealSnapshot = refreshed
                 consecutiveFailures = 0
@@ -178,45 +234,28 @@ final class AppState: ObservableObject {
                 lastErrorSummary = nil
                 snapshot = refreshed
                 status = .success
-                realQuotaHealth = RealQuotaHealthDiagnostic(
-                    kind: .requestSucceeded,
-                    isUsingCachedSnapshot: false
-                )
+                realQuotaHealth = RealQuotaHealthDiagnostic(kind: .requestSucceeded, isUsingCachedSnapshot: false)
                 setBackoffInterval(defaultInterval)
                 snapshotStore.saveSnapshot(refreshed)
                 scheduleFreshnessCheck()
                 AppLogger.refresh.info("Real refresh succeeded: weekly=\(refreshed.weeklyQuotaPercent)% fiveHour=\(refreshed.fiveHourQuotaPercent)%")
             } else {
-                // Mock success (dev mode)
                 snapshot = refreshed
                 status = .demoMode
                 lastErrorSummary = nil
-                realQuotaHealth = RealQuotaHealthDiagnostic(
-                    kind: .waitingForFirstRequest,
-                    isUsingCachedSnapshot: false
-                )
+                realQuotaHealth = RealQuotaHealthDiagnostic(kind: .waitingForFirstRequest, isUsingCachedSnapshot: false)
                 AppLogger.refresh.info("Mock refresh succeeded")
             }
-        } catch {
-            // Failure path — classify and preserve
+        case .failure(let error):
             consecutiveFailures += 1
             failureCount = consecutiveFailures
-
             let classifiedStatus = classifyError(error)
             lastErrorSummary = safeErrorMessage(from: error)
             status = classifiedStatus
-            freshnessTask?.cancel()
+            taskResources.freshnessTask?.cancel()
             realQuotaHealth = healthDiagnostic(for: error)
-
-            // Always keep the last successful real snapshot visible
-            if let real = latestRealSnapshot {
-                snapshot = real
-            }
-            // else: keep current snapshot (may be notConnected or mock)
-
-            // Escalate backoff
+            if let real = latestRealSnapshot { snapshot = real }
             setBackoffInterval(backoffFor(consecutiveFailures: consecutiveFailures))
-
             AppLogger.refresh.error("Refresh failed (consecutive=\(self.consecutiveFailures)) status=\(classifiedStatus.rawValue, privacy: .public) backoff=\(self.backoffInterval)s")
         }
     }
@@ -352,7 +391,7 @@ final class AppState: ObservableObject {
     }
 
     private func scheduleFreshnessCheck() {
-        freshnessTask?.cancel()
+        taskResources.freshnessTask?.cancel()
 
         guard snapshot.dataSource == .real, let lastSuccessAt else {
             return
@@ -368,7 +407,7 @@ final class AppState: ObservableObject {
             return
         }
 
-        freshnessTask = Task { [weak self] in
+        taskResources.freshnessTask = Task { [weak self] in
             let delay = UInt64(remaining * 1_000_000_000)
             do {
                 try await Task.sleep(nanoseconds: delay)
@@ -395,8 +434,15 @@ final class AppState: ObservableObject {
         }
     }
 
+}
+
+private final class AppStateTaskResources {
+    var freshnessTask: Task<Void, Never>?
+    var refreshTask: Task<Void, Never>?
+
     deinit {
         freshnessTask?.cancel()
+        refreshTask?.cancel()
     }
 }
 

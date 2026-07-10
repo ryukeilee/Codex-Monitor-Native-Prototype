@@ -3,6 +3,80 @@ import XCTest
 
 @MainActor
 final class WidgetTimelineBridgeTests: XCTestCase {
+    func testShutdownUsesSettledFreshCacheStateForWidget() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.widgetShutdownCache.\(UUID().uuidString)")!
+        let snapshot = QuotaSnapshot(weeklyQuotaPercent: 70, fiveHourQuotaPercent: 60, refreshedAt: .now, dataSource: .real)
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        store.saveSnapshot(snapshot)
+        let service = WidgetBridgeBlockingRefreshService(snapshot: snapshot)
+        let appState = AppState(snapshotStore: store, refreshService: service)
+        var savedStates: [WidgetDisplayState] = []
+        var reloadCount = 0
+        let bridge = WidgetTimelineBridge(appState: appState, saveState: { savedStates.append($0) }, reloadTimelines: { reloadCount += 1 })
+        savedStates.removeAll()
+        reloadCount = 0
+
+        appState.refresh(trigger: .manual)
+        await service.waitForStart()
+        appState.shutdown()
+        bridge.shutdown()
+
+        XCTAssertEqual(savedStates.last?.snapshot, snapshot)
+        XCTAssertEqual(savedStates.last?.status, .success)
+        XCTAssertEqual(reloadCount, 1)
+    }
+
+    func testShutdownUsesSettledNoSnapshotStateForWidgetWithoutCache() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.widgetShutdownNoCache.\(UUID().uuidString)")!
+        let service = WidgetBridgeBlockingRefreshService(snapshot: .notConnected)
+        let appState = AppState(snapshotStore: SnapshotStore(defaults: defaults, key: "snapshot"), refreshService: service)
+        var savedStates: [WidgetDisplayState] = []
+        var reloadCount = 0
+        let bridge = WidgetTimelineBridge(appState: appState, saveState: { savedStates.append($0) }, reloadTimelines: { reloadCount += 1 })
+        savedStates.removeAll()
+        reloadCount = 0
+
+        appState.refresh(trigger: .manual)
+        await service.waitForStart()
+        appState.shutdown()
+        bridge.shutdown()
+
+        XCTAssertEqual(savedStates.last?.snapshot, .notConnected)
+        XCTAssertEqual(savedStates.last?.status, appState.displayStatus)
+        XCTAssertNotEqual(savedStates.last?.status, .refreshing)
+        XCTAssertEqual(reloadCount, 1)
+    }
+    func testBridgeShutdownReplacesPersistedRefreshingStateAndReloadsWidget() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.widgetBridgeDeinit.\(UUID().uuidString)")!
+        let initial = QuotaSnapshot(weeklyQuotaPercent: 70, fiveHourQuotaPercent: 60, refreshedAt: .now, dataSource: .real)
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        store.saveSnapshot(initial)
+        let service = WidgetBridgeBlockingRefreshService(snapshot: initial)
+        let appState = AppState(snapshotStore: store, refreshService: service)
+        var savedStates: [WidgetDisplayState] = []
+        var reloadCount = 0
+        var bridge: WidgetTimelineBridge? = WidgetTimelineBridge(
+            appState: appState,
+            saveState: { savedStates.append($0) },
+            reloadTimelines: { reloadCount += 1 }
+        )
+        XCTAssertNotNil(bridge)
+        savedStates.removeAll()
+        reloadCount = 0
+
+        appState.refresh(trigger: .manual)
+        await service.waitForStart()
+        for _ in 0..<3 { await Task.yield() }
+        XCTAssertEqual(savedStates.last?.status, .refreshing)
+
+        appState.shutdown()
+        bridge?.shutdown()
+        bridge = nil
+
+        XCTAssertNotEqual(savedStates.last?.status, .refreshing)
+        XCTAssertEqual(reloadCount, 1)
+        appState.shutdown()
+    }
     func testWidgetQuotaTextMatchesPopoverQuotaFormatting() {
         let now = Date()
         let snapshot = QuotaSnapshot(
@@ -577,16 +651,24 @@ private struct WidgetBridgeFailingRefreshService: QuotaRefreshing {
 private actor WidgetBridgeBlockingRefreshService: QuotaRefreshing {
     let snapshot: QuotaSnapshot
     private var continuation: CheckedContinuation<Void, Never>?
+    private var started: CheckedContinuation<Void, Never>?
 
     init(snapshot: QuotaSnapshot) {
         self.snapshot = snapshot
     }
 
     func refresh(basedOn currentSnapshot: QuotaSnapshot) async throws -> QuotaSnapshot {
+        started?.resume()
+        started = nil
         await withCheckedContinuation { continuation in
             self.continuation = continuation
         }
         return snapshot
+    }
+
+    func waitForStart() async {
+        if continuation != nil { return }
+        await withCheckedContinuation { started = $0 }
     }
 
     func release() {

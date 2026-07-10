@@ -68,6 +68,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AppLogger.lifecycle.info("Application will terminate")
         refreshScheduler?.stop()
         sleepWakeObserver?.stop()
+        appState?.shutdown()
+        widgetTimelineBridge?.shutdown()
     }
 
     @objc

@@ -52,7 +52,7 @@ final class WidgetTimelineBridge {
         }
     }
 
-    private func saveCurrentState() {
+    private func saveCurrentState(force: Bool = false) {
         guard let appState else { return }
 
         let state = WidgetDisplayState.make(
@@ -63,7 +63,7 @@ final class WidgetTimelineBridge {
             effectiveFiveHourResetAt: appState.effectiveFiveHourResetAt
         )
 
-        if lastSavedState?.isEquivalent(to: state) != true {
+        if force || lastSavedState?.isEquivalent(to: state) != true {
             saveState(state)
             lastSavedState = state
         }
@@ -72,12 +72,18 @@ final class WidgetTimelineBridge {
             return
         }
 
-        guard lastReloadedState?.isEquivalent(to: state) != true else {
+        guard force || lastReloadedState?.isEquivalent(to: state) != true else {
             return
         }
 
         reloadTimelines()
         lastReloadedState = state
+    }
+
+    func shutdown() {
+        pendingSaveTask?.cancel()
+        pendingSaveTask = nil
+        saveCurrentState(force: true)
     }
 
     deinit {
