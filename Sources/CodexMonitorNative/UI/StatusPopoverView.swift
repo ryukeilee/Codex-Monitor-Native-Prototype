@@ -1,102 +1,138 @@
 import SwiftUI
 
+@MainActor
+final class PopoverPresentationState: ObservableObject {
+    @Published private(set) var isPanelActive: Bool
+
+    init(isPanelActive: Bool = true) {
+        self.isPanelActive = isPanelActive
+    }
+
+    func setPanelActive(_ active: Bool) {
+        guard isPanelActive != active else { return }
+        isPanelActive = active
+    }
+}
+
 struct StatusPopoverView: View {
     @ObservedObject var appState: AppState
     @ObservedObject var launchAtLoginManager: LaunchAtLoginManager
+    @ObservedObject var presentationState: PopoverPresentationState
     let onRefresh: () -> Void
     let onQuit: () -> Void
     let onLayoutChange: () -> Void
     @State private var showsDiagnostics = false
     @State private var showsSelfCheck = false
+    @State private var isQuotaExpanded = false
+    @State private var showsAllResetCredits = false
+    @State private var showsResetCreditFields = false
+
+    private static let expandedViewportHeight: CGFloat = 520
 
     init(
         appState: AppState,
         launchAtLoginManager: LaunchAtLoginManager,
+        presentationState: PopoverPresentationState = PopoverPresentationState(),
         onRefresh: @escaping () -> Void,
         onQuit: @escaping () -> Void,
         onLayoutChange: @escaping () -> Void = {}
     ) {
         self.appState = appState
         self.launchAtLoginManager = launchAtLoginManager
+        self.presentationState = presentationState
         self.onRefresh = onRefresh
         self.onQuit = onQuit
         self.onLayoutChange = onLayoutChange
     }
 
+    private var isPanelActive: Bool { presentationState.isPanelActive }
+
     var body: some View {
+        MetallicPanelBackground {
+            if hasExpandedContent {
+                ScrollView(.vertical) {
+                    panelContent
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: Self.expandedViewportHeight, alignment: .top)
+                .accessibilityIdentifier("quota-scroll-viewport")
+            } else {
+                panelContent
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .onChange(of: showsSelfCheck) { _, _ in onLayoutChange() }
+        .onChange(of: showsDiagnostics) { _, _ in onLayoutChange() }
+    }
+
+    private var hasExpandedContent: Bool {
+        isQuotaExpanded || showsSelfCheck || showsDiagnostics
+    }
+
+    @ViewBuilder
+    private var panelContent: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Codex Monitor Native")
-                .font(.headline.weight(.semibold))
-                .lineLimit(1)
-
-            QuotaSummaryView(appState: appState)
-
-            if let refreshSummaryLine {
-                Text(refreshSummaryLine)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-            }
-
-            DisclosureGroup("自检", isExpanded: $showsSelfCheck) {
-                selfCheckSection
-            }
-            .font(.caption)
-            .tint(.secondary)
-
-            if hasDiagnosticsContent {
-                DisclosureGroup("诊断", isExpanded: $showsDiagnostics) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        if let supportLine {
-                            Text(supportLine)
-                        }
-
-                        if let loginError = launchAtLoginManager.lastErrorSummary {
-                            Text(loginError)
-                        }
-                    }
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .padding(.top, 4)
+            header
+            QuotaSummaryView(
+                appState: appState,
+                isPanelActive: isPanelActive,
+                showsAllResetCredits: $showsAllResetCredits,
+                showsResetCreditFields: $showsResetCreditFields,
+                onLayoutChange: { expanded in
+                    guard isQuotaExpanded != expanded else { return }
+                    isQuotaExpanded = expanded
+                    onLayoutChange()
                 }
-                .font(.caption)
-                .tint(.secondary)
-            }
-
+            )
             launchAtLoginSection
-
-            Divider()
-                .opacity(usesCompactLaunchAtLoginSection ? 0.35 : 0.55)
-
-            HStack(alignment: .center, spacing: 8) {
-                Button(action: onRefresh) {
-                    if appState.isRefreshing {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Text("刷新")
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .disabled(appState.isRefreshing)
-
-                Spacer()
-
-                Button("退出", action: onQuit)
-                    .buttonStyle(.borderless)
-                    .foregroundStyle(.secondary)
-                    .controlSize(.small)
-            }
+            actions
+            diagnostics
         }
         .padding(12)
-        .frame(width: 314)
-        .onChange(of: showsSelfCheck) { _, _ in
-            onLayoutChange()
+    }
+
+    private var header: some View {
+        HStack(alignment: .center, spacing: 8) {
+            ReactorView(isPanelActive: isPanelActive)
+                .frame(width: 40, height: 40)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 5) {
+                    Text("Codex Monitor")
+                        .font(.headline.weight(.semibold))
+                    Text("Native")
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(MetallicPalette.redBright)
+                }
+                Text(statusLine)
+                    .font(.caption)
+                    .foregroundStyle(MetallicPalette.muted)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            if appState.isRefreshing {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(MetallicPalette.redBright)
+            } else {
+                Image(systemName: "arrow.clockwise")
+                    .font(.headline.weight(.medium))
+                    .foregroundStyle(MetallicPalette.muted)
+            }
+            Text(refreshTimeText)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(MetallicPalette.muted)
+                .lineLimit(1)
         }
-        .onChange(of: showsDiagnostics) { _, _ in
-            onLayoutChange()
-        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Codex Monitor Native，\(statusLine)")
+    }
+
+    private var statusLine: String {
+        StatusPopoverFormatting.titleSummary(for: appState.displayStatus)
+    }
+
+    private var refreshTimeText: String {
+        appState.snapshot.refreshedAt.formatted(date: .omitted, time: .shortened)
     }
 
     private var launchAtLoginBinding: Binding<Bool> {
@@ -111,34 +147,39 @@ struct StatusPopoverView: View {
 
     @ViewBuilder
     private var launchAtLoginSection: some View {
-        if usesCompactLaunchAtLoginSection {
-            HStack(alignment: .center, spacing: 8) {
-                Text("开机启动 · 已启用")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-
-                Spacer(minLength: 8)
-
-                launchAtLoginToggle(controlSize: .mini, isLowEmphasis: true)
-            }
-        } else {
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
-                VStack(alignment: .leading, spacing: 1) {
+        HStack(spacing: 8) {
+            Image(systemName: "power")
+                .font(.headline.weight(.semibold))
+                .foregroundStyle(launchAtLoginManager.shouldLaunchAtLogin ? Color.green : MetallicPalette.red)
+                .frame(width: 20)
+            VStack(alignment: .leading, spacing: 1) {
+                if usesCompactLaunchAtLoginSection {
+                    Text("开机启动 · 已启用")
+                        .font(.subheadline.weight(.medium))
+                } else {
                     Text("开机启动")
                         .font(.subheadline.weight(.medium))
-
                     Text(launchAtLoginManager.helperText)
                         .font(.caption2)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(MetallicPalette.muted)
                         .lineLimit(1)
                 }
-
-                Spacer(minLength: 8)
-
+            }
+            Spacer(minLength: 8)
+            if usesCompactLaunchAtLoginSection {
+                launchAtLoginToggle(controlSize: .mini, isLowEmphasis: true)
+            } else {
                 launchAtLoginToggle(controlSize: .small, isLowEmphasis: false)
             }
         }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(MetallicPalette.card)
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(MetallicPalette.border, lineWidth: 1)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private var usesCompactLaunchAtLoginSection: Bool {
@@ -150,9 +191,63 @@ struct StatusPopoverView: View {
             .labelsHidden()
             .disabled(launchAtLoginManager.isUpdating)
             .controlSize(controlSize)
+            .tint(MetallicPalette.red)
             .opacity(isLowEmphasis ? 0.62 : 1)
             .scaleEffect(isLowEmphasis ? 0.86 : 1)
             .accessibilityLabel("开机启动")
+    }
+
+    private var actions: some View {
+        HStack(spacing: 8) {
+            Button(action: onRefresh) {
+                Label("刷新", systemImage: "arrow.clockwise")
+                    .font(.subheadline.weight(.medium))
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(MetallicPalette.redBright)
+            .disabled(appState.isRefreshing)
+
+            Spacer()
+
+            Button(action: onQuit) {
+                Label("退出", systemImage: "rectangle.portrait.and.arrow.right")
+                    .font(.subheadline.weight(.medium))
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(MetallicPalette.foreground)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 2)
+    }
+
+    @ViewBuilder
+    private var diagnostics: some View {
+        if let refreshSummaryLine {
+            Text(refreshSummaryLine)
+                .font(.caption2)
+                .foregroundStyle(MetallicPalette.muted)
+                .lineLimit(2)
+        }
+
+        DisclosureGroup("自检", isExpanded: $showsSelfCheck) {
+            selfCheckSection
+        }
+        .font(.caption)
+        .tint(MetallicPalette.muted)
+
+        if hasDiagnosticsContent {
+            DisclosureGroup("诊断", isExpanded: $showsDiagnostics) {
+                VStack(alignment: .leading, spacing: 6) {
+                    if let supportLine { Text(supportLine) }
+                    if let loginError = launchAtLoginManager.lastErrorSummary { Text(loginError) }
+                }
+                .font(.caption2)
+                .foregroundStyle(MetallicPalette.muted)
+                .padding(.top, 4)
+            }
+            .font(.caption)
+            .tint(MetallicPalette.muted)
+        }
     }
 
     private var environmentInfoLine: String? {
@@ -182,7 +277,7 @@ struct StatusPopoverView: View {
             selfCheckRow(title: "Widget", value: snapshot.widgetSummary)
         }
         .font(.caption2)
-        .foregroundStyle(.secondary)
+        .foregroundStyle(MetallicPalette.muted)
         .padding(.top, 4)
     }
 
@@ -190,8 +285,7 @@ struct StatusPopoverView: View {
         VStack(alignment: .leading, spacing: 1) {
             Text(title)
                 .font(.caption2.weight(.semibold))
-                .foregroundStyle(.primary)
-
+                .foregroundStyle(MetallicPalette.foreground)
             Text(value)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
@@ -204,27 +298,19 @@ struct StatusPopoverView: View {
             return "正在刷新，先显示当前快照"
         case .networkFailed, .authRequired, .parseFailed:
             if let refreshError = appState.lastErrorSummary {
-                if let environmentInfoLine {
-                    return "\(environmentInfoLine) · \(refreshError)"
-                }
+                if let environmentInfoLine { return "\(environmentInfoLine) · \(refreshError)" }
                 return refreshError
             }
             return environmentInfoLine
         case .stale:
             return environmentInfoLine
         default:
-            if let refreshError = appState.lastErrorSummary {
-                return refreshError
-            }
-
+            if let refreshError = appState.lastErrorSummary { return refreshError }
             let healthLine = StatusPopoverFormatting.realQuotaHealthLine(appState.realQuotaHealth)
             switch appState.realQuotaHealth.kind {
-            case .requestSucceeded:
-                return nil
-            case .waitingForFirstRequest where !hasDisplayableSourceStatus:
-                return nil
-            default:
-                return healthLine
+            case .requestSucceeded: return nil
+            case .waitingForFirstRequest where !hasDisplayableSourceStatus: return nil
+            default: return healthLine
             }
         }
     }

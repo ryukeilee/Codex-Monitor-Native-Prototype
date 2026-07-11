@@ -2,95 +2,55 @@ import SwiftUI
 
 struct QuotaSummaryView: View {
     @ObservedObject var appState: AppState
-    @State private var showsAllResetCredits = false
+    let isPanelActive: Bool
+    let onLayoutChange: (Bool) -> Void
+    @Binding private var showsAllResetCredits: Bool
+    @Binding private var showsResetCreditFields: Bool
 
-    var body: some View {
-        GroupBox {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .center, spacing: 8) {
-                    Text(freshnessText)
-                        .font(.caption.weight(.semibold))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(statusBadgeBackground)
-                        .clipShape(Capsule())
-
-                    Spacer()
-                }
-
-                HStack(alignment: .top, spacing: 16) {
-                    metricCard(title: "5小时额度", value: fiveHourQuotaText)
-                    metricCard(title: "周额度", value: weeklyQuotaText)
-                }
-
-                if let resetCreditsSummary {
-                    VStack(alignment: .leading, spacing: 8) {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(resetCreditsSummary.countLine)
-                                .font(.headline.weight(.semibold))
-                                .fixedSize(horizontal: false, vertical: true)
-
-                            if let timingLine = resetCreditsSummary.timingLine {
-                                Text(timingLine)
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-
-                            if let featuredCreditItem = resetCreditsSummary.featuredCreditItem {
-                                featuredResetCreditSummary(featuredCreditItem)
-                                    .padding(.top, 4)
-                            }
-
-                            if !resetCreditsSummary.additionalCreditItems.isEmpty {
-                                DisclosureGroup(
-                                    "全部 \(resetCreditsSummary.additionalCreditItems.count + (resetCreditsSummary.featuredCreditItem == nil ? 0 : 1))",
-                                    isExpanded: $showsAllResetCredits
-                                ) {
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        if let featuredCreditItem = resetCreditsSummary.featuredCreditItem {
-                                            resetCreditDetailRow(featuredCreditItem)
-                                        }
-
-                                        ForEach(resetCreditsSummary.additionalCreditItems) { creditItem in
-                                            resetCreditDetailRow(creditItem)
-                                        }
-                                    }
-                                    .padding(.top, 8)
-                                }
-                                .font(.caption)
-                                .tint(.secondary)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-
-                        if !resetCreditsSummary.detailLines.isEmpty {
-                            DisclosureGroup("字段") {
-                                VStack(alignment: .leading, spacing: 6) {
-                                    ForEach(resetCreditsSummary.detailLines, id: \.self) { detailLine in
-                                        Text(detailLine)
-                                            .font(.caption2)
-                                            .foregroundStyle(.secondary)
-                                            .fixedSize(horizontal: false, vertical: true)
-                                    }
-                                }
-                                .padding(.top, 4)
-                            }
-                            .font(.caption)
-                            .tint(.secondary)
-                        }
-                    }
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
+    init(
+        appState: AppState,
+        isPanelActive: Bool = true,
+        showsAllResetCredits: Binding<Bool> = .constant(false),
+        showsResetCreditFields: Binding<Bool> = .constant(false),
+        onLayoutChange: @escaping (Bool) -> Void = { _ in }
+    ) {
+        self.appState = appState
+        self.isPanelActive = isPanelActive
+        self._showsAllResetCredits = showsAllResetCredits
+        self._showsResetCreditFields = showsResetCreditFields
+        self.onLayoutChange = onLayoutChange
     }
 
-    private var freshnessText: String {
-        StatusPopoverFormatting.freshnessTitle(
-            for: appState.displayStatus,
-            isUsingCachedSnapshot: appState.isUsingCachedSnapshot
-        )
+    var body: some View {
+        VStack(spacing: 10) {
+            HStack(alignment: .center, spacing: 6) {
+                QuotaGaugeView(
+                    title: "5小时额度",
+                    value: fiveHourQuotaText,
+                    progress: quotaProgress(for: appState.snapshot.fiveHourQuotaPercent)
+                )
+
+                ReactorView(isPanelActive: isPanelActive)
+                    .frame(width: 88, height: 88)
+
+                QuotaGaugeView(
+                    title: "周额度",
+                    value: weeklyQuotaText,
+                    progress: quotaProgress(for: appState.snapshot.weeklyQuotaPercent)
+                )
+            }
+            .frame(maxWidth: .infinity)
+
+            if let resetCreditsSummary {
+                resetCreditsSection(resetCreditsSummary)
+            }
+        }
+        .onChange(of: showsAllResetCredits) { _, _ in
+            onLayoutChange(showsAllResetCredits || showsResetCreditFields)
+        }
+        .onChange(of: showsResetCreditFields) { _, _ in
+            onLayoutChange(showsAllResetCredits || showsResetCreditFields)
+        }
     }
 
     private var fiveHourQuotaText: String {
@@ -109,6 +69,15 @@ struct QuotaSummaryView: View {
         )
     }
 
+    private func quotaProgress(for value: Int) -> Double? {
+        guard appState.displayStatus != .noSnapshot,
+              appState.displayStatus != .idle,
+              appState.displayStatus != .demoMode else {
+            return nil
+        }
+        return Double(value) / 100
+    }
+
     private var resetCreditsSummary: StatusPopoverFormatting.ResetCreditsSummary? {
         StatusPopoverFormatting.resetCreditsSummary(
             snapshot: appState.snapshot,
@@ -116,56 +85,108 @@ struct QuotaSummaryView: View {
         )
     }
 
-    private var statusBadgeBackground: Color {
-        switch appState.displayStatus {
-        case .success:
-            return .green.opacity(0.16)
-        case .refreshing:
-            return .blue.opacity(0.16)
-        case .stale:
-            return .orange.opacity(0.16)
-        case .networkFailed, .authRequired, .parseFailed:
-            return .red.opacity(0.14)
-        case .noSnapshot, .idle, .demoMode:
-            return .gray.opacity(0.14)
-        }
-    }
-
     @ViewBuilder
-    private func metricBlock(title: String, value: String, allowsMultiline: Bool = false) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.subheadline.weight(.semibold))
-                .lineLimit(allowsMultiline ? 2 : 1)
-                .fixedSize(horizontal: false, vertical: allowsMultiline)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
+    private func resetCreditsSection(_ summary: StatusPopoverFormatting.ResetCreditsSummary) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 12) {
+                Image(systemName: "arrow.clockwise")
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(MetallicPalette.red)
+                    .frame(width: 22)
+                Text(summary.countLine)
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(MetallicPalette.foreground)
+                    .accessibilityLabel("重置次数 \(summary.countLine)")
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(MetallicPalette.muted)
+            }
+                    .padding(.vertical, 8)
 
-    @ViewBuilder
-    private func metricCard(title: String, value: String) -> some View {
-        metricBlock(title: title, value: value)
-            .padding(12)
-            .background(Color.secondary.opacity(0.06))
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            Divider().overlay(MetallicPalette.separator)
+
+            HStack(spacing: 12) {
+                Image(systemName: "clock")
+                    .font(.headline.weight(.semibold))
+                    .foregroundStyle(MetallicPalette.red)
+                    .frame(width: 22)
+
+                if let featured = summary.featuredCreditItem {
+                    featuredResetCreditSummary(featured)
+                } else if let timingLine = summary.timingLine {
+                    Text(timingLine)
+                        .font(.subheadline)
+                        .foregroundStyle(MetallicPalette.muted)
+                    Spacer()
+                } else {
+                    Text("最早到期 --")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(MetallicPalette.foreground)
+                    Spacer()
+                }
+            }
+            .padding(.vertical, 8)
+
+            if !summary.additionalCreditItems.isEmpty || !summary.detailLines.isEmpty {
+                let disclosureTitle = summary.additionalCreditItems.isEmpty && summary.featuredCreditItem == nil
+                    ? "字段详情"
+                    : "全部 \(summary.additionalCreditItems.count + (summary.featuredCreditItem == nil ? 0 : 1))"
+                DisclosureGroup(
+                    disclosureTitle,
+                    isExpanded: $showsAllResetCredits
+                ) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        if let featured = summary.featuredCreditItem {
+                            resetCreditDetailRow(featured)
+                        }
+                        ForEach(summary.additionalCreditItems) { item in
+                            resetCreditDetailRow(item)
+                        }
+                        if !summary.detailLines.isEmpty {
+                            DisclosureGroup("字段", isExpanded: $showsResetCreditFields) {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    ForEach(summary.detailLines, id: \.self) { line in
+                                        Text(line)
+                                            .font(.caption2)
+                                            .foregroundStyle(MetallicPalette.muted)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                }
+                                .padding(.top, 4)
+                            }
+                            .font(.caption)
+                            .tint(MetallicPalette.muted)
+                        }
+                    }
+                    .padding(.top, 8)
+                }
+                .font(.caption)
+                .tint(MetallicPalette.muted)
+            }
+        }
+        .padding(.horizontal, 10)
+        .background(MetallicPalette.card)
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(MetallicPalette.border, lineWidth: 1)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     @ViewBuilder
     private func featuredResetCreditSummary(_ creditItem: StatusPopoverFormatting.ResetCreditDisplayItem) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("最早到期 \(creditItem.expiryText)")
-                .font(.subheadline.weight(.semibold))
-                .fixedSize(horizontal: false, vertical: true)
-
-            Text(creditItem.remainingText)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        Text("最早到期")
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(MetallicPalette.foreground)
+        Text(creditItem.expiryText)
+            .font(.subheadline)
+            .foregroundStyle(MetallicPalette.muted)
+        Spacer(minLength: 4)
+        Text(creditItem.remainingText)
+            .font(.caption.weight(.medium))
+            .foregroundStyle(MetallicPalette.muted)
+            .lineLimit(1)
     }
 
     @ViewBuilder
@@ -173,16 +194,14 @@ struct QuotaSummaryView: View {
         VStack(alignment: .leading, spacing: 3) {
             Text("到期 \(creditItem.expiryText)")
                 .font(.subheadline.weight(.semibold))
-                .fixedSize(horizontal: false, vertical: true)
-
+                .foregroundStyle(MetallicPalette.foreground)
             Text(detailSubtitle(for: creditItem))
                 .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+                .foregroundStyle(MetallicPalette.muted)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
-        .background(Color.secondary.opacity(0.05))
+        .padding(8)
+        .background(MetallicPalette.innerCard)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
@@ -190,7 +209,39 @@ struct QuotaSummaryView: View {
         if let grantedText = creditItem.grantedText {
             return "\(creditItem.remainingText) · 授予 \(grantedText)"
         }
-
         return creditItem.remainingText
+    }
+}
+
+struct QuotaGaugeView: View {
+    let title: String
+    let value: String
+    let progress: Double?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(MetallicPalette.foreground)
+                .lineLimit(1)
+            Text(value)
+                .font(.system(size: 22, weight: .semibold, design: .rounded))
+                .foregroundStyle(MetallicPalette.foreground)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+            GeometryReader { geometry in
+                Capsule(style: .continuous)
+                    .fill(MetallicPalette.track)
+                    .overlay(alignment: .leading) {
+                        Capsule(style: .continuous)
+                            .fill(MetallicPalette.redGradient)
+                            .frame(width: max(0, geometry.size.width * (progress ?? 0)))
+                    }
+            }
+            .frame(height: 6)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title) \(value)")
     }
 }

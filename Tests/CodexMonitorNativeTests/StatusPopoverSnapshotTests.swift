@@ -94,7 +94,7 @@ final class StatusPopoverSnapshotTests: XCTestCase {
         XCTAssertFalse(source.contains("Rate Limit Banks（最快 3 条）"))
         XCTAssertFalse(source.contains("rateLimitBankDiagnosticsSummary("))
         XCTAssertFalse(source.contains("resetBankItems"))
-        XCTAssertTrue(source.contains("DisclosureGroup(\"字段\")"))
+        XCTAssertTrue(source.contains("DisclosureGroup(\"字段\", isExpanded"))
         XCTAssertTrue(source.contains("DisclosureGroup("))
         XCTAssertTrue(source.contains("\"全部 \\("))
         XCTAssertFalse(source.contains("Text(\"当前状态\")"))
@@ -139,6 +139,175 @@ final class StatusPopoverSnapshotTests: XCTestCase {
         XCTAssertTrue(source.contains(".scaleEffect(isLowEmphasis ? 0.86 : 1)"))
     }
 
+    func testMetallicPopoverSourceContainsReferencePanelSections() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let statusSource = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/CodexMonitorNative/UI/StatusPopoverView.swift"),
+            encoding: .utf8
+        )
+        let quotaSource = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/CodexMonitorNative/UI/QuotaSummaryView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(statusSource.contains("MetallicPanelBackground"))
+        XCTAssertTrue(statusSource.contains("ReactorView"))
+        XCTAssertTrue(statusSource.contains("isPanelActive"))
+        XCTAssertTrue(statusSource.contains("开机启动"))
+        XCTAssertTrue(statusSource.contains("刷新"))
+        XCTAssertTrue(statusSource.contains("退出"))
+        XCTAssertFalse(statusSource.contains(".frame(width: 390)"))
+        XCTAssertTrue(quotaSource.contains("QuotaGaugeView"))
+        XCTAssertTrue(quotaSource.contains("最早到期"))
+        XCTAssertTrue(quotaSource.contains("重置次数"))
+    }
+
+    func testQuotaDisclosurePropagatesLayoutChangesAndLabelsDetailOnlyContent() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/CodexMonitorNative/UI/QuotaSummaryView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("let onLayoutChange: (Bool) -> Void"))
+        XCTAssertTrue(source.contains("@Binding private var showsResetCreditFields"))
+        XCTAssertTrue(source.contains("onChange(of: showsAllResetCredits)"))
+        XCTAssertTrue(source.contains("onChange(of: showsResetCreditFields)"))
+        XCTAssertTrue(source.contains("字段详情"))
+    }
+
+    func testNestedQuotaDisclosureOnlyTriggersParentLayoutWhenExpansionStateChanges() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/CodexMonitorNative/UI/StatusPopoverView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("guard isQuotaExpanded != expanded else { return }"))
+        XCTAssertTrue(source.contains("isQuotaExpanded = expanded"))
+        XCTAssertTrue(source.contains("onLayoutChange()"))
+    }
+
+    func testExpandedPopoverUsesScrollableViewportForAccessibility() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/CodexMonitorNative/UI/StatusPopoverView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("ScrollView(.vertical)"))
+        XCTAssertTrue(source.contains("expandedViewportHeight"))
+        XCTAssertTrue(source.contains("isQuotaExpanded"))
+        XCTAssertTrue(source.contains("quota-scroll-viewport"))
+    }
+
+    func testPopoverControllerSourceWiresEscAndLifecycleCleanup() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/CodexMonitorNative/App/PopoverController.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("keyCode == 53"))
+        XCTAssertTrue(source.contains("isPanelActive"))
+        XCTAssertTrue(source.contains("deinit"))
+        XCTAssertTrue(source.contains("removeOutsideClickMonitors()"))
+        XCTAssertTrue(source.contains("visibleFrame"))
+    }
+
+    func testPopoverControllerLayoutChangeReusesDisplayClamp() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/CodexMonitorNative/App/PopoverController.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("clampedContentSize"))
+        XCTAssertTrue(source.contains("activeVisibleFrame"))
+        XCTAssertTrue(source.contains("updateContentSize(for: button)"))
+        XCTAssertFalse(source.contains("popover.contentSize = NSSize(width: Self.contentWidth, height: ceil(fittingSize.height))"))
+    }
+
+    func testPopoverControllerDefersAndCoalescesLayoutChanges() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/CodexMonitorNative/App/PopoverController.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("layoutUpdateTask"))
+        XCTAssertTrue(source.contains("Task.yield()"))
+        XCTAssertTrue(source.contains("guard layoutUpdateTask == nil else { return }"))
+        XCTAssertTrue(source.contains("layoutUpdateTask?.cancel()"))
+        XCTAssertTrue(source.contains("guard popover.isShown else { return }"))
+    }
+
+    func testPopoverControllerMeasuresWithFinitePanelHeight() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/CodexMonitorNative/App/PopoverController.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("hostingView.fittingSize"))
+        XCTAssertFalse(source.contains("height: .greatestFiniteMagnitude"))
+    }
+
+    func testPopoverContentSizeClampsAcrossVisibleFrameOriginsAndSizes() {
+        let fittingSize = NSSize(width: 390, height: 650)
+
+        let primary = PopoverController.clampedContentSize(
+            fittingSize: fittingSize,
+            visibleFrame: NSRect(x: 0, y: 0, width: 2560, height: 1664)
+        )
+        let secondaryOrigin = PopoverController.clampedContentSize(
+            fittingSize: fittingSize,
+            visibleFrame: NSRect(x: 1440, y: -120, width: 1920, height: 1080)
+        )
+        let narrowDisplay = PopoverController.clampedContentSize(
+            fittingSize: fittingSize,
+            visibleFrame: NSRect(x: -800, y: 40, width: 320, height: 420)
+        )
+
+        XCTAssertEqual(primary, NSSize(width: 340, height: 560))
+        XCTAssertEqual(secondaryOrigin, NSSize(width: 340, height: 560))
+        XCTAssertEqual(narrowDisplay, NSSize(width: 296, height: 396))
+    }
+
+    func testPopoverContentSizeRejectsInflatedHostingHeight() {
+        let measured = PopoverController.clampedContentSize(
+            fittingSize: NSSize(width: 340, height: 1_100),
+            visibleFrame: NSRect(x: 0, y: 0, width: 2560, height: 1664)
+        )
+
+        XCTAssertEqual(measured.width, 340)
+        XCTAssertLessThanOrEqual(measured.height, 560)
+    }
+
     private func renderSnapshot(snapshot: QuotaSnapshot, outputURL: URL) async throws {
         let hostingView = try await makeHostingView(snapshot: snapshot)
         try saveSnapshot(of: hostingView, to: outputURL)
@@ -164,10 +333,10 @@ final class StatusPopoverSnapshotTests: XCTestCase {
         })
 
         let hostingView = NSHostingView(rootView: view)
-        hostingView.frame = NSRect(x: 0, y: 0, width: 314, height: 640)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 340, height: 560)
         hostingView.layoutSubtreeIfNeeded()
         let fittingHeight = max(240, hostingView.fittingSize.height.rounded(.up))
-        hostingView.frame = NSRect(x: 0, y: 0, width: 314, height: fittingHeight)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 340, height: fittingHeight)
         hostingView.layoutSubtreeIfNeeded()
 
         return hostingView
