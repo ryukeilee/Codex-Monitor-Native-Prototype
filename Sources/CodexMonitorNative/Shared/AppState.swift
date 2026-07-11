@@ -158,21 +158,11 @@ final class AppState: ObservableObject {
     }
 
     func refreshNow(trigger: RefreshTrigger) async {
-        guard let refreshTask = startManagedRefresh(trigger: trigger) else {
-            AppLogger.refresh.info("Ignored refresh request because a refresh is already queued or in progress")
-            if let refreshTask = taskResources.refreshTask {
-                await refreshTask.value
-            }
-            return
-        }
+        let refreshTask = startManagedRefresh(trigger: trigger)
         await refreshTask.value
     }
 
-    @discardableResult
-    private func startManagedRefresh(trigger: RefreshTrigger) -> Task<Void, Never>? {
-        guard taskResources.refreshTask == nil else {
-            return nil
-        }
+    private func startManagedRefresh(trigger: RefreshTrigger) -> Task<Void, Never> {
         let refreshID = UUID()
         activeRefreshID = refreshID
         let baselineSnapshot = beginRefresh(trigger: trigger)
@@ -186,7 +176,7 @@ final class AppState: ObservableObject {
             }
             self?.finishManagedRefresh(result, refreshID: refreshID)
         }
-        taskResources.refreshTask = refreshTask
+        taskResources.refreshTasks[refreshID] = refreshTask
         return refreshTask
     }
 
@@ -194,8 +184,8 @@ final class AppState: ObservableObject {
     /// A provider that ignores cancellation may finish later, but cannot retain the
     /// refresh slot or leave the app/widget in the refreshing state.
     func shutdown() {
-        taskResources.refreshTask?.cancel()
-        taskResources.refreshTask = nil
+        taskResources.refreshTasks.values.forEach { $0.cancel() }
+        taskResources.refreshTasks.removeAll()
         taskResources.freshnessTask?.cancel()
         taskResources.freshnessTask = nil
         activeRefreshID = nil
@@ -230,9 +220,9 @@ final class AppState: ObservableObject {
     }
 
     private func finishManagedRefresh(_ result: Result<QuotaSnapshot, Error>, refreshID: UUID) {
+        taskResources.refreshTasks.removeValue(forKey: refreshID)
         guard activeRefreshID == refreshID else { return }
         applyRefreshResult(result)
-        taskResources.refreshTask = nil
         activeRefreshID = nil
     }
 
@@ -471,11 +461,11 @@ final class AppState: ObservableObject {
 
 private final class AppStateTaskResources {
     var freshnessTask: Task<Void, Never>?
-    var refreshTask: Task<Void, Never>?
+    var refreshTasks: [UUID: Task<Void, Never>] = [:]
 
     deinit {
         freshnessTask?.cancel()
-        refreshTask?.cancel()
+        refreshTasks.values.forEach { $0.cancel() }
     }
 }
 

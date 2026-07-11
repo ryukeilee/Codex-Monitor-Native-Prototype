@@ -3,6 +3,49 @@ import XCTest
 
 @MainActor
 final class AppStateTests: XCTestCase {
+    func testLatestOverlappingRefreshWinsStateAndPersistence() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.latestOverlap.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let refreshBase = Date.now
+        let oldSnapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 10,
+            fiveHourQuotaPercent: 20,
+            refreshedAt: refreshBase,
+            dataSource: .real
+        )
+        let newSnapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 90,
+            fiveHourQuotaPercent: 80,
+            refreshedAt: refreshBase.addingTimeInterval(1),
+            dataSource: .real
+        )
+        let service = QueueingSnapshotRefreshService(snapshots: [oldSnapshot, newSnapshot])
+        let appState = AppState(snapshotStore: store, refreshService: service)
+
+        appState.refresh(trigger: .manual)
+        await service.waitForCall(1)
+        appState.refresh(trigger: .scheduled)
+
+        let secondStarted = Task {
+            for _ in 0..<100 {
+                if await service.callCount() >= 2 { return true }
+                await Task.yield()
+            }
+            return false
+        }
+        let didStartSecond = await secondStarted.value
+        XCTAssertTrue(didStartSecond)
+
+        await service.release(call: 2)
+        for _ in 0..<3 { await Task.yield() }
+        await service.release(call: 1)
+        for _ in 0..<5 { await Task.yield() }
+
+        XCTAssertEqual(appState.snapshot, newSnapshot)
+        XCTAssertEqual(appState.status, .success)
+        XCTAssertEqual(store.loadState()?.snapshot, newSnapshot)
+    }
+
     func testLateRefreshNowResultCannotOverwriteNewManagedRefreshAfterShutdown() async {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.refreshNowOwnership.\(UUID().uuidString)")!
         let oldSnapshot = QuotaSnapshot(weeklyQuotaPercent: 10, fiveHourQuotaPercent: 20, refreshedAt: .now, dataSource: .real)
@@ -61,26 +104,31 @@ final class AppStateTests: XCTestCase {
         await service.releaseNext()
         await service.releaseNext()
     }
-    func testConcurrentRefreshEntrypointsStartOnlyOneRequest() async {
-        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.singleFlight.\(UUID().uuidString)")!
+    func testOverlappingRefreshEntrypointsOnlyLatestRequestCommits() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.latestEntrypoints.\(UUID().uuidString)")!
         let store = SnapshotStore(defaults: defaults, key: "snapshot")
-        let service = BlockingRefreshService(snapshot: QuotaSnapshot(
-            weeklyQuotaPercent: 80, fiveHourQuotaPercent: 60, refreshedAt: .now, dataSource: .real
-        ))
+        let base = Date.now
+        let first = QuotaSnapshot(weeklyQuotaPercent: 10, fiveHourQuotaPercent: 20, refreshedAt: base, dataSource: .real)
+        let scheduled = QuotaSnapshot(weeklyQuotaPercent: 40, fiveHourQuotaPercent: 50, refreshedAt: base.addingTimeInterval(1), dataSource: .real)
+        let latest = QuotaSnapshot(weeklyQuotaPercent: 80, fiveHourQuotaPercent: 90, refreshedAt: base.addingTimeInterval(2), dataSource: .real)
+        let service = QueueingSnapshotRefreshService(snapshots: [first, scheduled, latest])
         let appState = AppState(snapshotStore: store, refreshService: service)
 
         appState.refresh(trigger: .manual)
+        await service.waitForCall(1)
         appState.refresh(trigger: .scheduled)
+        await service.waitForCall(2)
         appState.refresh(trigger: .wake)
-        await service.waitForStart()
 
-        let callCount = await service.callCount()
-        XCTAssertEqual(callCount, 1)
-        XCTAssertEqual(appState.status, .refreshing)
+        await service.waitForCall(3)
+        await service.release(call: 3)
+        await service.release(call: 2)
+        await service.release(call: 1)
+        for _ in 0..<5 { await Task.yield() }
 
-        await service.release()
-        for _ in 0..<3 { await Task.yield() }
+        XCTAssertEqual(appState.snapshot, latest)
         XCTAssertEqual(appState.status, .success)
+        XCTAssertEqual(store.loadState()?.snapshot, latest)
     }
     func testSuccessfulRealRefreshUpdatesSnapshotAndPersistsIt() async {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.success.\(UUID().uuidString)")!
@@ -526,7 +574,7 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(successState.backoffInterval, 300)
     }
 
-    func testConcurrentRefreshRequestsDoNotStartTwice() async {
+    func testConcurrentRefreshNowRequestsOnlyLatestResultCommits() async {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.concurrent.\(UUID().uuidString)")!
         let store = SnapshotStore(defaults: defaults, key: "snapshot")
         let initial = QuotaSnapshot(
@@ -535,29 +583,174 @@ final class AppStateTests: XCTestCase {
         )
         store.saveSnapshot(initial)
 
-        let refreshed = QuotaSnapshot(
-            weeklyQuotaPercent: 81, fiveHourQuotaPercent: 74, refreshedAt: .now,
+        let firstSnapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 81, fiveHourQuotaPercent: 74, refreshedAt: Date.now,
             dataSource: .real
         )
-        let service = BlockingRefreshService(snapshot: refreshed)
+        let latestSnapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 91, fiveHourQuotaPercent: 84, refreshedAt: Date.now.addingTimeInterval(1),
+            dataSource: .real
+        )
+        let service = QueueingSnapshotRefreshService(snapshots: [firstSnapshot, latestSnapshot])
         let appState = AppState(snapshotStore: store, refreshService: service)
 
         let first = Task {
             await appState.refreshNow(trigger: .manual)
         }
-        await service.waitForStart()
-
         let second = Task {
-            await appState.refreshNow(trigger: .manual)
+            await appState.refreshNow(trigger: .scheduled)
         }
 
-        await service.waitForStart()
-        let callCount = await service.callCount()
-        XCTAssertEqual(callCount, 1)
-
-        await service.release()
+        await service.waitForCall(2)
+        await service.release(call: 2)
+        await service.release(call: 1)
         await first.value
         await second.value
+
+        XCTAssertEqual(appState.snapshot, latestSnapshot)
+        XCTAssertEqual(store.loadState()?.snapshot, latestSnapshot)
+    }
+
+    func testOlderSuccessCannotOverwriteLatestFailureOrBackoff() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.latestFailure.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let initial = QuotaSnapshot(
+            weeklyQuotaPercent: 70,
+            fiveHourQuotaPercent: 60,
+            refreshedAt: Date.now,
+            dataSource: .real
+        )
+        store.saveSnapshot(initial)
+        let olderSuccess = QuotaSnapshot(
+            weeklyQuotaPercent: 80,
+            fiveHourQuotaPercent: 70,
+            refreshedAt: Date.now.addingTimeInterval(1),
+            dataSource: .real
+        )
+        let service = QueueingResultRefreshService(results: [
+            .success(olderSuccess),
+            .failure(MockRefreshError.simulatedFailure)
+        ])
+        let appState = AppState(snapshotStore: store, refreshService: service)
+
+        let oldTask = Task { await appState.refreshNow(trigger: .manual) }
+        await service.waitForCall(1)
+        let latestTask = Task { await appState.refreshNow(trigger: .wake) }
+        await service.waitForCall(2)
+
+        XCTAssertEqual(appState.status, .refreshing)
+        await service.release(call: 2)
+        await latestTask.value
+        XCTAssertEqual(appState.status, .networkFailed)
+        XCTAssertEqual(appState.failureCount, 1)
+        XCTAssertEqual(appState.backoffInterval, 300)
+
+        await service.release(call: 1)
+        await oldTask.value
+        for _ in 0..<5 { await Task.yield() }
+
+        XCTAssertEqual(appState.snapshot, initial)
+        XCTAssertEqual(appState.status, .networkFailed)
+        XCTAssertEqual(appState.failureCount, 1)
+        XCTAssertEqual(appState.backoffInterval, 300)
+        XCTAssertEqual(store.loadState()?.snapshot, initial)
+        XCTAssertEqual(store.loadState()?.status, .networkFailed)
+    }
+
+    func testOlderFailureCannotOverwriteLatestSuccessOrBackoff() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.latestSuccess.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let initial = QuotaSnapshot(
+            weeklyQuotaPercent: 70,
+            fiveHourQuotaPercent: 60,
+            refreshedAt: Date.now,
+            dataSource: .real
+        )
+        store.saveSnapshot(initial)
+        let latestSuccess = QuotaSnapshot(
+            weeklyQuotaPercent: 90,
+            fiveHourQuotaPercent: 80,
+            refreshedAt: Date.now.addingTimeInterval(1),
+            dataSource: .real
+        )
+        let service = QueueingResultRefreshService(results: [
+            .failure(MockRefreshError.simulatedFailure),
+            .success(latestSuccess)
+        ])
+        let appState = AppState(snapshotStore: store, refreshService: service)
+
+        let oldTask = Task { await appState.refreshNow(trigger: .manual) }
+        await service.waitForCall(1)
+        let latestTask = Task { await appState.refreshNow(trigger: .scheduled) }
+        await service.waitForCall(2)
+
+        XCTAssertEqual(appState.status, .refreshing)
+        await service.release(call: 2)
+        await latestTask.value
+        XCTAssertEqual(appState.snapshot, latestSuccess)
+        XCTAssertEqual(appState.status, .success)
+        XCTAssertEqual(appState.failureCount, 0)
+        XCTAssertEqual(appState.backoffInterval, 300)
+
+        await service.release(call: 1)
+        await oldTask.value
+        for _ in 0..<5 { await Task.yield() }
+
+        XCTAssertEqual(appState.snapshot, latestSuccess)
+        XCTAssertEqual(appState.status, .success)
+        XCTAssertEqual(appState.failureCount, 0)
+        XCTAssertEqual(appState.backoffInterval, 300)
+        XCTAssertEqual(store.loadState()?.snapshot, latestSuccess)
+        XCTAssertEqual(store.loadState()?.status, .success)
+    }
+
+    func testWidgetReloadOnlyReflectsLatestOverlappingRefresh() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.widgetLatestOverlap.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let olderSuccess = QuotaSnapshot(
+            weeklyQuotaPercent: 80,
+            fiveHourQuotaPercent: 70,
+            refreshedAt: Date.now,
+            dataSource: .real
+        )
+        let latestSuccess = QuotaSnapshot(
+            weeklyQuotaPercent: 90,
+            fiveHourQuotaPercent: 80,
+            refreshedAt: Date.now.addingTimeInterval(1),
+            dataSource: .real
+        )
+        let service = QueueingResultRefreshService(results: [
+            .success(olderSuccess),
+            .success(latestSuccess)
+        ])
+        let appState = AppState(snapshotStore: store, refreshService: service)
+        var savedStates: [WidgetDisplayState] = []
+        var reloadCount = 0
+        let bridge = WidgetTimelineBridge(
+            appState: appState,
+            saveState: { savedStates.append($0) },
+            reloadTimelines: { reloadCount += 1 }
+        )
+        savedStates.removeAll()
+        reloadCount = 0
+
+        let oldTask = Task { await appState.refreshNow(trigger: .manual) }
+        await service.waitForCall(1)
+        let latestTask = Task { await appState.refreshNow(trigger: .wake) }
+        await service.waitForCall(2)
+
+        XCTAssertEqual(appState.status, .refreshing)
+        await service.release(call: 2)
+        await latestTask.value
+        await service.release(call: 1)
+        await oldTask.value
+        for _ in 0..<8 { await Task.yield() }
+
+        XCTAssertEqual(savedStates.last?.snapshot, latestSuccess)
+        XCTAssertEqual(savedStates.last?.status, .success)
+        XCTAssertEqual(reloadCount, 1)
+        XCTAssertFalse(savedStates.contains { $0.snapshot == olderSuccess && $0.status == .success })
+        _ = bridge
     }
 
     func testSuccessNotifiesSchedulerWhenBackoffResetsToDefault() async {
@@ -693,8 +886,51 @@ private actor QueueingSnapshotRefreshService: QuotaRefreshing {
         await withCheckedContinuation { waiters[count] = $0 }
     }
 
+    func callCount() -> Int {
+        callCountValue
+    }
+
     func release(call: Int) {
         continuations.removeValue(forKey: call)?.resume()
+    }
+}
+
+private actor QueueingResultRefreshService: QuotaRefreshing {
+    private let results: [Result<QuotaSnapshot, Error>]
+    private var continuations: [Int: CheckedContinuation<Void, Never>] = [:]
+    private var pendingReleases: Set<Int> = []
+    private var callCountValue = 0
+    private var waiters: [Int: CheckedContinuation<Void, Never>] = [:]
+
+    init(results: [Result<QuotaSnapshot, Error>]) {
+        self.results = results
+    }
+
+    func refresh(basedOn _: QuotaSnapshot) async throws -> QuotaSnapshot {
+        callCountValue += 1
+        let call = callCountValue
+        waiters.removeValue(forKey: call)?.resume()
+        await withCheckedContinuation { continuation in
+            if pendingReleases.remove(call) != nil {
+                continuation.resume()
+            } else {
+                continuations[call] = continuation
+            }
+        }
+        return try results[call - 1].get()
+    }
+
+    func waitForCall(_ count: Int) async {
+        if callCountValue >= count { return }
+        await withCheckedContinuation { waiters[count] = $0 }
+    }
+
+    func release(call: Int) {
+        if let continuation = continuations.removeValue(forKey: call) {
+            continuation.resume()
+        } else {
+            pendingReleases.insert(call)
+        }
     }
 }
 
