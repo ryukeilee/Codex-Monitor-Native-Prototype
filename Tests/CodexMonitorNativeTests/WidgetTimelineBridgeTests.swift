@@ -229,6 +229,93 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         XCTAssertEqual(decoded.resetCreditFooterText, decoded.resetCreditFooterLine)
     }
 
+    func testWidgetStateCorruptionIsIsolatedAndFallsBackToPlaceholder() throws {
+        let groupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexMonitorNativeTests.widgetCorrupt.\(UUID().uuidString)", isDirectory: true)
+        let fileManager = WidgetStateTestFileManager(groupURL: groupURL)
+        let stateURL = WidgetDisplayStateStore.stateURL(fileManager: fileManager)
+        try FileManager.default.createDirectory(at: stateURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("truncated".utf8).write(to: stateURL)
+
+        XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager), .placeholder)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stateURL.appendingPathExtension("corrupt").path) ||
+                      FileManager.default.fileExists(atPath: stateURL.deletingPathExtension().appendingPathComponent("WidgetDisplayState.corrupt").path))
+    }
+
+    func testWidgetStateDoesNotLetOlderWriteReplaceNewerState() {
+        let groupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexMonitorNativeTests.widgetNewest.\(UUID().uuidString)", isDirectory: true)
+        let fileManager = WidgetStateTestFileManager(groupURL: groupURL)
+        let newer = WidgetDisplayState.make(snapshot: .notConnected, status: .noSnapshot, lastSuccessAt: nil, lastAttemptAt: nil, effectiveFiveHourResetAt: nil, savedAt: Date(timeIntervalSince1970: 200))
+        let older = WidgetDisplayState.make(snapshot: .notConnected, status: .noSnapshot, lastSuccessAt: nil, lastAttemptAt: nil, effectiveFiveHourResetAt: nil, savedAt: Date(timeIntervalSince1970: 100))
+
+        WidgetDisplayStateStore.save(newer, fileManager: fileManager)
+        WidgetDisplayStateStore.save(older, fileManager: fileManager)
+
+        XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager), newer)
+    }
+
+    func testWidgetStateDoesNotLetOlderRealSnapshotReplaceNewerRealSnapshot() {
+        let groupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexMonitorNativeTests.widgetRealNewest.\(UUID().uuidString)", isDirectory: true)
+        let fileManager = WidgetStateTestFileManager(groupURL: groupURL)
+        let newerSnapshot = QuotaSnapshot(weeklyQuotaPercent: 90, fiveHourQuotaPercent: 80, refreshedAt: Date(timeIntervalSince1970: 200), dataSource: .real)
+        let olderSnapshot = QuotaSnapshot(weeklyQuotaPercent: 10, fiveHourQuotaPercent: 20, refreshedAt: Date(timeIntervalSince1970: 100), dataSource: .real)
+        let newer = WidgetDisplayState.make(snapshot: newerSnapshot, status: .success, lastSuccessAt: newerSnapshot.refreshedAt, lastAttemptAt: nil, effectiveFiveHourResetAt: nil, savedAt: Date(timeIntervalSince1970: 100))
+        let older = WidgetDisplayState.make(snapshot: olderSnapshot, status: .success, lastSuccessAt: olderSnapshot.refreshedAt, lastAttemptAt: nil, effectiveFiveHourResetAt: nil, savedAt: Date(timeIntervalSince1970: 200))
+
+        WidgetDisplayStateStore.save(newer, fileManager: fileManager)
+        WidgetDisplayStateStore.save(older, fileManager: fileManager)
+
+        XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager).snapshot, newerSnapshot)
+    }
+
+    func testWidgetStateFileRemainsReadableByOlderExtensionVersions() throws {
+        let groupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexMonitorNativeTests.widgetLegacyCompatibility.\(UUID().uuidString)", isDirectory: true)
+        let fileManager = WidgetStateTestFileManager(groupURL: groupURL)
+        let now = Date(timeIntervalSince1970: 200)
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 81,
+            fiveHourQuotaPercent: 63,
+            refreshedAt: now,
+            dataSource: .real
+        )
+        let state = WidgetDisplayState.make(
+            snapshot: snapshot,
+            status: .success,
+            lastSuccessAt: now,
+            lastAttemptAt: now,
+            effectiveFiveHourResetAt: nil,
+            savedAt: now
+        )
+
+        WidgetDisplayStateStore.save(state, fileManager: fileManager)
+
+        let data = try Data(contentsOf: WidgetDisplayStateStore.stateURL(fileManager: fileManager))
+        let legacyDecoded = try JSONDecoder().decode(WidgetDisplayState.self, from: data)
+        XCTAssertEqual(legacyDecoded, state)
+
+        let envelope = try JSONDecoder().decode(PersistenceEnvelope.self, from: data)
+        XCTAssertEqual(envelope.formatVersion, PersistenceEnvelope.currentFormatVersion)
+        XCTAssertEqual(envelope.revision, 1)
+        XCTAssertEqual(try envelope.decode(WidgetDisplayState.self), state)
+    }
+
+    func testWidgetRealStateIsNotReplacedByLaterMockState() {
+        let groupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexMonitorNativeTests.widgetRealThenMock.\(UUID().uuidString)", isDirectory: true)
+        let fileManager = WidgetStateTestFileManager(groupURL: groupURL)
+        let realSnapshot = QuotaSnapshot(weeklyQuotaPercent: 90, fiveHourQuotaPercent: 80, refreshedAt: Date(timeIntervalSince1970: 100), dataSource: .real)
+        let real = WidgetDisplayState.make(snapshot: realSnapshot, status: .success, lastSuccessAt: realSnapshot.refreshedAt, lastAttemptAt: nil, effectiveFiveHourResetAt: nil, savedAt: Date(timeIntervalSince1970: 100))
+        let mock = WidgetDisplayState.make(snapshot: .notConnected, status: .demoMode, lastSuccessAt: nil, lastAttemptAt: nil, effectiveFiveHourResetAt: nil, savedAt: Date(timeIntervalSince1970: 200))
+
+        WidgetDisplayStateStore.save(real, fileManager: fileManager)
+        WidgetDisplayStateStore.save(mock, fileManager: fileManager)
+
+        XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager).snapshot, realSnapshot)
+    }
+
     func testRestoredStaleSnapshotWritesStaleStateForWidget() {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.widgetStale.\(UUID().uuidString)")!
         let store = SnapshotStore(defaults: defaults, key: "snapshot")

@@ -63,12 +63,19 @@ final class AppState: ObservableObject {
             try await refreshService.refresh(basedOn: snapshot)
         }
 
-        if let stored = snapshotStore.loadSnapshot() {
+        let persistedState = snapshotStore.loadState()
+        let stored = persistedState?.snapshot ?? snapshotStore.loadSnapshot()
+        if let stored {
             if stored.dataSource == .real {
                 latestRealSnapshot = stored
                 snapshot = stored
-                status = stored.isFresh(referenceDate: .now, staleAfterInterval: staleAfterInterval) ? .success : .stale
-                lastSuccessAt = stored.refreshedAt
+                let freshnessStatus: QuotaRefreshStatus = stored.isFresh(referenceDate: .now, staleAfterInterval: staleAfterInterval) ? .success : .stale
+                let restoredStatus = persistedState?.status
+                status = restoredStatus.map { $0 == .refreshing || $0 == .noSnapshot || $0 == .demoMode ? freshnessStatus : $0 } ?? freshnessStatus
+                lastSuccessAt = persistedState?.lastSuccessAt ?? stored.refreshedAt
+                lastAttemptAt = persistedState?.lastAttemptAt
+                failureCount = persistedState?.failureCount ?? 0
+                consecutiveFailures = failureCount
                 realQuotaHealth = RealQuotaHealthDiagnostic(
                     kind: .waitingForFirstRequest,
                     isUsingCachedSnapshot: true
@@ -78,6 +85,10 @@ final class AppState: ObservableObject {
             } else {
                 snapshot = stored
                 status = .demoMode
+                lastSuccessAt = persistedState?.lastSuccessAt
+                lastAttemptAt = persistedState?.lastAttemptAt
+                failureCount = persistedState?.failureCount ?? 0
+                consecutiveFailures = failureCount
                 realQuotaHealth = RealQuotaHealthDiagnostic(
                     kind: .waitingForFirstRequest,
                     isUsingCachedSnapshot: false
@@ -199,6 +210,7 @@ final class AppState: ObservableObject {
             realQuotaHealth = RealQuotaHealthDiagnostic(kind: .waitingForFirstRequest, isUsingCachedSnapshot: false)
         }
         lastErrorSummary = nil
+        persistState()
     }
 
     private func beginRefresh(trigger: RefreshTrigger) -> QuotaSnapshot {
@@ -212,6 +224,7 @@ final class AppState: ObservableObject {
         )
 
         let baselineSnapshot = latestRealSnapshot ?? snapshot
+        persistState()
         AppLogger.refresh.info("Starting \(triggerName, privacy: .public) refresh (baseline source=\(baselineSnapshot.dataSource.rawValue, privacy: .public))")
         return baselineSnapshot
     }
@@ -227,6 +240,14 @@ final class AppState: ObservableObject {
         switch result {
         case .success(let refreshed):
             if refreshed.dataSource == .real {
+                if let latestRealSnapshot, refreshed.refreshedAt < latestRealSnapshot.refreshedAt {
+                    snapshot = latestRealSnapshot
+                    status = latestRealSnapshot.isFresh(referenceDate: .now, staleAfterInterval: staleAfterInterval) ? .success : .stale
+                    realQuotaHealth = RealQuotaHealthDiagnostic(kind: .requestSucceeded, isUsingCachedSnapshot: true)
+                    persistState()
+                    AppLogger.refresh.error("Ignored out-of-order real refresh refreshedAt=\(refreshed.refreshedAt.timeIntervalSince1970, format: .fixed(precision: 0)) olderThan=\(latestRealSnapshot.refreshedAt.timeIntervalSince1970, format: .fixed(precision: 0))")
+                    return
+                }
                 latestRealSnapshot = refreshed
                 consecutiveFailures = 0
                 failureCount = 0
@@ -236,7 +257,7 @@ final class AppState: ObservableObject {
                 status = .success
                 realQuotaHealth = RealQuotaHealthDiagnostic(kind: .requestSucceeded, isUsingCachedSnapshot: false)
                 setBackoffInterval(defaultInterval)
-                snapshotStore.saveSnapshot(refreshed)
+                persistState()
                 scheduleFreshnessCheck()
                 AppLogger.refresh.info("Real refresh succeeded: weekly=\(refreshed.weeklyQuotaPercent)% fiveHour=\(refreshed.fiveHourQuotaPercent)%")
             } else {
@@ -244,6 +265,7 @@ final class AppState: ObservableObject {
                 status = .demoMode
                 lastErrorSummary = nil
                 realQuotaHealth = RealQuotaHealthDiagnostic(kind: .waitingForFirstRequest, isUsingCachedSnapshot: false)
+                persistState()
                 AppLogger.refresh.info("Mock refresh succeeded")
             }
         case .failure(let error):
@@ -256,6 +278,7 @@ final class AppState: ObservableObject {
             realQuotaHealth = healthDiagnostic(for: error)
             if let real = latestRealSnapshot { snapshot = real }
             setBackoffInterval(backoffFor(consecutiveFailures: consecutiveFailures))
+            persistState()
             AppLogger.refresh.error("Refresh failed (consecutive=\(self.consecutiveFailures)) status=\(classifiedStatus.rawValue, privacy: .public) backoff=\(self.backoffInterval)s")
         }
     }
@@ -424,6 +447,16 @@ final class AppState: ObservableObject {
                 AppLogger.refresh.info("Marked data stale after \(self.staleAfterInterval, format: .fixed(precision: 0)) seconds without a successful refresh")
             }
         }
+    }
+
+    private func persistState() {
+        snapshotStore.saveState(PersistedAppState(
+            snapshot: snapshot,
+            status: status,
+            lastSuccessAt: lastSuccessAt,
+            lastAttemptAt: lastAttemptAt,
+            failureCount: failureCount
+        ))
     }
 
     private func triggerName(for trigger: RefreshTrigger) -> String {
