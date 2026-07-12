@@ -17,14 +17,14 @@ swift test
 
 说明：
 
-- `./script/build_and_run.sh --verify` 内部也会执行一次 debug 构建，然后打包并启动 app。
+- `./script/build_and_run.sh --verify` 是统一安装验收入口：它会关闭旧实例、构建并签名 app 与 Widget、覆盖安装到 `/Applications/CodexMonitorNative.app`，启动最终安装包，并核对运行进程路径/版本及 `pluginkit` 的 Widget 路径。
 - 本轮没有重新执行 `swift build -c release` 或 `./script/build_and_run.sh --telemetry`，因此它们不计入当前自动验证证据。
 
 ## Automated Evidence
 
 以下内容有当前代码、测试或本轮命令结果作为直接证据：
 
-- App 可以通过 SwiftPM 成功构建，`./script/build_and_run.sh --verify` 可完成打包并确认进程启动。
+- App 可以通过 SwiftPM 成功构建，`./script/build_and_run.sh --verify` 可完成覆盖安装，确认实际运行进程来自最终安装路径，并确认 Widget 注册路径属于该安装包。
 - 菜单栏 App 以 `LSUIElement = true` 方式打包，无常规主窗口。
 - 菜单栏标题策略只显示周额度百分比或 `--%`，不会显示 5 小时额度。
 - Popover 包含：

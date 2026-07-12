@@ -141,13 +141,13 @@ swift test
 BUILD_CONFIGURATION=release ./script/build_and_run.sh
 ```
 
-### 安装到 Applications
+`--verify` 是本机安装验收的唯一入口：它会构建主应用和 Widget、关闭旧实例、覆盖安装到 `/Applications/CodexMonitorNative.app`，启动该安装包，并校验运行进程的实际路径/版本以及 `pluginkit` 的 Widget 路径。安装目录不可写时，可用 `INSTALL_APP_PATH="$HOME/Applications/CodexMonitorNative.app"` 指定用户目录后重试；Widget 注册失败时，脚本会输出对应的 `pluginkit` 修复命令。
+
+### 手动指定安装路径
 
 ```bash
 BUILD_CONFIGURATION=release ./script/build_and_run.sh --verify
-sudo rm -rf "/Applications/Codex Monitor Native.app"
-sudo ditto "$PWD/dist/CodexMonitorNative.app" "/Applications/Codex Monitor Native.app"
-open -n "/Applications/Codex Monitor Native.app"
+INSTALL_APP_PATH="$HOME/Applications/CodexMonitorNative.app" ./script/build_and_run.sh --verify
 ```
 
 ### 手动验证真实/失败路径
