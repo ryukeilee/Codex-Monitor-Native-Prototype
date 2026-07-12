@@ -66,15 +66,15 @@ final class StatusBarController {
             fallthrough
         case .stale:
             // status bar title displays weekly quota, while 5h quota remains in dropdown.
-            title = snapshot.dataSource == .real ? "\(snapshot.weeklyQuotaPercent)%" : "--%"
+            title = weeklyQuotaTitle(for: snapshot, status: status)
 
         case .refreshing:
             // Keep last value, never flash empty
-            title = snapshot.dataSource == .real ? "\(snapshot.weeklyQuotaPercent)%" : "--%"
+            title = weeklyQuotaTitle(for: snapshot, status: status)
 
         case .networkFailed, .authRequired, .parseFailed:
             // Error state: show last real weekly % if available, otherwise placeholder.
-            title = snapshot.dataSource == .real ? "\(snapshot.weeklyQuotaPercent)%" : "--%"
+            title = weeklyQuotaTitle(for: snapshot, status: status)
 
         case .noSnapshot, .idle:
             title = "--%"
@@ -87,6 +87,19 @@ final class StatusBarController {
         statusItem.button?.toolTip = tooltip(for: snapshot, status: status)
         statusItem.button?.setAccessibilityTitle("Codex Monitor Native \(title)")
         AppLogger.statusBar.info("Menu bar: \(title, privacy: .public) status=\(status.rawValue, privacy: .public)")
+    }
+
+    private func weeklyQuotaTitle(for snapshot: QuotaSnapshot, status: QuotaRefreshStatus) -> String {
+        guard snapshot.dataSource == .real else {
+            return "--%"
+        }
+
+        let value = StatusPopoverFormatting.quotaValueText(
+            for: .weekly,
+            snapshot: snapshot,
+            status: status
+        )
+        return value
     }
 
     private func tooltip(for snapshot: QuotaSnapshot, status: QuotaRefreshStatus) -> String {

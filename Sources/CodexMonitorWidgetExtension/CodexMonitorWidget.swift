@@ -588,7 +588,11 @@ struct CodexMonitorWidgetView: View {
     }
 
     private var centerQuotaNumberText: String {
-        entry.state.fiveHourQuotaText.replacingOccurrences(of: "%", with: "")
+        guard entry.state.snapshot.fiveHourQuotaState.isDisplayable else {
+            return "--"
+        }
+
+        return entry.state.fiveHourQuotaText.replacingOccurrences(of: "%", with: "")
     }
 
     private func shortMetricLabel(_ label: String) -> String {
@@ -607,7 +611,11 @@ struct CodexMonitorWidgetView: View {
     }
 
     private var gaugeProgress: CGFloat {
-        let value = Double(entry.state.fiveHourQuotaText.replacingOccurrences(of: "%", with: "")) ?? 0
+        guard entry.state.snapshot.fiveHourQuotaState.isDisplayable else {
+            return 0.05
+        }
+
+        let value = Double(entry.state.snapshot.fiveHourQuotaPercent)
         let clamped = min(max(value / 100, 0.05), 1.0)
         return clamped
     }

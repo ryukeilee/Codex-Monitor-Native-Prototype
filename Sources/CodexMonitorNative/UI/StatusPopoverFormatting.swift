@@ -508,10 +508,25 @@ enum StatusPopoverFormatting {
 
         switch metric {
         case .fiveHour:
-            return "\(snapshot.fiveHourQuotaPercent)%"
+            return quotaValue(
+                snapshot.fiveHourQuotaPercent,
+                state: snapshot.fiveHourQuotaState
+            )
         case .weekly:
-            return "\(snapshot.weeklyQuotaPercent)%"
+            return quotaValue(
+                snapshot.weeklyQuotaPercent,
+                state: snapshot.weeklyQuotaState
+            )
         }
+    }
+
+    private static func quotaValue(_ value: Int, state: QuotaFieldState) -> String {
+        guard state.isDisplayable else {
+            return "--"
+        }
+
+        let valueText = "\(value)%"
+        return state == .cached ? "\(valueText)（历史缓存）" : valueText
     }
 
     private static func showsQuotaValues(for status: QuotaRefreshStatus) -> Bool {

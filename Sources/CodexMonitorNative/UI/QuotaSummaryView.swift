@@ -27,7 +27,10 @@ struct QuotaSummaryView: View {
                 QuotaGaugeView(
                     title: "5小时额度",
                     value: fiveHourQuotaText,
-                    progress: quotaProgress(for: appState.snapshot.fiveHourQuotaPercent)
+                    progress: quotaProgress(
+                        for: appState.snapshot.fiveHourQuotaPercent,
+                        state: appState.snapshot.fiveHourQuotaState
+                    )
                 )
 
                 ReactorView(isPanelActive: isPanelActive)
@@ -36,7 +39,10 @@ struct QuotaSummaryView: View {
                 QuotaGaugeView(
                     title: "周额度",
                     value: weeklyQuotaText,
-                    progress: quotaProgress(for: appState.snapshot.weeklyQuotaPercent)
+                    progress: quotaProgress(
+                        for: appState.snapshot.weeklyQuotaPercent,
+                        state: appState.snapshot.weeklyQuotaState
+                    )
                 )
             }
             .frame(maxWidth: .infinity)
@@ -69,10 +75,11 @@ struct QuotaSummaryView: View {
         )
     }
 
-    private func quotaProgress(for value: Int) -> Double? {
+    private func quotaProgress(for value: Int, state: QuotaFieldState) -> Double? {
         guard appState.displayStatus != .noSnapshot,
               appState.displayStatus != .idle,
-              appState.displayStatus != .demoMode else {
+              appState.displayStatus != .demoMode,
+              state.isDisplayable else {
             return nil
         }
         return Double(value) / 100

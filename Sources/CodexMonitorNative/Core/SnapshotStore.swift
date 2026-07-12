@@ -244,6 +244,8 @@ struct SnapshotStore {
         QuotaSnapshot(
             weeklyQuotaPercent: snapshot.weeklyQuotaPercent,
             fiveHourQuotaPercent: snapshot.fiveHourQuotaPercent,
+            weeklyQuotaState: snapshot.weeklyQuotaState,
+            fiveHourQuotaState: snapshot.fiveHourQuotaState,
             resetAvailableCount: snapshot.resetAvailableCount,
             resetCreditDetailsState: snapshot.resetCreditDetailsState,
             resetCreditDiagnostic: snapshot.resetCreditDiagnostic,
@@ -263,10 +265,34 @@ struct SnapshotStore {
     private func migratedResetBanks(from snapshot: QuotaSnapshot) -> [ResetBankSnapshot] {
         if !snapshot.resetBanks.isEmpty { return Array(snapshot.resetBanks.sorted(by: compareResetBanks).prefix(3)) }
         guard snapshot.dataSource == .real else { return [] }
-        return [
-            ResetBankSnapshot(limitId: "codex", windowId: "primary", displayName: "5小时额度", remainingPercent: snapshot.fiveHourQuotaPercent, resetAt: snapshot.fiveHourResetAt, resetTimeStatus: snapshot.fiveHourResetAt == nil ? .unexposed : .actual, rawResetFields: []),
-            ResetBankSnapshot(limitId: "codex", windowId: "secondary", displayName: "周额度", remainingPercent: snapshot.weeklyQuotaPercent, resetAt: nil, resetTimeStatus: .unexposed, rawResetFields: [])
-        ].sorted(by: compareResetBanks)
+        var banks: [ResetBankSnapshot] = []
+        if snapshot.fiveHourQuotaState.isDisplayable {
+            banks.append(
+                ResetBankSnapshot(
+                    limitId: "codex",
+                    windowId: "primary",
+                    displayName: "5小时额度",
+                    remainingPercent: snapshot.fiveHourQuotaPercent,
+                    resetAt: snapshot.fiveHourResetAt,
+                    resetTimeStatus: snapshot.fiveHourResetAt == nil ? .unexposed : .actual,
+                    rawResetFields: []
+                )
+            )
+        }
+        if snapshot.weeklyQuotaState.isDisplayable {
+            banks.append(
+                ResetBankSnapshot(
+                    limitId: "codex",
+                    windowId: "secondary",
+                    displayName: "周额度",
+                    remainingPercent: snapshot.weeklyQuotaPercent,
+                    resetAt: nil,
+                    resetTimeStatus: .unexposed,
+                    rawResetFields: []
+                )
+            )
+        }
+        return banks.sorted(by: compareResetBanks)
     }
 
     private func compareResetBanks(_ lhs: ResetBankSnapshot, _ rhs: ResetBankSnapshot) -> Bool {

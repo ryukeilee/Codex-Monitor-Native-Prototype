@@ -363,6 +363,25 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(loaded?.schemaVersion, 1)
     }
 
+    func testSnapshotStorePreservesQuotaFieldStatesAcrossPersistence() {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.fieldStatePersistence.\(UUID().uuidString)")!
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 80,
+            fiveHourQuotaPercent: 60,
+            weeklyQuotaState: .cached,
+            fiveHourQuotaState: .unavailable,
+            refreshedAt: Date(timeIntervalSince1970: 100),
+            dataSource: .real
+        )
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+
+        store.saveSnapshot(snapshot)
+
+        XCTAssertEqual(store.loadSnapshot(), snapshot)
+        XCTAssertEqual(store.loadSnapshot()?.weeklyQuotaState, .cached)
+        XCTAssertEqual(store.loadSnapshot()?.fiveHourQuotaState, .unavailable)
+    }
+
     func testSchemaV3RealSnapshotMigratesResetBanksAndClampsToThreeEntries() {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.migrate.v3.\(UUID().uuidString)")!
         let refreshedAt = Date(timeIntervalSince1970: 1_718_000_000)
@@ -376,6 +395,8 @@ final class AppStateTests: XCTestCase {
         let loaded = store.loadSnapshot()
 
         XCTAssertEqual(loaded?.schemaVersion, QuotaSnapshot.currentSchemaVersion)
+        XCTAssertEqual(loaded?.weeklyQuotaState, .live)
+        XCTAssertEqual(loaded?.fiveHourQuotaState, .live)
         XCTAssertEqual(loaded?.resetBanks.count, 3)
         XCTAssertEqual(loaded?.resetBanks.map(\.id), ["a.primary", "b.primary", "c.primary"])
     }

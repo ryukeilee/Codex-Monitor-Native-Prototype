@@ -30,7 +30,8 @@ struct QuotaRefreshService: QuotaRefreshing {
         // The caller (AppState) will classify the error and preserve
         // the last successful real snapshot.
         let realSnapshot = try await realProvider.fetchQuota()
-        let enrichedSnapshot = await enrichResetCreditsDetails(for: realSnapshot)
+        let mergedSnapshot = realSnapshot.mergingPartial(with: currentSnapshot)
+        let enrichedSnapshot = await enrichResetCreditsDetails(for: mergedSnapshot)
         AppLogger.refresh.info("Real quota fetch succeeded")
         return enrichedSnapshot
     }
@@ -41,6 +42,8 @@ struct QuotaRefreshService: QuotaRefreshing {
             return QuotaSnapshot(
                 weeklyQuotaPercent: snapshot.weeklyQuotaPercent,
                 fiveHourQuotaPercent: snapshot.fiveHourQuotaPercent,
+                weeklyQuotaState: snapshot.weeklyQuotaState,
+                fiveHourQuotaState: snapshot.fiveHourQuotaState,
                 resetAvailableCount: details.availableCount ?? snapshot.resetAvailableCount,
                 resetCreditDetailsState: .detailed,
                 resetCreditDiagnostic: nil,
@@ -60,6 +63,8 @@ struct QuotaRefreshService: QuotaRefreshing {
             return QuotaSnapshot(
                 weeklyQuotaPercent: snapshot.weeklyQuotaPercent,
                 fiveHourQuotaPercent: snapshot.fiveHourQuotaPercent,
+                weeklyQuotaState: snapshot.weeklyQuotaState,
+                fiveHourQuotaState: snapshot.fiveHourQuotaState,
                 resetAvailableCount: snapshot.resetAvailableCount,
                 resetCreditDetailsState: .unavailable,
                 resetCreditDiagnostic: ResetCreditDiagnosticSnapshot(summary: sanitizedResetCreditsError(error)),

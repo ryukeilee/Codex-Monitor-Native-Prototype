@@ -462,6 +462,11 @@ struct RealQuotaProvider: RealQuotaRefreshing {
         let availableCount: Int?
     }
 
+    private struct ParsedQuotaField {
+        let remaining: Int
+        let state: QuotaFieldState
+    }
+
     private let codexPath: String
     private let timeoutSeconds: Double
 
@@ -475,76 +480,49 @@ struct RealQuotaProvider: RealQuotaRefreshing {
         return try await client.fetchQuota(timeoutSeconds: timeoutSeconds)
     }
 
-    // MARK: - Response Parsing (with strict validation)
+    // MARK: - Response Parsing (with field-level validation)
 
     static func parseRateLimits(response: [String: Any]) -> QuotaSnapshot? {
         let rateLimitsByLimitId = response["rateLimitsByLimitId"] as? [String: Any] ?? [:]
 
-        guard let codexBucket = rateLimitsByLimitId["codex"] as? [String: Any] else {
-            AppLogger.codexRPC.error("No codex bucket in rate limits response")
-            return nil
-        }
-
-        // Primary (5-hour) window
-        guard let primary = codexBucket["primary"] as? [String: Any] else {
-            AppLogger.codexRPC.error("No primary window in codex bucket")
-            return nil
-        }
-
-        guard let primaryUsedPercent = primary["usedPercent"] as? Double,
-              primaryUsedPercent.isFinite else {
-            AppLogger.codexRPC.error("Primary usedPercent is missing, non-numeric, or non-finite")
-            return nil
-        }
-
-        guard primaryUsedPercent >= 0 && primaryUsedPercent <= 100 else {
-            AppLogger.codexRPC.error("Primary usedPercent out of range: \(primaryUsedPercent, privacy: .public)")
-            return nil
-        }
-
-        let fiveHourRemaining = Int((100.0 - primaryUsedPercent).rounded())
-        let fiveHourResetAt = parseResetMetadata(from: primary).resetAt
-        let resetCredits = parseResetCredits(from: response["rateLimitResetCredits"])
-
-        // Secondary (weekly) window
-        let secondary: [String: Any]? = codexBucket["secondary"] as? [String: Any]
+        let codexBucket = rateLimitsByLimitId["codex"] as? [String: Any] ?? [:]
+        let primary = codexBucket["primary"] as? [String: Any]
+        let canonicalSecondary = codexBucket["secondary"] as? [String: Any]
         let codexOtherBucket = rateLimitsByLimitId["codex_other"] as? [String: Any]
         let fallbackSecondary = codexOtherBucket?["primary"] as? [String: Any]
 
-        let effectiveSecondary = secondary ?? fallbackSecondary
-
-        let weeklyUsedPercent: Double
-        if let sec = effectiveSecondary {
-            guard let used = sec["usedPercent"] as? Double, used.isFinite else {
-                AppLogger.codexRPC.error("Secondary usedPercent is missing, non-numeric, or non-finite")
-                return nil
-            }
-
-            guard used >= 0 && used <= 100 else {
-                AppLogger.codexRPC.error("Secondary usedPercent out of range: \(used, privacy: .public)")
-                return nil
-            }
-            weeklyUsedPercent = used
-        } else {
-            AppLogger.codexRPC.warning("No secondary window; defaulting to 0 used")
-            weeklyUsedPercent = 0
-        }
-
-        let weeklyRemaining = Int((100.0 - weeklyUsedPercent).rounded())
-
-        // Final range clamp (defense in depth)
-        guard (0...100).contains(fiveHourRemaining), (0...100).contains(weeklyRemaining) else {
-            AppLogger.codexRPC.error("Computed values out of range: weekly=\(weeklyRemaining) fiveHour=\(fiveHourRemaining)")
+        guard primary != nil || canonicalSecondary != nil || fallbackSecondary != nil else {
+            AppLogger.codexRPC.error("No usable quota windows in rate limits response")
             return nil
         }
 
-        AppLogger.codexRPC.info("Parsed real quota: weekly=\(weeklyRemaining)% fiveHour=\(fiveHourRemaining)%")
+        let fiveHour = parseQuotaField(primary, label: "Primary")
+        let canonicalWeekly = parseQuotaField(canonicalSecondary, label: "Secondary")
+        let fallbackWeekly = parseQuotaField(fallbackSecondary, label: "Fallback secondary")
+        let weekly: ParsedQuotaField
+        let usesFallbackWeeklySource: Bool
+        if canonicalWeekly.state == .live || fallbackWeekly.state != .live {
+            weekly = canonicalWeekly
+            usesFallbackWeeklySource = false
+        } else {
+            weekly = fallbackWeekly
+            usesFallbackWeeklySource = true
+        }
 
-        let usesFallbackWeeklySource = secondary == nil && fallbackSecondary != nil
+        let fiveHourResetAt = primary.flatMap { parseResetMetadata(from: $0).resetAt }
+        let resetCredits = parseResetCredits(from: response["rateLimitResetCredits"])
+
+        if fiveHour.state == .live || weekly.state == .live {
+            AppLogger.codexRPC.info("Parsed real quota: weekly=\(weekly.remaining)% [\(weekly.state.rawValue, privacy: .public)] fiveHour=\(fiveHour.remaining)% [\(fiveHour.state.rawValue, privacy: .public)]")
+        } else {
+            AppLogger.codexRPC.warning("No trusted quota fields in rate limits response")
+        }
 
         return QuotaSnapshot(
-            weeklyQuotaPercent: weeklyRemaining,
-            fiveHourQuotaPercent: fiveHourRemaining,
+            weeklyQuotaPercent: weekly.remaining,
+            fiveHourQuotaPercent: fiveHour.remaining,
+            weeklyQuotaState: weekly.state,
+            fiveHourQuotaState: fiveHour.state,
             resetAvailableCount: resetCredits.availableCount,
             resetCreditDetailsState: .appServerCountOnly,
             resetCreditDiagnostic: nil,
@@ -561,6 +539,52 @@ struct RealQuotaProvider: RealQuotaRefreshing {
             dataSource: .real,
             errorMessage: nil
         )
+    }
+
+    private static func parseQuotaField(
+        _ window: [String: Any]?,
+        label: String
+    ) -> ParsedQuotaField {
+        guard let window else {
+            AppLogger.codexRPC.warning("\(label) quota window is unexposed")
+            return ParsedQuotaField(remaining: 0, state: .unavailable)
+        }
+
+        guard let rawUsedPercent = window["usedPercent"],
+              let usedPercent = parsePercentage(rawUsedPercent),
+              usedPercent.isFinite else {
+            AppLogger.codexRPC.error("\(label) usedPercent is missing, non-numeric, or non-finite")
+            return ParsedQuotaField(remaining: 0, state: .invalid)
+        }
+
+        guard (0...100).contains(usedPercent) else {
+            AppLogger.codexRPC.error("\(label) usedPercent out of range: \(usedPercent, privacy: .public)")
+            return ParsedQuotaField(remaining: 0, state: .invalid)
+        }
+
+        let remaining = Int((100.0 - usedPercent).rounded())
+        guard (0...100).contains(remaining) else {
+            AppLogger.codexRPC.error("Computed \(label) remaining value out of range: \(remaining)")
+            return ParsedQuotaField(remaining: 0, state: .invalid)
+        }
+
+        return ParsedQuotaField(remaining: remaining, state: .live)
+    }
+
+    private static func parsePercentage(_ rawValue: Any) -> Double? {
+        if let number = rawValue as? NSNumber {
+            return number.doubleValue
+        }
+        if let value = rawValue as? Double {
+            return value
+        }
+        if let value = rawValue as? Int {
+            return Double(value)
+        }
+        if let value = rawValue as? String {
+            return Double(value.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return nil
     }
 
     private static func parseResetBanks(
@@ -584,7 +608,7 @@ struct RealQuotaProvider: RealQuotaRefreshing {
                 }
 
                 guard let window = bucket[windowId] as? [String: Any],
-                      let usedPercent = window["usedPercent"] as? Double,
+                      let usedPercent = window["usedPercent"].flatMap(parsePercentage),
                       usedPercent.isFinite,
                       usedPercent >= 0,
                       usedPercent <= 100 else {

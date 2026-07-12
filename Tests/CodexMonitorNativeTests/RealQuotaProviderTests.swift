@@ -332,6 +332,101 @@ final class RealQuotaProviderTests: XCTestCase {
         ])
     }
 
+    func testParseRateLimitsMarksUnexposedWeeklyWindowInsteadOfDefaultingTo100() {
+        let response: [String: Any] = [
+            "rateLimitsByLimitId": [
+                "codex": [
+                    "primary": ["usedPercent": 57.0]
+                ]
+            ]
+        ]
+
+        let snapshot = RealQuotaProvider.parseRateLimits(response: response)
+
+        XCTAssertEqual(snapshot?.fiveHourQuotaPercent, 43)
+        XCTAssertEqual(snapshot?.fiveHourQuotaState, .live)
+        XCTAssertEqual(snapshot?.weeklyQuotaState, .unavailable)
+        XCTAssertNotEqual(snapshot?.weeklyQuotaPercent, 100)
+    }
+
+    func testParseRateLimitsKeepsWeeklyWhenPrimaryWindowIsUnexposed() {
+        let response: [String: Any] = [
+            "rateLimitsByLimitId": [
+                "codex": [
+                    "secondary": ["usedPercent": 42.0]
+                ]
+            ]
+        ]
+
+        let snapshot = RealQuotaProvider.parseRateLimits(response: response)
+
+        XCTAssertEqual(snapshot?.weeklyQuotaPercent, 58)
+        XCTAssertEqual(snapshot?.weeklyQuotaState, .live)
+        XCTAssertEqual(snapshot?.fiveHourQuotaState, .unavailable)
+        XCTAssertNotEqual(snapshot?.fiveHourQuotaPercent, 100)
+    }
+
+    func testParseRateLimitsMarksInvalidFieldsWithoutSynthesizing100() {
+        let response: [String: Any] = [
+            "rateLimitsByLimitId": [
+                "codex": [
+                    "primary": ["usedPercent": 101.0],
+                    "secondary": ["usedPercent": "not-a-number"]
+                ]
+            ]
+        ]
+
+        let snapshot = RealQuotaProvider.parseRateLimits(response: response)
+
+        XCTAssertEqual(snapshot?.fiveHourQuotaState, .invalid)
+        XCTAssertEqual(snapshot?.weeklyQuotaState, .invalid)
+        XCTAssertNotEqual(snapshot?.fiveHourQuotaPercent, 100)
+        XCTAssertNotEqual(snapshot?.weeklyQuotaPercent, 100)
+    }
+
+    func testParseRateLimitsUsesFallbackWhenCanonicalWeeklyFieldIsInvalid() {
+        let response: [String: Any] = [
+            "rateLimitsByLimitId": [
+                "codex": [
+                    "primary": ["usedPercent": 30.0],
+                    "secondary": ["usedPercent": 101.0]
+                ],
+                "codex_other": [
+                    "primary": ["usedPercent": 25.0]
+                ]
+            ]
+        ]
+
+        let snapshot = RealQuotaProvider.parseRateLimits(response: response)
+
+        XCTAssertEqual(snapshot?.weeklyQuotaPercent, 75)
+        XCTAssertEqual(snapshot?.weeklyQuotaState, .live)
+    }
+
+    func testPartialQuotaMergesLiveFieldAndMarksCachedField() {
+        let cached = QuotaSnapshot(
+            weeklyQuotaPercent: 70,
+            fiveHourQuotaPercent: 60,
+            refreshedAt: Date(timeIntervalSince1970: 100),
+            dataSource: .real
+        )
+        let partial = QuotaSnapshot(
+            weeklyQuotaPercent: 0,
+            fiveHourQuotaPercent: 82,
+            weeklyQuotaState: .unavailable,
+            fiveHourQuotaState: .live,
+            refreshedAt: Date(timeIntervalSince1970: 200),
+            dataSource: .real
+        )
+
+        let merged = partial.mergingPartial(with: cached)
+
+        XCTAssertEqual(merged.weeklyQuotaPercent, 70)
+        XCTAssertEqual(merged.weeklyQuotaState, .cached)
+        XCTAssertEqual(merged.fiveHourQuotaPercent, 82)
+        XCTAssertEqual(merged.fiveHourQuotaState, .live)
+    }
+
     func testParseRateLimitsKeepsUnknownResetBankRawFields() {
         let response: [String: Any] = [
             "rateLimitsByLimitId": [

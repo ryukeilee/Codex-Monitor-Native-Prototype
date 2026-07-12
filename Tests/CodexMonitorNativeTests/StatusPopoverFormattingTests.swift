@@ -283,6 +283,30 @@ final class StatusPopoverFormattingTests: XCTestCase {
         XCTAssertEqual(formatted, "5小时额度 64% · 周额度 71%")
     }
 
+    func testQuotaValueTextHidesUntrustedFieldAndMarksHistoricalCache() {
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 71,
+            fiveHourQuotaPercent: 64,
+            weeklyQuotaState: .cached,
+            fiveHourQuotaState: .invalid,
+            refreshedAt: .now,
+            dataSource: .real
+        )
+
+        XCTAssertEqual(
+            StatusPopoverFormatting.quotaValueText(for: .fiveHour, snapshot: snapshot, status: .success),
+            "--"
+        )
+        XCTAssertEqual(
+            StatusPopoverFormatting.quotaValueText(for: .weekly, snapshot: snapshot, status: .success),
+            "71%（历史缓存）"
+        )
+        XCTAssertEqual(
+            StatusPopoverFormatting.quotaSummaryLine(snapshot: snapshot, status: .success),
+            "5小时额度 -- · 周额度 71%（历史缓存）"
+        )
+    }
+
     func testQuotaTooltipKeepsSameQuotaValuesWhileRefreshing() {
         let now = makeDate("2026-06-19T12:40:00Z")
         let resetAt = makeDate("2026-06-19T14:10:00Z")

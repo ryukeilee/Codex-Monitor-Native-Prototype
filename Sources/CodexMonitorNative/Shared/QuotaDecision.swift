@@ -14,7 +14,9 @@ struct QuotaDecision: Equatable {
 
 enum QuotaDecisionEngine {
     static func evaluate(snapshot: QuotaSnapshot, hasUsableRealData: Bool) -> QuotaDecision {
-        guard hasUsableRealData else {
+        guard hasUsableRealData,
+              snapshot.fiveHourQuotaState == .live,
+              snapshot.weeklyQuotaState == .live else {
             return QuotaDecision(
                 level: .observe,
                 recommendation: "先完成同步，再决定任务强度"

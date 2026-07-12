@@ -75,6 +75,35 @@ final class QuotaRefreshServiceTests: XCTestCase {
         XCTAssertTrue(refreshed.resetCreditStatusSummary.isEmpty)
     }
 
+    func testRefreshMergesPartialRPCFieldsWithCurrentRealSnapshot() async throws {
+        let current = QuotaSnapshot(
+            weeklyQuotaPercent: 70,
+            fiveHourQuotaPercent: 64,
+            refreshedAt: makeDate("2026-06-19T12:40:00Z"),
+            dataSource: .real
+        )
+        let partial = QuotaSnapshot(
+            weeklyQuotaPercent: 0,
+            fiveHourQuotaPercent: 58,
+            weeklyQuotaState: .unavailable,
+            fiveHourQuotaState: .live,
+            refreshedAt: makeDate("2026-06-19T12:45:00Z"),
+            dataSource: .real
+        )
+        let service = QuotaRefreshService(
+            realProvider: StubRealQuotaProvider(snapshot: partial),
+            resetCreditsDetailProvider: FailingResetCreditsProvider(),
+            mockProvider: MockQuotaProvider()
+        )
+
+        let refreshed = try await service.refresh(basedOn: current)
+
+        XCTAssertEqual(refreshed.weeklyQuotaPercent, 70)
+        XCTAssertEqual(refreshed.weeklyQuotaState, .cached)
+        XCTAssertEqual(refreshed.fiveHourQuotaPercent, 58)
+        XCTAssertEqual(refreshed.fiveHourQuotaState, .live)
+    }
+
     private func makeDate(_ iso8601: String) -> Date {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
