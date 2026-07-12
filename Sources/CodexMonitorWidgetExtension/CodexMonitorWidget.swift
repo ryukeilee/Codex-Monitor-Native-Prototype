@@ -361,84 +361,7 @@ struct CodexMonitorWidgetView: View {
     }
 
     private func energyCore(diameter: CGFloat, valueFont: Font) -> some View {
-        ZStack {
-            Circle()
-                .fill(
-                    RadialGradient(
-                        colors: [
-                            Color.white,
-                            Color(red: 0.90, green: 0.97, blue: 1.0).opacity(0.98),
-                            Color(red: 0.58, green: 0.89, blue: 1.0).opacity(0.96),
-                            Color(red: 0.16, green: 0.43, blue: 0.68).opacity(0.52)
-                        ],
-                        center: .center,
-                        startRadius: 3,
-                        endRadius: diameter * 0.42
-                    )
-                )
-                .blur(radius: 1.2)
-                .padding(diameter * 0.24)
-
-            ForEach(0..<6, id: \.self) { index in
-                Capsule(style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color.white.opacity(0.95),
-                                Color(red: 0.52, green: 0.88, blue: 1.0).opacity(0.60)
-                            ],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-                    .frame(width: diameter * 0.045, height: diameter * 0.22)
-                    .offset(y: -diameter * 0.18)
-                    .rotationEffect(.degrees(Double(index) * 60))
-                    .blur(radius: 0.2)
-            }
-
-            Circle()
-                .stroke(
-                    Color.white.opacity(0.12),
-                    lineWidth: diameter * 0.08
-                )
-                .padding(diameter * 0.11)
-
-            Circle()
-                .trim(from: 0, to: gaugeProgress)
-                .stroke(
-                    AngularGradient(
-                        colors: [
-                            Color(red: 0.64, green: 0.93, blue: 1.0),
-                            Color.white,
-                            Color(red: 0.41, green: 0.84, blue: 1.0)
-                        ],
-                        center: .center
-                    ),
-                    style: StrokeStyle(lineWidth: diameter * 0.10, lineCap: .round)
-                )
-                .rotationEffect(.degrees(-90))
-                .padding(diameter * 0.09)
-                .shadow(color: Color(red: 0.62, green: 0.92, blue: 1.0).opacity(0.50), radius: 12)
-
-            Circle()
-                .fill(
-                    RadialGradient(
-                        colors: [
-                            Color(red: 0.15, green: 0.26, blue: 0.34).opacity(0.24),
-                            Color(red: 0.05, green: 0.09, blue: 0.16).opacity(0.46)
-                        ],
-                        center: .center,
-                        startRadius: 2,
-                        endRadius: diameter * 0.22
-                    )
-                )
-                .padding(diameter * 0.27)
-
-            Circle()
-                .stroke(Color.white.opacity(0.14), lineWidth: 0.8)
-                .padding(diameter * 0.27)
-
+        MechanicalEnergyCore(diameter: diameter, progress: gaugeProgress) {
             Text(centerQuotaNumberText)
                 .font(valueFont)
                 .foregroundStyle(.white)
@@ -446,9 +369,8 @@ struct CodexMonitorWidgetView: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.64)
                 .shadow(color: Color(red: 0.52, green: 0.90, blue: 1.0).opacity(0.24), radius: 7)
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(width: diameter, height: diameter)
         .offset(y: isSmall ? -1 : -3)
     }
 

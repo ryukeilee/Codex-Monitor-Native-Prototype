@@ -165,6 +165,31 @@ final class StatusPopoverSnapshotTests: XCTestCase {
         XCTAssertTrue(quotaSource.contains("重置次数"))
     }
 
+    func testMechanicalEnergyCoreUsesLayeredVectorMechanicsWithoutLegacyPlaceholder() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let reactorSource = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/CodexMonitorNative/UI/MetallicPanelComponents.swift"),
+            encoding: .utf8
+        )
+        let coreSource = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/CodexMonitorNative/UI/MechanicalEnergyCore.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(reactorSource.contains("MechanicalEnergyCore"))
+        XCTAssertTrue(reactorSource.contains("TimelineView(.animation(minimumInterval: 1.0 / 24.0"))
+        XCTAssertTrue(coreSource.contains("segmentedArmorRing"))
+        XCTAssertTrue(coreSource.contains("AngularGradient"))
+        XCTAssertTrue(coreSource.contains("RadialGradient"))
+        XCTAssertTrue(coreSource.contains("ForEach(0..<strutCount"))
+        XCTAssertTrue(coreSource.contains("ForEach(0..<emitterCount"))
+        XCTAssertFalse(reactorSource.contains("triangle.fill"))
+        XCTAssertFalse(reactorSource.contains("dash: [3, 5]"))
+    }
+
     func testQuotaDisclosurePropagatesLayoutChangesAndLabelsDetailOnlyContent() throws {
         let repoRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

@@ -36,4 +36,21 @@ final class WidgetLayoutSourceTests: XCTestCase {
         XCTAssertTrue(source.contains("if line.hasPrefix(\"最早重置 \") {"))
         XCTAssertTrue(source.contains("return String(line.dropFirst(\"最早重置 \".count))"))
     }
+
+    func testWidgetUsesSharedMechanicalEnergyCoreWithoutChangingQuotaInputs() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let sourceURL = repoRoot.appendingPathComponent("Sources/CodexMonitorWidgetExtension/CodexMonitorWidget.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        let projectURL = repoRoot.appendingPathComponent("CodexMonitorWidgetExtension.xcodeproj/project.pbxproj")
+        let project = try String(contentsOf: projectURL, encoding: .utf8)
+
+        XCTAssertTrue(source.contains("MechanicalEnergyCore(diameter: diameter, progress: gaugeProgress)"))
+        XCTAssertTrue(source.contains("Text(centerQuotaNumberText)"))
+        XCTAssertTrue(source.contains("diameter: isSmall ? 72 : 74"))
+        XCTAssertTrue(project.contains("MechanicalEnergyCore.swift in Sources"))
+        XCTAssertFalse(source.contains("TimelineView"))
+    }
 }

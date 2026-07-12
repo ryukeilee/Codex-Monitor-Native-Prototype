@@ -73,37 +73,13 @@ struct ReactorView: View {
     @ViewBuilder
     private func reactorCore(phase: TimeInterval) -> some View {
         let rotation = Angle(degrees: phase.truncatingRemainder(dividingBy: 30) * 4)
-        ZStack {
-            Circle()
-                .stroke(MetallicPalette.red.opacity(0.45), lineWidth: 2)
-                .padding(3)
-                .rotationEffect(rotation)
-            Circle()
-                .stroke(style: StrokeStyle(lineWidth: 2, dash: [3, 5]))
-                .foregroundStyle(MetallicPalette.redBright.opacity(0.85))
-                .padding(12)
-                .rotationEffect(-rotation)
-            Circle()
-                .fill(
-                    RadialGradient(
-                        colors: [Color.white.opacity(0.96), Color.cyan.opacity(0.72), Color(red: 0.26, green: 0.06, blue: 0.08)],
-                        center: .center,
-                        startRadius: 2,
-                        endRadius: 40
-                    )
-                )
-                .padding(27)
-                .shadow(color: Color.cyan.opacity(0.65), radius: 12)
-            Image(systemName: "triangle.fill")
-                .font(.system(size: 26, weight: .bold))
-                .foregroundStyle(Color.white.opacity(0.88))
-                .rotationEffect(rotation * 0.5)
+        GeometryReader { proxy in
+            let diameter = min(proxy.size.width, proxy.size.height)
+
+            MechanicalEnergyCore(diameter: diameter, rotation: rotation) {
+                EmptyView()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         }
-        .padding(4)
-        .background(
-            Circle()
-                .fill(Color.black.opacity(0.44))
-                .shadow(color: MetallicPalette.red.opacity(0.5), radius: 10)
-        )
     }
 }
