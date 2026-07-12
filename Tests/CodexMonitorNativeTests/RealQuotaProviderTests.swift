@@ -200,7 +200,7 @@ final class RealQuotaProviderTests: XCTestCase {
         XCTAssertEqual(timeoutScheduler.cancelCount, 1)
     }
 
-    private static let rateLimitResponse = Data("{\"result\":{\"rateLimitsByLimitId\":{\"codex\":{\"primary\":{\"usedPercent\":50}}}}}\n".utf8)
+    private static let rateLimitResponse = Data("{\"result\":{\"rateLimitsByLimitId\":{\"codex\":{\"primary\":{\"windowDurationMins\":300,\"usedPercent\":50}}}}}\n".utf8)
     func testParseRateLimitsPrefersCanonicalWeeklyBankAndKeepsFastestEntries() {
         let response: [String: Any] = [
             "rateLimitResetCredits": [
@@ -219,6 +219,7 @@ final class RealQuotaProviderTests: XCTestCase {
                 ],
                 "codex_other": [
                     "primary": [
+                        "windowDurationMins": 10080,
                         "usedPercent": 25.0,
                         "windowResetAt": "2026-06-19T13:00:00Z"
                     ]
@@ -316,6 +317,7 @@ final class RealQuotaProviderTests: XCTestCase {
                 ],
                 "codex_other": [
                     "primary": [
+                        "windowDurationMins": 10080,
                         "usedPercent": 25.0,
                         "windowResetAt": "2026-06-19T13:00:00Z"
                     ]
@@ -332,6 +334,34 @@ final class RealQuotaProviderTests: XCTestCase {
         ])
     }
 
+    func testParseRateLimitsRetainsLegacyFallbackPairWithoutDurations() {
+        let response: [String: Any] = [
+            "rateLimitsByLimitId": [
+                "codex": [
+                    "primary": [
+                        "usedPercent": 57.0,
+                        "resetAt": "2026-06-19T14:10:00Z"
+                    ]
+                ],
+                "codex_other": [
+                    "primary": [
+                        "usedPercent": 25.0,
+                        "windowResetAt": "2026-06-19T13:00:00Z"
+                    ]
+                ]
+            ]
+        ]
+
+        let snapshot = RealQuotaProvider.parseRateLimits(response: response)
+
+        XCTAssertEqual(snapshot?.fiveHourQuotaPercent, 43)
+        XCTAssertEqual(snapshot?.fiveHourQuotaState, .live)
+        XCTAssertEqual(snapshot?.weeklyQuotaPercent, 75)
+        XCTAssertEqual(snapshot?.weeklyQuotaState, .live)
+        XCTAssertEqual(snapshot?.quotaWindows.first(where: { $0.id == "codex.primary" })?.kind, .fiveHour)
+        XCTAssertEqual(snapshot?.quotaWindows.first(where: { $0.id == "codex_other.primary" })?.kind, .weekly)
+    }
+
     func testParseRateLimitsMarksUnexposedWeeklyWindowInsteadOfDefaultingTo100() {
         let response: [String: Any] = [
             "rateLimitsByLimitId": [
@@ -343,8 +373,8 @@ final class RealQuotaProviderTests: XCTestCase {
 
         let snapshot = RealQuotaProvider.parseRateLimits(response: response)
 
-        XCTAssertEqual(snapshot?.fiveHourQuotaPercent, 43)
-        XCTAssertEqual(snapshot?.fiveHourQuotaState, .live)
+        XCTAssertEqual(snapshot?.fiveHourQuotaState, .unavailable)
+        XCTAssertEqual(snapshot?.quotaWindows.first?.kind, .unknown)
         XCTAssertEqual(snapshot?.weeklyQuotaState, .unavailable)
         XCTAssertNotEqual(snapshot?.weeklyQuotaPercent, 100)
     }
@@ -353,7 +383,7 @@ final class RealQuotaProviderTests: XCTestCase {
         let response: [String: Any] = [
             "rateLimitsByLimitId": [
                 "codex": [
-                    "secondary": ["usedPercent": 42.0]
+                    "secondary": ["windowDurationMins": 10080, "usedPercent": 42.0]
                 ]
             ]
         ]
@@ -451,6 +481,147 @@ final class RealQuotaProviderTests: XCTestCase {
             snapshot?.resetBanks.last?.rawResetFields,
             [ResetBankRawField(name: "nextResetAt", value: "<null>")]
         )
+    }
+
+    func testParseRateLimitsClassifiesNewDurationWindowsAndPreservesUnknown() {
+        let response: [String: Any] = [
+            "rateLimitsByLimitId": [
+                "codex": [
+                    "primary": ["windowDurationMins": 300, "usedPercent": 20.0],
+                    "secondary": ["windowDurationMins": 10080, "usedPercent": 40.0],
+                    "monthly": ["windowDurationMins": 43200, "usedPercent": 50.0],
+                    "future": ["windowDurationMins": 1234, "usedPercent": 10.0]
+                ]
+            ]
+        ]
+
+        let snapshot = RealQuotaProvider.parseRateLimits(response: response)
+
+        XCTAssertEqual(snapshot?.fiveHourQuotaPercent, 80)
+        XCTAssertEqual(snapshot?.weeklyQuotaPercent, 60)
+        XCTAssertEqual(snapshot?.quotaWindows.first(where: { $0.windowId == "monthly" })?.kind, .monthly)
+        XCTAssertEqual(snapshot?.quotaWindows.first(where: { $0.windowId == "future" })?.kind, .unknown)
+        XCTAssertEqual(snapshot?.quotaWindows.first(where: { $0.windowId == "future" })?.remainingPercent, 90)
+    }
+
+    func testParseRateLimitsDoesNotGuessAmbiguousSinglePrimaryWithoutDuration() {
+        let response: [String: Any] = [
+            "rateLimitsByLimitId": [
+                "codex": ["primary": ["usedPercent": 20.0]]
+            ]
+        ]
+
+        let snapshot = RealQuotaProvider.parseRateLimits(response: response)
+
+        XCTAssertEqual(snapshot?.fiveHourQuotaState, .unavailable)
+        XCTAssertNotEqual(snapshot?.fiveHourQuotaPercent, 100)
+        XCTAssertEqual(snapshot?.quotaWindows.first?.kind, .unknown)
+        XCTAssertEqual(snapshot?.quotaWindows.first?.state, .live)
+    }
+
+    func testParseRateLimitsMissingFiveHourKeepsDurationBackedWeeklyWindow() {
+        let response: [String: Any] = [
+            "rateLimitsByLimitId": [
+                "codex": ["secondary": ["windowDurationMins": 10080, "usedPercent": 42.0]]
+            ]
+        ]
+
+        let snapshot = RealQuotaProvider.parseRateLimits(response: response)
+
+        XCTAssertEqual(snapshot?.weeklyQuotaPercent, 58)
+        XCTAssertEqual(snapshot?.weeklyQuotaState, .live)
+        XCTAssertEqual(snapshot?.fiveHourQuotaState, .unavailable)
+        XCTAssertNotEqual(snapshot?.fiveHourQuotaPercent, 100)
+    }
+
+    func testOldDualWindowWithoutDurationsRetainsLegacyMapping() {
+        let response: [String: Any] = [
+            "rateLimitsByLimitId": [
+                "codex": [
+                    "primary": ["usedPercent": 30.0],
+                    "secondary": ["usedPercent": 40.0]
+                ]
+            ]
+        ]
+
+        let snapshot = RealQuotaProvider.parseRateLimits(response: response)
+
+        XCTAssertEqual(snapshot?.quotaWindows.first(where: { $0.windowId == "primary" })?.kind, .fiveHour)
+        XCTAssertEqual(snapshot?.quotaWindows.first(where: { $0.windowId == "secondary" })?.kind, .weekly)
+        XCTAssertEqual(snapshot?.fiveHourQuotaPercent, 70)
+        XCTAssertEqual(snapshot?.weeklyQuotaPercent, 60)
+    }
+
+    func testPartialQuotaMergesDynamicWindowsBySemanticIdentity() {
+        let cached = QuotaSnapshot(
+            weeklyQuotaPercent: 60,
+            fiveHourQuotaPercent: 80,
+            refreshedAt: Date(timeIntervalSince1970: 100),
+            dataSource: .real,
+            quotaWindows: [
+                QuotaWindow(limitId: "codex", windowId: "secondary", kind: .weekly, durationMinutes: 10080, remainingPercent: 60),
+                QuotaWindow(limitId: "codex", windowId: "primary", kind: .fiveHour, durationMinutes: 300, remainingPercent: 80)
+            ]
+        )
+        let partial = QuotaSnapshot(
+            weeklyQuotaPercent: 0,
+            fiveHourQuotaPercent: 0,
+            weeklyQuotaState: .unavailable,
+            fiveHourQuotaState: .unavailable,
+            refreshedAt: Date(timeIntervalSince1970: 200),
+            dataSource: .real,
+            quotaWindows: [
+                QuotaWindow(limitId: "codex_other", windowId: "primary", kind: .weekly, durationMinutes: nil, remainingPercent: 0, state: .unavailable)
+            ]
+        )
+
+        let merged = partial.mergingPartial(with: cached)
+
+        XCTAssertEqual(merged.weeklyQuotaPercent, 60)
+        XCTAssertEqual(merged.weeklyQuotaState, .cached)
+        XCTAssertEqual(merged.quotaWindows.first(where: { $0.kind == .weekly })?.state, .cached)
+        XCTAssertEqual(merged.quotaWindows.first(where: { $0.kind == .weekly })?.remainingPercent, 60)
+    }
+
+    func testQuotaSnapshotCodableDefaultsMissingDynamicWindowsForLegacyPayload() throws {
+        let payload = """
+        {
+          "weeklyQuotaPercent": 72,
+          "fiveHourQuotaPercent": 61,
+          "refreshedAt": 100,
+          "dataSource": "real",
+          "schemaVersion": 7
+        }
+        """.data(using: .utf8)!
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        let snapshot = try decoder.decode(QuotaSnapshot.self, from: payload)
+
+        XCTAssertEqual(snapshot.weeklyQuotaPercent, 72)
+        XCTAssertEqual(snapshot.fiveHourQuotaPercent, 61)
+        XCTAssertTrue(snapshot.quotaWindows.isEmpty)
+    }
+
+    func testQuotaSnapshotCodableRoundTripsDynamicWindows() throws {
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 60,
+            fiveHourQuotaPercent: 80,
+            refreshedAt: Date(timeIntervalSince1970: 100),
+            dataSource: .real,
+            quotaWindows: [
+                QuotaWindow(limitId: "codex", windowId: "monthly", kind: .monthly, durationMinutes: 43200, remainingPercent: 60),
+                QuotaWindow(limitId: "codex", windowId: "future", kind: .unknown, durationMinutes: 1234, remainingPercent: 80)
+            ]
+        )
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .secondsSince1970
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        let decoded = try decoder.decode(QuotaSnapshot.self, from: encoder.encode(snapshot))
+
+        XCTAssertEqual(decoded.quotaWindows, snapshot.quotaWindows)
     }
 }
 

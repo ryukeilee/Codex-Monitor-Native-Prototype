@@ -130,6 +130,27 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         XCTAssertEqual(state.weeklyQuotaText, "71%（历史缓存）")
     }
 
+    func testWidgetQuotaDisplayKeepsHistoryCaptionOutOfNumericText() {
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 71,
+            fiveHourQuotaPercent: 64,
+            weeklyQuotaState: .cached,
+            refreshedAt: .now,
+            dataSource: .real
+        )
+        let state = WidgetDisplayState.make(
+            snapshot: snapshot,
+            status: .success,
+            lastSuccessAt: snapshot.refreshedAt,
+            lastAttemptAt: snapshot.refreshedAt,
+            effectiveFiveHourResetAt: nil,
+            savedAt: snapshot.refreshedAt
+        )
+
+        XCTAssertEqual(state.weeklyQuotaDisplay.percentText, "71%")
+        XCTAssertEqual(state.weeklyQuotaDisplay.historyCaption, "（历史缓存）")
+    }
+
     func testWidgetEarliestResetCreditLineUsesEarliestAvailableExpiry() {
         let now = Date(timeIntervalSince1970: 1_720_000_000)
         let snapshot = QuotaSnapshot(

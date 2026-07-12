@@ -80,7 +80,11 @@ struct CodexMonitorWidgetView: View {
     private var instrumentCluster: some View {
         HStack(alignment: .center, spacing: isSmall ? 8 : 18) {
             metricColumn(
-                top: ("周额度", entry.state.weeklyQuotaText),
+                top: (
+                    "周额度",
+                    entry.state.weeklyQuotaDisplay.percentText,
+                    entry.state.weeklyQuotaDisplay.historyCaption
+                ),
                 bottom: ("恢复时间", shortRecoveryText),
                 alignment: .trailing
             )
@@ -95,7 +99,7 @@ struct CodexMonitorWidgetView: View {
             )
 
             metricColumn(
-                top: ("刷新状态", entry.state.statusText),
+                top: ("刷新状态", entry.state.statusText, nil),
                 bottom: ("更新时间", updatedShortText),
                 alignment: .leading,
                 topValueTone: .subdued
@@ -127,14 +131,14 @@ struct CodexMonitorWidgetView: View {
     }
 
     private func metricColumn(
-        top: (label: String, value: String),
+        top: (label: String, value: String, caption: String?),
         bottom: (label: String, value: String),
         alignment: HorizontalAlignment,
         topValueTone: MetricValueTone = .normal,
         bottomValueTone: MetricValueTone = .normal
     ) -> some View {
         VStack(alignment: alignment, spacing: isSmall ? 12 : 14) {
-            metricCell(label: top.label, value: top.value, alignment: alignment, tone: topValueTone)
+            metricCell(label: top.label, value: top.value, caption: top.caption, alignment: alignment, tone: topValueTone)
             metricCell(label: bottom.label, value: bottom.value, alignment: alignment, tone: bottomValueTone)
         }
         .frame(maxWidth: .infinity)
@@ -451,6 +455,7 @@ struct CodexMonitorWidgetView: View {
     private func metricCell(
         label: String,
         value: String,
+        caption: String? = nil,
         alignment: HorizontalAlignment,
         tone: MetricValueTone = .normal
     ) -> some View {
@@ -467,6 +472,12 @@ struct CodexMonitorWidgetView: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.72)
                 .allowsTightening(true)
+            if let caption {
+                Text(caption)
+                    .font(.system(size: isSmall ? 7 : 8, weight: .medium, design: .rounded))
+                    .foregroundStyle(Color(red: 0.97, green: 0.91, blue: 0.84).opacity(0.66))
+                    .lineLimit(1)
+            }
         }
         .frame(maxWidth: .infinity, alignment: alignment == .leading ? .leading : .trailing)
     }
@@ -592,7 +603,7 @@ struct CodexMonitorWidgetView: View {
             return "--"
         }
 
-        return entry.state.fiveHourQuotaText.replacingOccurrences(of: "%", with: "")
+        return entry.state.fiveHourQuotaDisplay.percentText.replacingOccurrences(of: "%", with: "")
     }
 
     private func shortMetricLabel(_ label: String) -> String {

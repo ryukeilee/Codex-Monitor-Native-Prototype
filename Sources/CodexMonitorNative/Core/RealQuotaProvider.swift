@@ -467,6 +467,15 @@ struct RealQuotaProvider: RealQuotaRefreshing {
         let state: QuotaFieldState
     }
 
+    private struct ParsedQuotaWindow {
+        let limitId: String
+        let windowId: String
+        let kind: QuotaWindowKind
+        let durationMinutes: Int?
+        let field: ParsedQuotaField
+        let resetAt: Date?
+    }
+
     private let codexPath: String
     private let timeoutSeconds: Double
 
@@ -496,9 +505,46 @@ struct RealQuotaProvider: RealQuotaRefreshing {
             return nil
         }
 
-        let fiveHour = parseQuotaField(primary, label: "Primary")
-        let canonicalWeekly = parseQuotaField(canonicalSecondary, label: "Secondary")
-        let fallbackWeekly = parseQuotaField(fallbackSecondary, label: "Fallback secondary")
+        let primaryOmitsDuration = primary.map { parseWindowDuration($0) == nil } ?? false
+        let canonicalSecondaryOmitsDuration = canonicalSecondary.map { parseWindowDuration($0) == nil } ?? false
+        let fallbackSecondaryOmitsDuration = fallbackSecondary.map { parseWindowDuration($0) == nil } ?? false
+        let retainsLegacyDualMapping = primaryOmitsDuration
+            && ((canonicalSecondary != nil && canonicalSecondaryOmitsDuration)
+                || (canonicalSecondary == nil && fallbackSecondary != nil && fallbackSecondaryOmitsDuration))
+
+        let parsedWindows = rateLimitsByLimitId.keys.sorted().flatMap { limitId -> [ParsedQuotaWindow] in
+            guard let bucket = rateLimitsByLimitId[limitId] as? [String: Any] else { return [] }
+            return bucket.keys.sorted().compactMap { windowId in
+                guard let window = bucket[windowId] as? [String: Any] else { return nil }
+                let durationMinutes = parseWindowDuration(window)
+                let kind = classifyWindow(
+                    limitId: limitId,
+                    windowId: windowId,
+                    durationMinutes: durationMinutes,
+                    retainsLegacyDualMapping: retainsLegacyDualMapping
+                )
+                return ParsedQuotaWindow(
+                    limitId: limitId,
+                    windowId: windowId,
+                    kind: kind,
+                    durationMinutes: durationMinutes,
+                    field: parseQuotaField(window, label: "\(limitId).\(windowId)"),
+                    resetAt: parseResetMetadata(from: window).resetAt
+                )
+            }
+        }
+
+        let fiveHourWindow = preferredWindow(
+            kind: .fiveHour,
+            limitId: "codex",
+            windowId: "primary",
+            in: parsedWindows
+        )
+        let canonicalWeeklyWindow = parsedWindows.first { $0.limitId == "codex" && $0.windowId == "secondary" && $0.kind == .weekly }
+        let fallbackWeeklyWindow = parsedWindows.first { $0.limitId == "codex_other" && $0.windowId == "primary" && $0.kind == .weekly }
+        let fiveHour = fiveHourWindow?.field ?? ParsedQuotaField(remaining: 0, state: .unavailable)
+        let canonicalWeekly = canonicalWeeklyWindow?.field ?? ParsedQuotaField(remaining: 0, state: .unavailable)
+        let fallbackWeekly = fallbackWeeklyWindow?.field ?? ParsedQuotaField(remaining: 0, state: .unavailable)
         let weekly: ParsedQuotaField
         let usesFallbackWeeklySource: Bool
         if canonicalWeekly.state == .live || fallbackWeekly.state != .live {
@@ -509,7 +555,7 @@ struct RealQuotaProvider: RealQuotaRefreshing {
             usesFallbackWeeklySource = true
         }
 
-        let fiveHourResetAt = primary.flatMap { parseResetMetadata(from: $0).resetAt }
+        let fiveHourResetAt = fiveHourWindow?.resetAt
         let resetCredits = parseResetCredits(from: response["rateLimitResetCredits"])
 
         if fiveHour.state == .live || weekly.state == .live {
@@ -533,12 +579,74 @@ struct RealQuotaProvider: RealQuotaRefreshing {
             fiveHourResetAt: fiveHourResetAt,
             resetBanks: parseResetBanks(
                 from: rateLimitsByLimitId,
-                usesFallbackWeeklySource: usesFallbackWeeklySource
+                usesFallbackWeeklySource: usesFallbackWeeklySource,
+                retainsLegacyDualMapping: retainsLegacyDualMapping
             ),
             refreshedAt: .now,
             dataSource: .real,
-            errorMessage: nil
+            errorMessage: nil,
+            quotaWindows: parsedWindows.map {
+                QuotaWindow(
+                    limitId: $0.limitId,
+                    windowId: $0.windowId,
+                    kind: $0.kind,
+                    durationMinutes: $0.durationMinutes,
+                    remainingPercent: $0.field.remaining,
+                    state: $0.field.state,
+                    resetAt: $0.resetAt
+                )
+            }
         )
+    }
+
+    private static func classifyWindow(
+        limitId: String,
+        windowId: String,
+        durationMinutes: Int?,
+        retainsLegacyDualMapping: Bool
+    ) -> QuotaWindowKind {
+        if let durationMinutes {
+            return QuotaWindowKind.from(durationMinutes: durationMinutes)
+        }
+
+        guard retainsLegacyDualMapping else {
+            return .unknown
+        }
+
+        switch (limitId, windowId) {
+        case ("codex", "primary"):
+            return .fiveHour
+        case ("codex", "secondary"), ("codex_other", "primary"):
+            return .weekly
+        default:
+            return .unknown
+        }
+    }
+
+    private static func preferredWindow(
+        kind: QuotaWindowKind,
+        limitId: String,
+        windowId: String,
+        in windows: [ParsedQuotaWindow]
+    ) -> ParsedQuotaWindow? {
+        if let exact = windows.first(where: { $0.kind == kind && $0.limitId == limitId && $0.windowId == windowId }) {
+            return exact
+        }
+        return windows.first(where: { $0.kind == kind })
+    }
+
+    private static func parseWindowDuration(_ window: [String: Any]) -> Int? {
+        let rawValue = window["windowDurationMins"] ?? window["windowDurationMinutes"] ?? window["durationMinutes"]
+        if let value = rawValue as? NSNumber {
+            return value.intValue
+        }
+        if let value = rawValue as? Int {
+            return value
+        }
+        if let value = rawValue as? String {
+            return Int(value.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return nil
     }
 
     private static func parseQuotaField(
@@ -589,7 +697,8 @@ struct RealQuotaProvider: RealQuotaRefreshing {
 
     private static func parseResetBanks(
         from rateLimitsByLimitId: [String: Any],
-        usesFallbackWeeklySource: Bool
+        usesFallbackWeeklySource: Bool,
+        retainsLegacyDualMapping: Bool
     ) -> [ResetBankSnapshot] {
         var banks: [ResetBankSnapshot] = []
 
@@ -618,16 +727,25 @@ struct RealQuotaProvider: RealQuotaRefreshing {
 
                 let remainingPercent = Int((100.0 - usedPercent).rounded())
                 let reset = parseResetMetadata(from: window)
+                let durationMinutes = parseWindowDuration(window)
+                let kind = classifyWindow(
+                    limitId: limitId,
+                    windowId: windowId,
+                    durationMinutes: durationMinutes,
+                    retainsLegacyDualMapping: retainsLegacyDualMapping
+                )
                 banks.append(
                     ResetBankSnapshot(
                         limitId: limitId,
                         windowId: windowId,
-                        displayName: resetBankDisplayName(limitId: limitId, windowId: windowId),
+                        displayName: resetBankDisplayName(limitId: limitId, windowId: windowId, kind: kind),
                         remainingPercent: remainingPercent,
                         resetAt: reset.resetAt,
                         resolvedResetFieldName: reset.resolvedFieldName,
                         resetTimeStatus: reset.status,
-                        rawResetFields: reset.rawFields
+                        rawResetFields: reset.rawFields,
+                        windowKind: kind,
+                        durationMinutes: durationMinutes
                     )
                 )
             }
@@ -660,7 +778,10 @@ struct RealQuotaProvider: RealQuotaRefreshing {
         return lhs.id < rhs.id
     }
 
-    private static func resetBankDisplayName(limitId: String, windowId: String) -> String {
+    private static func resetBankDisplayName(limitId: String, windowId: String, kind: QuotaWindowKind? = nil) -> String {
+        if let kind {
+            return kind.displayName
+        }
         switch (limitId, windowId) {
         case ("codex", "primary"):
             return "5小时额度"

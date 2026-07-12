@@ -26,7 +26,8 @@ struct QuotaSummaryView: View {
             HStack(alignment: .center, spacing: 6) {
                 QuotaGaugeView(
                     title: "5小时额度",
-                    value: fiveHourQuotaText,
+                    value: fiveHourQuotaDisplay.percentText,
+                    historyCaption: fiveHourQuotaDisplay.historyCaption,
                     progress: quotaProgress(
                         for: appState.snapshot.fiveHourQuotaPercent,
                         state: appState.snapshot.fiveHourQuotaState
@@ -38,7 +39,8 @@ struct QuotaSummaryView: View {
 
                 QuotaGaugeView(
                     title: "周额度",
-                    value: weeklyQuotaText,
+                    value: weeklyQuotaDisplay.percentText,
+                    historyCaption: weeklyQuotaDisplay.historyCaption,
                     progress: quotaProgress(
                         for: appState.snapshot.weeklyQuotaPercent,
                         state: appState.snapshot.weeklyQuotaState
@@ -46,6 +48,27 @@ struct QuotaSummaryView: View {
                 )
             }
             .frame(maxWidth: .infinity)
+
+            let additionalWindows = appState.snapshot.quotaWindows.filter {
+                $0.kind == .monthly || $0.kind == .unknown
+            }
+            if !additionalWindows.isEmpty {
+                HStack(alignment: .top, spacing: 14) {
+                    ForEach(additionalWindows) { window in
+                        let display = StatusPopoverFormatting.quotaWindowValueDisplay(
+                            window,
+                            status: appState.displayStatus
+                        )
+                        QuotaGaugeView(
+                            title: window.displayName,
+                            value: display.percentText,
+                            historyCaption: display.historyCaption,
+                            progress: quotaProgress(for: window.remainingPercent, state: window.state)
+                        )
+                    }
+                }
+                .frame(maxWidth: .infinity)
+            }
 
             if let resetCreditsSummary {
                 resetCreditsSection(resetCreditsSummary)
@@ -59,16 +82,16 @@ struct QuotaSummaryView: View {
         }
     }
 
-    private var fiveHourQuotaText: String {
-        StatusPopoverFormatting.quotaValueText(
+    private var fiveHourQuotaDisplay: StatusPopoverFormatting.QuotaValueDisplay {
+        StatusPopoverFormatting.quotaValueDisplay(
             for: .fiveHour,
             snapshot: appState.snapshot,
             status: appState.displayStatus
         )
     }
 
-    private var weeklyQuotaText: String {
-        StatusPopoverFormatting.quotaValueText(
+    private var weeklyQuotaDisplay: StatusPopoverFormatting.QuotaValueDisplay {
+        StatusPopoverFormatting.quotaValueDisplay(
             for: .weekly,
             snapshot: appState.snapshot,
             status: appState.displayStatus
@@ -223,7 +246,15 @@ struct QuotaSummaryView: View {
 struct QuotaGaugeView: View {
     let title: String
     let value: String
+    let historyCaption: String?
     let progress: Double?
+
+    init(title: String, value: String, historyCaption: String? = nil, progress: Double?) {
+        self.title = title
+        self.value = value
+        self.historyCaption = historyCaption
+        self.progress = progress
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -234,8 +265,14 @@ struct QuotaGaugeView: View {
             Text(value)
                 .font(.system(size: 22, weight: .semibold, design: .rounded))
                 .foregroundStyle(MetallicPalette.foreground)
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
+                .lineLimit(nil)
+                .fixedSize(horizontal: true, vertical: false)
+            if let historyCaption {
+                Text(historyCaption)
+                    .font(.caption2)
+                    .foregroundStyle(MetallicPalette.muted)
+                    .lineLimit(1)
+            }
             GeometryReader { geometry in
                 Capsule(style: .continuous)
                     .fill(MetallicPalette.track)

@@ -56,7 +56,8 @@ struct QuotaRefreshService: QuotaRefreshing {
                 refreshedAt: snapshot.refreshedAt,
                 dataSource: snapshot.dataSource,
                 errorMessage: snapshot.errorMessage,
-                schemaVersion: snapshot.schemaVersion
+                schemaVersion: snapshot.schemaVersion,
+                quotaWindows: snapshot.quotaWindows
             )
         } catch {
             AppLogger.refresh.warning("Reset credits detail fetch unavailable (\(sanitizedResetCreditsError(error), privacy: .public)); falling back to app-server count only")
@@ -77,7 +78,8 @@ struct QuotaRefreshService: QuotaRefreshing {
                 refreshedAt: snapshot.refreshedAt,
                 dataSource: snapshot.dataSource,
                 errorMessage: snapshot.errorMessage,
-                schemaVersion: snapshot.schemaVersion
+                schemaVersion: snapshot.schemaVersion,
+                quotaWindows: snapshot.quotaWindows
             )
         }
     }

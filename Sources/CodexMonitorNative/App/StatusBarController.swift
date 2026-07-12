@@ -94,12 +94,12 @@ final class StatusBarController {
             return "--%"
         }
 
-        let value = StatusPopoverFormatting.quotaValueText(
+        let value = StatusPopoverFormatting.quotaValueDisplay(
             for: .weekly,
             snapshot: snapshot,
             status: status
         )
-        return value
+        return value.percentText
     }
 
     private func tooltip(for snapshot: QuotaSnapshot, status: QuotaRefreshStatus) -> String {

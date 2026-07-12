@@ -307,6 +307,76 @@ final class StatusPopoverFormattingTests: XCTestCase {
         )
     }
 
+    func testQuotaValueDisplaySeparatesPercentFromHistoryCaption() {
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 71,
+            fiveHourQuotaPercent: 64,
+            weeklyQuotaState: .cached,
+            refreshedAt: .now,
+            dataSource: .real
+        )
+
+        let display = StatusPopoverFormatting.quotaValueDisplay(
+            for: .weekly,
+            snapshot: snapshot,
+            status: .success
+        )
+
+        XCTAssertEqual(display.percentText, "71%")
+        XCTAssertEqual(display.historyCaption, "（历史缓存）")
+        XCTAssertEqual(display.combinedText, "71%（历史缓存）")
+    }
+
+    func testQuotaSummaryLineIncludesMonthlyAndUnknownWindowsHonestly() {
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 70,
+            fiveHourQuotaPercent: 80,
+            refreshedAt: .now,
+            dataSource: .real,
+            quotaWindows: [
+                QuotaWindow(limitId: "codex", windowId: "primary", kind: .fiveHour, durationMinutes: 300, remainingPercent: 80),
+                QuotaWindow(limitId: "codex", windowId: "secondary", kind: .weekly, durationMinutes: 10080, remainingPercent: 70),
+                QuotaWindow(limitId: "codex", windowId: "monthly", kind: .monthly, durationMinutes: 43200, remainingPercent: 55),
+                QuotaWindow(limitId: "codex", windowId: "future", kind: .unknown, durationMinutes: 1234, remainingPercent: 90)
+            ]
+        )
+
+        let summary = StatusPopoverFormatting.quotaSummaryLine(snapshot: snapshot, status: .success)
+
+        XCTAssertTrue(summary.contains("月额度 55%"))
+        XCTAssertTrue(summary.contains("未知额度 90%"))
+    }
+
+    func testWeeklyDisplayFallsBackToTrustedLegacyCacheWhenResponseHasOnlyUnknownWindow() {
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 72,
+            fiveHourQuotaPercent: 0,
+            weeklyQuotaState: .cached,
+            fiveHourQuotaState: .unavailable,
+            refreshedAt: .now,
+            dataSource: .real,
+            quotaWindows: [
+                QuotaWindow(
+                    limitId: "codex",
+                    windowId: "primary",
+                    kind: .unknown,
+                    durationMinutes: nil,
+                    remainingPercent: 0,
+                    state: .invalid
+                )
+            ]
+        )
+
+        let display = StatusPopoverFormatting.quotaValueDisplay(
+            for: .weekly,
+            snapshot: snapshot,
+            status: .networkFailed
+        )
+
+        XCTAssertEqual(display.percentText, "72%")
+        XCTAssertEqual(display.historyCaption, "（历史缓存）")
+    }
+
     func testQuotaTooltipKeepsSameQuotaValuesWhileRefreshing() {
         let now = makeDate("2026-06-19T12:40:00Z")
         let resetAt = makeDate("2026-06-19T14:10:00Z")

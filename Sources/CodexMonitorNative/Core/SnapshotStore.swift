@@ -258,7 +258,8 @@ struct SnapshotStore {
             refreshedAt: snapshot.refreshedAt,
             dataSource: snapshot.dataSource,
             errorMessage: snapshot.errorMessage,
-            schemaVersion: QuotaSnapshot.currentSchemaVersion
+            schemaVersion: QuotaSnapshot.currentSchemaVersion,
+            quotaWindows: snapshot.quotaWindows
         )
     }
 

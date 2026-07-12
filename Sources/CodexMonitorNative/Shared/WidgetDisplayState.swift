@@ -165,8 +165,16 @@ struct WidgetDisplayState: Codable, Equatable {
         StatusPopoverFormatting.quotaValueText(for: .fiveHour, snapshot: snapshot, status: status)
     }
 
+    var fiveHourQuotaDisplay: StatusPopoverFormatting.QuotaValueDisplay {
+        StatusPopoverFormatting.quotaValueDisplay(for: .fiveHour, snapshot: snapshot, status: status)
+    }
+
     var weeklyQuotaText: String {
         StatusPopoverFormatting.quotaValueText(for: .weekly, snapshot: snapshot, status: status)
+    }
+
+    var weeklyQuotaDisplay: StatusPopoverFormatting.QuotaValueDisplay {
+        StatusPopoverFormatting.quotaValueDisplay(for: .weekly, snapshot: snapshot, status: status)
     }
 
     func recoveryDetails(now: Date = .now) -> StatusPopoverFormatting.RecoveryDetails {

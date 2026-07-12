@@ -11,6 +11,16 @@ enum StatusPopoverFormatting {
         let remainingText: String
     }
 
+    struct QuotaValueDisplay: Equatable {
+        let percentText: String
+        let historyCaption: String?
+
+        var combinedText: String {
+            guard let historyCaption else { return percentText }
+            return "\(percentText)\(historyCaption)"
+        }
+    }
+
     struct ResetBankDisplayItem: Equatable, Identifiable {
         let id: String
         let resetText: String
@@ -273,7 +283,19 @@ enum StatusPopoverFormatting {
         snapshot: QuotaSnapshot,
         status: QuotaRefreshStatus
     ) -> String {
-        "5小时额度 \(quotaValueText(for: .fiveHour, snapshot: snapshot, status: status)) · 周额度 \(quotaValueText(for: .weekly, snapshot: snapshot, status: status))"
+        let base = [
+            "5小时额度 \(quotaValueText(for: .fiveHour, snapshot: snapshot, status: status))",
+            "周额度 \(quotaValueText(for: .weekly, snapshot: snapshot, status: status))"
+        ]
+        guard !snapshot.quotaWindows.isEmpty else {
+            return base.joined(separator: " · ")
+        }
+
+        let extras = snapshot.quotaWindows
+            .filter { $0.kind == .monthly || $0.kind == .unknown }
+            .sorted { $0.id < $1.id }
+            .map { "\($0.displayName) \(quotaWindowValueDisplay($0, status: status).combinedText)" }
+        return (base + extras).joined(separator: " · ")
     }
 
     static func quotaValueText(
@@ -282,6 +304,29 @@ enum StatusPopoverFormatting {
         status: QuotaRefreshStatus
     ) -> String {
         quotaText(for: metric, snapshot: snapshot, status: status)
+    }
+
+    /// Returns the numeric value and its historical marker separately so UI
+    /// layouts cannot truncate the percentage while trying to fit a caption.
+    static func quotaValueDisplay(
+        for metric: QuotaMetric,
+        snapshot: QuotaSnapshot,
+        status: QuotaRefreshStatus
+    ) -> QuotaValueDisplay {
+        quotaDisplay(for: metric, snapshot: snapshot, status: status)
+    }
+
+    static func quotaWindowValueDisplay(
+        _ window: QuotaWindow,
+        status: QuotaRefreshStatus
+    ) -> QuotaValueDisplay {
+        guard showsQuotaValues(for: status), window.state.isDisplayable else {
+            return QuotaValueDisplay(percentText: status == .demoMode ? "演示" : "--", historyCaption: nil)
+        }
+        return QuotaValueDisplay(
+            percentText: "\(window.remainingPercent)%",
+            historyCaption: window.state == .cached ? "（历史缓存）" : nil
+        )
     }
 
     static func recoverySummaryLine(
@@ -493,40 +538,53 @@ enum StatusPopoverFormatting {
         snapshot: QuotaSnapshot,
         status: QuotaRefreshStatus
     ) -> String {
+        quotaDisplay(for: metric, snapshot: snapshot, status: status).combinedText
+    }
+
+    private static func quotaDisplay(
+        for metric: QuotaMetric,
+        snapshot: QuotaSnapshot,
+        status: QuotaRefreshStatus
+    ) -> QuotaValueDisplay {
         guard showsQuotaValues(for: status) else {
-            switch status {
-            case .demoMode:
-                return "演示"
-            case .success, .stale, .refreshing, .networkFailed, .authRequired, .parseFailed, .noSnapshot, .idle:
-                return "--"
-            }
+            return QuotaValueDisplay(percentText: status == .demoMode ? "演示" : "--", historyCaption: nil)
         }
 
         guard snapshot.dataSource == .real else {
-            return "--"
+            return QuotaValueDisplay(percentText: "--", historyCaption: nil)
+        }
+
+        if !snapshot.quotaWindows.isEmpty {
+            let kind: QuotaWindowKind = metric == .fiveHour ? .fiveHour : .weekly
+            if let window = snapshot.quotaWindows.first(where: { $0.kind == kind && $0.state.isDisplayable })
+                ?? snapshot.quotaWindows.first(where: { $0.kind == kind }) {
+                return quotaWindowValueDisplay(window, status: status)
+            }
+            // A new response can expose only an unknown window while an older
+            // persisted snapshot still supplies a trusted legacy projection.
+            // Keep that cache visible without relabelling the unknown window.
         }
 
         switch metric {
         case .fiveHour:
-            return quotaValue(
-                snapshot.fiveHourQuotaPercent,
-                state: snapshot.fiveHourQuotaState
-            )
+            return quotaValueDisplay(snapshot.fiveHourQuotaPercent, state: snapshot.fiveHourQuotaState)
         case .weekly:
-            return quotaValue(
-                snapshot.weeklyQuotaPercent,
-                state: snapshot.weeklyQuotaState
-            )
+            return quotaValueDisplay(snapshot.weeklyQuotaPercent, state: snapshot.weeklyQuotaState)
         }
     }
 
-    private static func quotaValue(_ value: Int, state: QuotaFieldState) -> String {
+    private static func quotaValueDisplay(_ value: Int, state: QuotaFieldState) -> QuotaValueDisplay {
         guard state.isDisplayable else {
-            return "--"
+            return QuotaValueDisplay(percentText: "--", historyCaption: nil)
         }
+        return QuotaValueDisplay(
+            percentText: "\(value)%",
+            historyCaption: state == .cached ? "（历史缓存）" : nil
+        )
+    }
 
-        let valueText = "\(value)%"
-        return state == .cached ? "\(valueText)（历史缓存）" : valueText
+    private static func quotaValue(_ value: Int, state: QuotaFieldState) -> String {
+        quotaValueDisplay(value, state: state).combinedText
     }
 
     private static func showsQuotaValues(for status: QuotaRefreshStatus) -> Bool {
