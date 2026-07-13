@@ -1,5 +1,82 @@
 import SwiftUI
 
+struct MechanicalEnergyCoreLayout: Equatable {
+    enum Scale: Equatable {
+        case compact
+        case widget
+        case standard
+    }
+
+    let scale: Scale
+
+    init(diameter: CGFloat) {
+        if diameter <= 44 {
+            scale = .compact
+        } else if diameter <= 76 {
+            scale = .widget
+        } else {
+            scale = .standard
+        }
+    }
+
+    var tickCount: Int {
+        switch scale {
+        case .compact: 8
+        case .widget: 16
+        case .standard: 18
+        }
+    }
+
+    var strutCount: Int {
+        switch scale {
+        case .compact: 4
+        case .widget, .standard: 8
+        }
+    }
+
+    var emitterCount: Int {
+        switch scale {
+        case .compact: 0
+        case .widget, .standard: 8
+        }
+    }
+
+    var armorSegmentCount: Int {
+        switch scale {
+        case .compact: 4
+        case .widget, .standard: 6
+        }
+    }
+
+    var usesBlurredCoreGlow: Bool { scale != .compact }
+    var usesOuterGlow: Bool { scale != .compact }
+    var usesCenterReadabilityPlate: Bool { scale == .widget }
+
+    var progressLineWidthFactor: CGFloat {
+        scale == .widget ? 0.065 : 0.055
+    }
+
+    var progressPaddingFactor: CGFloat {
+        scale == .widget ? 0.19 : 0.22
+    }
+
+    var coreOrbDiameterFactor: CGFloat {
+        switch scale {
+        case .compact: 0.30
+        case .widget: 0.38
+        case .standard: 0.34
+        }
+    }
+
+    var centerContentDiameterFactor: CGFloat {
+        switch scale {
+        case .compact: 0.28
+        case .widget: 0.42
+        case .standard: 0.32
+        }
+    }
+}
+
 struct MechanicalEnergyCore<CenterContent: View>: View {
     let diameter: CGFloat
     let rotation: Angle
@@ -19,16 +96,10 @@ struct MechanicalEnergyCore<CenterContent: View>: View {
     }
 
     var body: some View {
-        let compact = diameter < 52
-        let tickCount = compact ? 10 : 18
-        let strutCount = compact ? 6 : 8
-        let emitterCount = compact ? 6 : 8
+        let layout = MechanicalEnergyCoreLayout(diameter: diameter)
 
         ZStack {
-            Circle()
-                .fill(Color(red: 0.20, green: 0.015, blue: 0.025))
-                .shadow(color: Color.black.opacity(0.72), radius: diameter * 0.09, y: diameter * 0.05)
-                .shadow(color: MechanicalEnergyCorePalette.deepRed.opacity(0.58), radius: diameter * 0.07)
+            outerHousing(layout: layout)
 
             Circle()
                 .stroke(
@@ -62,19 +133,19 @@ struct MechanicalEnergyCore<CenterContent: View>: View {
                 .rotationEffect(rotation * 0.35)
 
             ZStack {
-                ForEach(0..<tickCount, id: \.self) { index in
+                ForEach(0..<layout.tickCount, id: \.self) { index in
                     Capsule(style: .continuous)
                         .fill(
                             index.isMultiple(of: 3)
-                                ? Color.white.opacity(compact ? 0.76 : 0.86)
+                                ? Color.white.opacity(layout.scale == .compact ? 0.78 : 0.86)
                                 : MechanicalEnergyCorePalette.redHighlight.opacity(0.92)
                         )
                         .frame(
-                            width: max(0.8, diameter * 0.022),
-                            height: diameter * (index.isMultiple(of: 3) ? 0.078 : 0.052)
+                            width: max(1, diameter * 0.022),
+                            height: diameter * (index.isMultiple(of: 3) ? 0.074 : 0.05)
                         )
-                        .offset(y: -diameter * 0.385)
-                        .rotationEffect(.degrees(Double(index) * 360 / Double(tickCount)))
+                        .offset(y: -diameter * 0.38)
+                        .rotationEffect(.degrees(Double(index) * 360 / Double(layout.tickCount)))
                 }
             }
             .rotationEffect(rotation)
@@ -94,7 +165,7 @@ struct MechanicalEnergyCore<CenterContent: View>: View {
                 .padding(diameter * 0.19)
 
             ZStack {
-                ForEach(0..<strutCount, id: \.self) { index in
+                ForEach(0..<layout.strutCount, id: \.self) { index in
                     Capsule(style: .continuous)
                         .fill(
                             LinearGradient(
@@ -107,9 +178,12 @@ struct MechanicalEnergyCore<CenterContent: View>: View {
                                 endPoint: .bottom
                             )
                         )
-                        .frame(width: diameter * 0.045, height: diameter * 0.17)
+                        .frame(
+                            width: diameter * (layout.scale == .compact ? 0.052 : 0.045),
+                            height: diameter * (layout.scale == .compact ? 0.15 : 0.17)
+                        )
                         .offset(y: -diameter * 0.235)
-                        .rotationEffect(.degrees(Double(index) * 360 / Double(strutCount)))
+                        .rotationEffect(.degrees(Double(index) * 360 / Double(layout.strutCount)))
                 }
             }
             .rotationEffect(Angle(degrees: -rotation.degrees * 0.55))
@@ -126,9 +200,9 @@ struct MechanicalEnergyCore<CenterContent: View>: View {
                         ],
                         center: .center
                     ),
-                    lineWidth: diameter * 0.065
+                    lineWidth: diameter * (layout.scale == .compact ? 0.055 : 0.065)
                 )
-                .padding(diameter * 0.225)
+                .padding(diameter * (layout.scale == .compact ? 0.215 : 0.225))
 
             if let progress {
                 Circle()
@@ -143,38 +217,45 @@ struct MechanicalEnergyCore<CenterContent: View>: View {
                             center: .center
                         ),
                         style: StrokeStyle(
-                            lineWidth: diameter * 0.055,
+                            lineWidth: diameter * layout.progressLineWidthFactor,
                             lineCap: .round,
                             lineJoin: .round
                         )
                     )
                     .rotationEffect(.degrees(-90))
-                    .padding(diameter * 0.22)
-                    .shadow(color: MechanicalEnergyCorePalette.blue.opacity(0.64), radius: diameter * 0.07)
+                    .padding(diameter * layout.progressPaddingFactor)
+                    .shadow(
+                        color: MechanicalEnergyCorePalette.blue.opacity(layout.scale == .compact ? 0 : 0.52),
+                        radius: layout.scale == .widget ? 2 : diameter * 0.07
+                    )
             }
 
-            ZStack {
-                ForEach(0..<emitterCount, id: \.self) { index in
-                    Capsule(style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: [Color.white, MechanicalEnergyCorePalette.blueHighlight],
-                                startPoint: .top,
-                                endPoint: .bottom
+            if layout.emitterCount > 0 {
+                ZStack {
+                    ForEach(0..<layout.emitterCount, id: \.self) { index in
+                        Capsule(style: .continuous)
+                            .fill(
+                                LinearGradient(
+                                    colors: [Color.white, MechanicalEnergyCorePalette.blueHighlight],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
                             )
-                        )
-                        .frame(width: diameter * 0.045, height: diameter * 0.12)
-                        .offset(y: -diameter * 0.17)
-                        .rotationEffect(.degrees(Double(index) * 360 / Double(emitterCount)))
-                        .shadow(color: MechanicalEnergyCorePalette.blue.opacity(0.62), radius: diameter * 0.025)
+                            .frame(width: diameter * 0.04, height: diameter * 0.105)
+                            .offset(y: -diameter * 0.17)
+                            .rotationEffect(.degrees(Double(index) * 360 / Double(layout.emitterCount)))
+                            .shadow(color: MechanicalEnergyCorePalette.blue.opacity(0.52), radius: 1.25)
+                    }
                 }
+                .rotationEffect(rotation * 0.22)
             }
-            .rotationEffect(rotation * 0.22)
 
-            Circle()
-                .fill(MechanicalEnergyCorePalette.blue.opacity(0.36))
-                .frame(width: diameter * 0.46, height: diameter * 0.46)
-                .blur(radius: diameter * 0.075)
+            if layout.usesBlurredCoreGlow {
+                Circle()
+                    .fill(MechanicalEnergyCorePalette.blue.opacity(layout.scale == .widget ? 0.25 : 0.36))
+                    .frame(width: diameter * 0.46, height: diameter * 0.46)
+                    .blur(radius: layout.scale == .widget ? 3 : diameter * 0.075)
+            }
 
             Circle()
                 .fill(
@@ -190,27 +271,77 @@ struct MechanicalEnergyCore<CenterContent: View>: View {
                         endRadius: diameter * 0.21
                     )
                 )
-                .frame(width: diameter * 0.34, height: diameter * 0.34)
+                .frame(
+                    width: diameter * layout.coreOrbDiameterFactor,
+                    height: diameter * layout.coreOrbDiameterFactor
+                )
                 .overlay {
                     Circle()
-                        .stroke(Color.white.opacity(0.58), lineWidth: max(0.6, diameter * 0.012))
+                        .stroke(Color.white.opacity(0.66), lineWidth: max(0.75, diameter * 0.012))
                 }
-                .shadow(color: Color.white.opacity(0.68), radius: diameter * 0.025)
-                .shadow(color: MechanicalEnergyCorePalette.blue.opacity(0.82), radius: diameter * 0.09)
+                .shadow(
+                    color: Color.white.opacity(layout.scale == .compact ? 0.46 : 0.68),
+                    radius: layout.scale == .compact ? 0.75 : diameter * 0.025
+                )
+                .shadow(
+                    color: MechanicalEnergyCorePalette.blue.opacity(layout.scale == .compact ? 0.42 : 0.74),
+                    radius: layout.scale == .compact ? 1.25 : (layout.scale == .widget ? 3 : diameter * 0.09)
+                )
+
+            if layout.usesCenterReadabilityPlate {
+                Circle()
+                    .fill(
+                        RadialGradient(
+                            colors: [
+                                Color(red: 0.035, green: 0.11, blue: 0.16).opacity(0.74),
+                                Color(red: 0.015, green: 0.055, blue: 0.09).opacity(0.88)
+                            ],
+                            center: .center,
+                            startRadius: 0,
+                            endRadius: diameter * 0.16
+                        )
+                    )
+                    .frame(width: diameter * 0.32, height: diameter * 0.32)
+                    .overlay {
+                        Circle()
+                            .stroke(MechanicalEnergyCorePalette.blueHighlight.opacity(0.62), lineWidth: 0.8)
+                    }
+            }
 
             centerContent
-                .frame(width: diameter * 0.32, height: diameter * 0.32)
+                .frame(
+                    width: diameter * layout.centerContentDiameterFactor,
+                    height: diameter * layout.centerContentDiameterFactor
+                )
         }
         .frame(width: diameter, height: diameter)
     }
 
+    @ViewBuilder
+    private func outerHousing(layout: MechanicalEnergyCoreLayout) -> some View {
+        let housing = Circle()
+            .fill(Color(red: 0.20, green: 0.015, blue: 0.025))
+
+        if layout.usesOuterGlow {
+            housing
+                .shadow(color: Color.black.opacity(0.68), radius: diameter * 0.07, y: diameter * 0.04)
+                .shadow(color: MechanicalEnergyCorePalette.deepRed.opacity(0.48), radius: diameter * 0.05)
+        } else {
+            housing
+                .shadow(color: Color.black.opacity(0.62), radius: 1.5, y: 1)
+        }
+    }
+
     private var segmentedArmorRing: some View {
-        ZStack {
-            ForEach(0..<6, id: \.self) { index in
+        let layout = MechanicalEnergyCoreLayout(diameter: diameter)
+
+        return ZStack {
+            ForEach(0..<layout.armorSegmentCount, id: \.self) { index in
                 Circle()
                     .trim(
-                        from: CGFloat(index) / 6 + 0.012,
-                        to: CGFloat(index) / 6 + 0.118
+                        from: CGFloat(index) / CGFloat(layout.armorSegmentCount) + 0.012,
+                        to: CGFloat(index) / CGFloat(layout.armorSegmentCount)
+                            + (layout.scale == .compact ? 0.17 : 0.118)
                     )
                     .stroke(
                         index.isMultiple(of: 2)

@@ -83,6 +83,40 @@ final class StatusPopoverSnapshotTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: outputURL.path))
     }
 
+    func testRenderMechanicalEnergyCoreSizeMatrix() throws {
+        let outputURL = URL(fileURLWithPath: "/private/tmp/codex-monitor-energy-core-sizes.png")
+        let view = AnyView(
+            HStack(spacing: 18) {
+                MechanicalEnergyCore(diameter: 40, rotation: .degrees(18)) {
+                    EmptyView()
+                }
+
+                MechanicalEnergyCore(diameter: 72, progress: 0.71) {
+                    Text("71")
+                        .font(.system(size: 19, weight: .heavy, design: .rounded))
+                        .foregroundStyle(.white)
+                        .monospacedDigit()
+                }
+
+                MechanicalEnergyCore(diameter: 74, progress: 0.64) {
+                    Text("64")
+                        .font(.system(size: 20, weight: .heavy, design: .rounded))
+                        .foregroundStyle(.white)
+                        .monospacedDigit()
+                }
+            }
+            .padding(18)
+            .background(Color(red: 0.08, green: 0.01, blue: 0.02))
+        )
+        let hostingView = NSHostingView(rootView: view)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 278, height: 110)
+        hostingView.layoutSubtreeIfNeeded()
+
+        try saveSnapshot(of: hostingView, to: outputURL)
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outputURL.path))
+    }
+
     func testQuotaSummaryViewSourceDoesNotRenderRateLimitBanksSection() throws {
         let repoRoot = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -178,14 +212,20 @@ final class StatusPopoverSnapshotTests: XCTestCase {
             contentsOf: repoRoot.appendingPathComponent("Sources/CodexMonitorNative/UI/MechanicalEnergyCore.swift"),
             encoding: .utf8
         )
+        let statusSource = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/CodexMonitorNative/UI/StatusPopoverView.swift"),
+            encoding: .utf8
+        )
 
         XCTAssertTrue(reactorSource.contains("MechanicalEnergyCore"))
-        XCTAssertTrue(reactorSource.contains("TimelineView(.animation(minimumInterval: 1.0 / 24.0"))
+        XCTAssertTrue(reactorSource.contains("TimelineView(.animation(minimumInterval: 1.0 / 12.0"))
+        XCTAssertTrue(reactorSource.contains("allowsAnimation"))
+        XCTAssertTrue(statusSource.contains("ReactorView(isPanelActive: isPanelActive, allowsAnimation: false)"))
         XCTAssertTrue(coreSource.contains("segmentedArmorRing"))
         XCTAssertTrue(coreSource.contains("AngularGradient"))
         XCTAssertTrue(coreSource.contains("RadialGradient"))
-        XCTAssertTrue(coreSource.contains("ForEach(0..<strutCount"))
-        XCTAssertTrue(coreSource.contains("ForEach(0..<emitterCount"))
+        XCTAssertTrue(coreSource.contains("ForEach(0..<layout.strutCount"))
+        XCTAssertTrue(coreSource.contains("ForEach(0..<layout.emitterCount"))
         XCTAssertFalse(reactorSource.contains("triangle.fill"))
         XCTAssertFalse(reactorSource.contains("dash: [3, 5]"))
     }

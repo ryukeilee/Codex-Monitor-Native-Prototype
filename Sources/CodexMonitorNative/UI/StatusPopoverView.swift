@@ -93,7 +93,7 @@ struct StatusPopoverView: View {
 
     private var header: some View {
         HStack(alignment: .center, spacing: 8) {
-            ReactorView(isPanelActive: isPanelActive)
+            ReactorView(isPanelActive: isPanelActive, allowsAnimation: false)
                 .frame(width: 40, height: 40)
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 5) {

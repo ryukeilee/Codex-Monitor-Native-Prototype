@@ -367,8 +367,9 @@ struct CodexMonitorWidgetView: View {
                 .foregroundStyle(.white)
                 .monospacedDigit()
                 .lineLimit(1)
-                .minimumScaleFactor(0.64)
-                .shadow(color: Color(red: 0.52, green: 0.90, blue: 1.0).opacity(0.24), radius: 7)
+                .minimumScaleFactor(0.72)
+                .allowsTightening(true)
+                .shadow(color: Color(red: 0.52, green: 0.90, blue: 1.0).opacity(0.30), radius: 2)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .offset(y: isSmall ? -1 : -3)

@@ -54,12 +54,18 @@ struct MetallicPanelBackground<Content: View>: View {
 
 struct ReactorView: View {
     let isPanelActive: Bool
+    let allowsAnimation: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    init(isPanelActive: Bool, allowsAnimation: Bool = true) {
+        self.isPanelActive = isPanelActive
+        self.allowsAnimation = allowsAnimation
+    }
 
     var body: some View {
         Group {
-            if isPanelActive && !reduceMotion {
-                TimelineView(.animation(minimumInterval: 1.0 / 24.0, paused: false)) { context in
+            if isPanelActive && allowsAnimation && !reduceMotion {
+                TimelineView(.animation(minimumInterval: 1.0 / 12.0, paused: false)) { context in
                     reactorCore(phase: context.date.timeIntervalSinceReferenceDate)
                 }
             } else {
