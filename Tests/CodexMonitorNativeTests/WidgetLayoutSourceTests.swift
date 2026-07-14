@@ -11,7 +11,7 @@ final class WidgetLayoutSourceTests: XCTestCase {
 
         XCTAssertTrue(source.contains(".overlay(alignment: .bottom) {"))
         XCTAssertTrue(source.contains("footerDock(resetCreditFooterText)"))
-        XCTAssertTrue(source.contains(".padding(.top, isSmall ? 14 : 11)"))
+        XCTAssertTrue(source.contains(".padding(.top, isSmall ? 14 : 5)"))
         XCTAssertTrue(source.contains(".padding(.top, isSmall ? 4 : 5)"))
         XCTAssertTrue(source.contains(".frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)"))
         XCTAssertTrue(source.contains(".containerBackground(for: .widget) {"))

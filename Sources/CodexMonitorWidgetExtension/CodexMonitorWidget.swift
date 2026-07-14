@@ -70,7 +70,7 @@ struct CodexMonitorWidgetView: View {
 
     var body: some View {
         dashboardLayout
-            .padding(.top, isSmall ? 14 : 11)
+            .padding(.top, isSmall ? 14 : 5)
             .padding(.horizontal, isSmall ? 13 : 8)
             .padding(.bottom, isSmall ? 11 : 10)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
