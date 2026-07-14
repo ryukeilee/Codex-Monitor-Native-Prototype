@@ -186,14 +186,10 @@ final class StatusPopoverSnapshotTests: XCTestCase {
         XCTAssertFalse(source.contains("rateLimitBankDiagnosticsSummary("))
         XCTAssertFalse(source.contains("resetBankItems"))
         XCTAssertTrue(source.contains("DisclosureGroup(\"字段\", isExpanded"))
-        XCTAssertTrue(source.contains("DisclosureGroup("))
+        XCTAssertTrue(source.contains("DisclosureGroup(isExpanded: $showsAllResetCredits)"))
         XCTAssertTrue(source.contains("\"全部 \\("))
-        XCTAssertTrue(source.contains("Image(systemName: \"chevron.right\")"))
-        XCTAssertEqual(
-            source.components(separatedBy: "Image(systemName: \"chevron.right\")").count - 1,
-            1
-        )
-        XCTAssertTrue(source.contains(".rotationEffect(.degrees(showsAllResetCredits ? 90 : 0))"))
+        XCTAssertFalse(source.contains("Image(systemName: \"chevron.right\")"))
+        XCTAssertFalse(source.contains(".rotationEffect(.degrees(showsAllResetCredits ? 90 : 0))"))
         XCTAssertTrue(source.contains("MetallicPalette.redBright"))
         XCTAssertFalse(source.contains("Text(\"当前状态\")"))
         XCTAssertFalse(source.contains("Text(\"重置次数\")"))
@@ -239,6 +235,96 @@ final class StatusPopoverSnapshotTests: XCTestCase {
         XCTAssertFalse(source.contains("Color.white.opacity(0.72)"))
         XCTAssertFalse(source.contains(".opacity(isLowEmphasis ? 0.62 : 1)"))
         XCTAssertFalse(source.contains(".scaleEffect(isLowEmphasis ? 0.86 : 1)"))
+    }
+
+    func testPopoverCustomControlsUseNativeSemanticsAndKeyboardContracts() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let statusSource = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/CodexMonitorNative/UI/StatusPopoverView.swift"),
+            encoding: .utf8
+        )
+        let quotaSource = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/CodexMonitorNative/UI/QuotaSummaryView.swift"),
+            encoding: .utf8
+        )
+        let componentSource = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/CodexMonitorNative/UI/MetallicPanelComponents.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(statusSource.contains("Toggle(isOn: launchAtLoginBinding)"))
+        XCTAssertTrue(statusSource.contains(".toggleStyle(.button)"))
+        XCTAssertFalse(statusSource.contains("Button {\n            launchAtLoginBinding.wrappedValue.toggle()"))
+        XCTAssertTrue(statusSource.contains(".keyboardShortcut(\"r\", modifiers: .command)"))
+        XCTAssertTrue(statusSource.contains(".keyboardShortcut(\"q\", modifiers: .command)"))
+        XCTAssertFalse(statusSource.contains("@FocusState"))
+        XCTAssertTrue(statusSource.contains("launch-at-login-toggle"))
+        XCTAssertTrue(statusSource.contains("refresh-button"))
+        XCTAssertTrue(statusSource.contains("quit-button"))
+        XCTAssertTrue(statusSource.contains("self-check-disclosure"))
+        XCTAssertTrue(statusSource.contains("diagnostics-disclosure"))
+
+        XCTAssertTrue(quotaSource.contains("DisclosureGroup(isExpanded: $showsAllResetCredits)"))
+        XCTAssertFalse(quotaSource.contains("withAnimation(.easeInOut(duration: 0.18))"))
+        XCTAssertTrue(quotaSource.contains("reset-credits-disclosure"))
+        XCTAssertTrue(quotaSource.contains("reset-credit-fields-disclosure"))
+        XCTAssertTrue(quotaSource.contains("showsAllResetCredits ? \"已展开\" : \"已折叠\""))
+        XCTAssertTrue(quotaSource.contains("showsResetCreditFields ? \"已展开\" : \"已折叠\""))
+
+        XCTAssertTrue(componentSource.contains(".accessibilityHidden(true)"))
+        XCTAssertFalse(componentSource.contains(".accessibilityLabel(\"额度反应堆\")"))
+    }
+
+    func testPopoverCommandShortcutsInvokeActionsAndRespectRefreshingState() async {
+        let suiteName = "CodexMonitorNativeTests.keyboard.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let appState = AppState(
+            snapshotStore: SnapshotStore(defaults: defaults, key: "snapshot"),
+            refreshService: SuspendedSnapshotRefreshService()
+        )
+        defer { appState.shutdown() }
+
+        let launchManager = LaunchAtLoginManager(
+            loginItemManager: SnapshotLoginItemManager(status: .enabled)
+        )
+        var refreshCount = 0
+        var quitCount = 0
+        let hostingView = NSHostingView(
+            rootView: StatusPopoverView(
+                appState: appState,
+                launchAtLoginManager: launchManager,
+                onRefresh: { refreshCount += 1 },
+                onQuit: { quitCount += 1 }
+            )
+        )
+        hostingView.frame = NSRect(x: 0, y: 0, width: 340, height: 560)
+
+        let window = NSWindow(
+            contentRect: hostingView.frame,
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hostingView
+        window.makeKey()
+        hostingView.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(performCommandShortcut("r", keyCode: 15, in: window))
+        XCTAssertEqual(refreshCount, 1)
+
+        appState.refresh(trigger: .manual)
+        await Task.yield()
+        hostingView.layoutSubtreeIfNeeded()
+        XCTAssertFalse(performCommandShortcut("r", keyCode: 15, in: window))
+        XCTAssertEqual(refreshCount, 1)
+
+        XCTAssertTrue(performCommandShortcut("q", keyCode: 12, in: window))
+        XCTAssertEqual(quitCount, 1)
     }
 
     func testMetallicPopoverSourceContainsReferencePanelSections() throws {
@@ -310,6 +396,7 @@ final class StatusPopoverSnapshotTests: XCTestCase {
 
         XCTAssertTrue(source.contains("let onLayoutChange: (Bool) -> Void"))
         XCTAssertTrue(source.contains("@Binding private var showsResetCreditFields"))
+        XCTAssertTrue(source.contains("DisclosureGroup(isExpanded: $showsAllResetCredits)"))
         XCTAssertTrue(source.contains("onChange(of: showsAllResetCredits)"))
         XCTAssertTrue(source.contains("onChange(of: showsResetCreditFields)"))
         XCTAssertTrue(source.contains("字段详情"))
@@ -512,6 +599,22 @@ final class StatusPopoverSnapshotTests: XCTestCase {
         try data.write(to: url)
     }
 
+    private func performCommandShortcut(_ character: String, keyCode: UInt16, in window: NSWindow) -> Bool {
+        let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: .command,
+            timestamp: 0,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: character,
+            charactersIgnoringModifiers: character,
+            isARepeat: false,
+            keyCode: keyCode
+        )!
+        return window.performKeyEquivalent(with: event)
+    }
+
     private func makeDate(_ iso8601: String) -> Date {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
@@ -524,6 +627,13 @@ private struct SnapshotRefreshService: QuotaRefreshing {
 
     func refresh(basedOn currentSnapshot: QuotaSnapshot) async throws -> QuotaSnapshot {
         snapshot
+    }
+}
+
+private struct SuspendedSnapshotRefreshService: QuotaRefreshing {
+    func refresh(basedOn currentSnapshot: QuotaSnapshot) async throws -> QuotaSnapshot {
+        try await Task.sleep(for: .seconds(60))
+        return currentSnapshot
     }
 }
 

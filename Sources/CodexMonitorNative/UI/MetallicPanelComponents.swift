@@ -72,8 +72,8 @@ struct ReactorView: View {
                 reactorCore(phase: 0)
             }
         }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("额度反应堆")
+        .accessibilityHidden(true)
+        .allowsHitTesting(false)
     }
 
     @ViewBuilder

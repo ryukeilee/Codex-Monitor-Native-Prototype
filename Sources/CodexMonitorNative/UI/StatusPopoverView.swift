@@ -133,7 +133,7 @@ struct StatusPopoverView: View {
                 .lineLimit(1)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Codex Monitor Native，\(statusLine)")
+        .accessibilityLabel("Codex Monitor Native，\(statusLine)，更新时间 \(refreshTimeText)")
     }
 
     private var statusLine: String {
@@ -198,9 +198,7 @@ struct StatusPopoverView: View {
     private func launchAtLoginToggle(controlSize: ControlSize, isLowEmphasis: Bool) -> some View {
         let dimension: CGFloat = isLowEmphasis ? 22 : 24
 
-        return Button {
-            launchAtLoginBinding.wrappedValue.toggle()
-        } label: {
+        return Toggle(isOn: launchAtLoginBinding) {
             ZStack {
                 Circle()
                     .fill(
@@ -237,10 +235,14 @@ struct StatusPopoverView: View {
             )
             .contentShape(Rectangle())
         }
+            .toggleStyle(.button)
             .buttonStyle(.plain)
             .disabled(launchAtLoginManager.isUpdating)
             .accessibilityLabel("开机启动")
-            .accessibilityValue(launchAtLoginManager.shouldLaunchAtLogin ? "已开启" : "已关闭")
+            .accessibilityValue(launchAtLoginAccessibilityValue)
+            .accessibilityHint("开启或关闭登录时自动启动")
+            .accessibilityIdentifier("launch-at-login-toggle")
+            .help("开机启动")
     }
 
     private var actions: some View {
@@ -252,6 +254,11 @@ struct StatusPopoverView: View {
             .buttonStyle(.borderless)
             .foregroundStyle(MetallicPalette.redBright)
             .disabled(presentationSnapshot.status == .refreshing)
+            .keyboardShortcut("r", modifiers: .command)
+            .accessibilityLabel("刷新额度")
+            .accessibilityValue(presentationSnapshot.status == .refreshing ? "正在刷新" : "可刷新")
+            .accessibilityHint("立即更新额度数据")
+            .accessibilityIdentifier("refresh-button")
 
             Spacer()
 
@@ -261,6 +268,10 @@ struct StatusPopoverView: View {
             }
             .buttonStyle(.borderless)
             .foregroundStyle(MetallicPalette.foreground)
+            .keyboardShortcut("q", modifiers: .command)
+            .accessibilityLabel("退出 Codex Monitor")
+            .accessibilityHint("退出应用")
+            .accessibilityIdentifier("quit-button")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 2)
@@ -280,6 +291,9 @@ struct StatusPopoverView: View {
         }
         .font(.caption)
         .tint(MetallicPalette.muted)
+        .accessibilityValue(showsSelfCheck ? "已展开" : "已折叠")
+        .accessibilityHint("显示或隐藏自检信息")
+        .accessibilityIdentifier("self-check-disclosure")
 
         if hasDiagnosticsContent {
             DisclosureGroup("诊断", isExpanded: $showsDiagnostics) {
@@ -293,7 +307,17 @@ struct StatusPopoverView: View {
             }
             .font(.caption)
             .tint(MetallicPalette.muted)
+            .accessibilityValue(showsDiagnostics ? "已展开" : "已折叠")
+            .accessibilityHint("显示或隐藏诊断信息")
+            .accessibilityIdentifier("diagnostics-disclosure")
         }
+    }
+
+    private var launchAtLoginAccessibilityValue: String {
+        if launchAtLoginManager.isUpdating {
+            return "正在更新"
+        }
+        return launchAtLoginManager.shouldLaunchAtLogin ? "已开启" : "已关闭"
     }
 
     private var environmentInfoLine: String? {

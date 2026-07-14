@@ -114,29 +114,7 @@ struct QuotaSummaryView: View {
                 let disclosureTitle = summary.additionalCreditItems.isEmpty && summary.featuredCreditItem == nil
                     ? "字段详情"
                     : "全部 \(summary.additionalCreditItems.count + (summary.featuredCreditItem == nil ? 0 : 1))"
-                Button {
-                    withAnimation(.easeInOut(duration: 0.18)) {
-                        showsAllResetCredits.toggle()
-                    }
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "chevron.right")
-                            .font(.caption2.weight(.black))
-                            .foregroundStyle(MetallicPalette.redBright)
-                            .rotationEffect(.degrees(showsAllResetCredits ? 90 : 0))
-                            .frame(width: 12, height: 16)
-                        Text(disclosureTitle)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(MetallicPalette.foreground)
-                        Spacer()
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(disclosureTitle)
-                .accessibilityValue(showsAllResetCredits ? "已展开" : "已折叠")
-
-                if showsAllResetCredits {
+                DisclosureGroup(isExpanded: $showsAllResetCredits) {
                     VStack(alignment: .leading, spacing: 8) {
                         if let featured = summary.featuredCreditItem {
                             resetCreditDetailRow(featured)
@@ -158,10 +136,26 @@ struct QuotaSummaryView: View {
                             }
                             .font(.caption)
                             .tint(MetallicPalette.muted)
+                            .accessibilityValue(showsResetCreditFields ? "已展开" : "已折叠")
+                            .accessibilityHint("显示或隐藏重置额度字段")
+                            .accessibilityIdentifier("reset-credit-fields-disclosure")
                         }
                     }
                     .padding(.top, 8)
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(disclosureTitle)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(MetallicPalette.foreground)
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
                 }
+                .tint(MetallicPalette.redBright)
+                .accessibilityLabel("重置额度详情，\(disclosureTitle)")
+                .accessibilityValue(showsAllResetCredits ? "已展开" : "已折叠")
+                .accessibilityHint("显示或隐藏重置额度详情")
+                .accessibilityIdentifier("reset-credits-disclosure")
             }
         }
         .padding(.horizontal, 10)
@@ -270,7 +264,7 @@ struct QuotaGaugeView: View {
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
-            "\(item.label) \(item.percentText)，\(item.stateText)，恢复 \(item.resetText)"
+            "\(item.label) \(item.percentText)，\(item.stateText)，恢复 \(item.resetText)，还需 \(item.resetRemainingText)"
         )
     }
 }

@@ -17,14 +17,14 @@ swift test
 
 说明：
 
-- `./script/build_and_run.sh --verify` 是统一安装验收入口：它会关闭旧实例、构建并签名 app 与 Widget、覆盖安装到 `/Applications/CodexMonitorNative.app`，启动最终安装包，并核对运行进程路径/版本及 `pluginkit` 的 Widget 路径。
+- `./script/build_and_run.sh --verify` 仍是统一安装验收入口：它会关闭旧实例、构建并签名 app 与 Widget、覆盖安装到 `/Applications/CodexMonitorNative.app`，启动最终安装包，并核对运行进程路径/版本及 `pluginkit` 的 Widget 路径。
 - 本轮没有重新执行 `swift build -c release` 或 `./script/build_and_run.sh --telemetry`，因此它们不计入当前自动验证证据。
 
 ## Automated Evidence
 
 以下内容有当前代码、测试或本轮命令结果作为直接证据：
 
-- App 可以通过 SwiftPM 成功构建，`./script/build_and_run.sh --verify` 可完成覆盖安装，确认实际运行进程来自最终安装路径，并确认 Widget 注册路径属于该安装包。
+- App 可以通过 SwiftPM 成功构建；统一安装验收已确认运行进程来自 `/Applications/CodexMonitorNative.app`，版本为 `0.1.0 (1)`，Widget 注册路径属于同一安装包且版本一致。
 - 菜单栏 App 以 `LSUIElement = true` 方式打包，无常规主窗口。
 - 菜单栏标题策略只显示可信周额度百分比或 `--%`，不会用 5 小时、月或未知窗口替代周额度。
 - Popover 包含：
@@ -35,6 +35,10 @@ swift test
 - Popover、status-item tooltip 与 Widget 共用同一个动态额度窗口投影：按 5 小时、周、月排序，只展示语义明确且当前可信的窗口。
 - 投影只生成当前实时且可信的 item，并把百分比、进度、字段状态和恢复时间绑定在一起；同语义已知窗口只保留 canonical 来源，只有语义动态窗口缺失时才使用实时 legacy 5 小时/周字段补位。
 - Popover 使用两列动态网格；窗口超过两行时切换到有高度上限的滚动视口，窗口集合变化通过 `StatusPopoverView` 的布局信号触发 `PopoverController` 重新测量。
+- Popover 的圆形开机启动控件由系统 `Toggle` 承载，重置额度、自检、诊断和字段详情由系统 `DisclosureGroup` 承载；视觉样式不再依赖普通按钮模拟开关或披露语义。
+- Popover 保持系统原生的 Tab 阅读顺序，不用底部操作抢占焦点或改变初始滚动位置；同时支持 `Command-R` 刷新、`Command-Q` 退出和 `Escape` 关闭，交互控件暴露稳定的辅助功能标识及动态开关、展开和刷新状态。
+- 进程内键盘测试把真实 `StatusPopoverView` 挂到隐藏 `NSWindow`，发送 `Command-R` / `Command-Q` 键等价事件，直接证明动作路由有效，并证明刷新状态发布到 SwiftUI 后禁用按钮会拦截重复 `Command-R`。
+- 纯装饰能量核心不进入辅助功能导航；顶部合并元素读出状态与更新时间，额度卡片同时读出恢复时间和剩余时间。
 - Widget 小尺寸容量为 1、中尺寸容量为 3；only-monthly 会成为真实 primary，unknown-only 不生成额度项。
 - 真实刷新失败时会保留上次成功的真实快照，不会立即清空菜单栏数字。
 - 真实链路错误可以区分为至少以下几类：
@@ -56,6 +60,7 @@ swift test
 - sleep / wake notification wiring
 - 动态投影稳定排序、known-kind 去重、legacy fallback 边界、未知/缓存/无效字段过滤与 reset 一致性
 - Popover only-weekly、only-unknown、5 小时 + 周 + 月、多窗口行数与滚动信号
+- Popover `Command-R` / `Command-Q` 的真实 `NSWindow` 键盘路由，以及刷新中禁用态对重复快捷键的拦截
 - Widget only-monthly、only-unknown、primary 选择和 overflow 计数
 - 旧 Widget persisted payload 解码与 envelope 向后兼容
 
@@ -146,6 +151,24 @@ CODEX_MONITOR_FORCE_REFRESH_FAILURE=1 ./script/build_and_run.sh
 - 月窗口保持真实语义；未知、缓存、无效或演示字段不生成额度卡片，重复的已知语义只显示 canonical 来源。
 - Widget compact primary 可预测，中尺寸最多展示三个已知窗口。
 - 无可信周窗口时，菜单栏始终为 `--%`，不会取用月或未知窗口。
+
+### 6. Popover Keyboard and Accessibility
+
+步骤：
+
+1. 在“系统设置 → 键盘”开启“键盘导航”，让 macOS 按系统约定把 Tab 焦点交给按钮、开关和披露控件。
+2. 打开 Popover，不点击内容，确认内容仍位于顶部且没有因底部控件获取焦点而滚动。
+3. 使用 `Tab` / `Shift-Tab` 遍历所有当前可见控件，确认首次 Tab 按阅读顺序进入控件、焦点环可见，且顺序与面板从上到下的阅读顺序一致。
+4. 聚焦开机启动与各披露控件，使用空格及系统披露键盘操作切换状态；再用 `Command-R` 刷新、`Escape` 关闭面板。
+5. 开启 VoiceOver 重复上述路径，检查控件角色、名称、值、禁用状态与展开状态；确认纯装饰能量核心不进入导航。
+6. 展开重置额度详情，确认额度卡片读出百分比、状态、恢复时间与“还需”时间。
+
+预期结果：
+
+- 开机启动以开关类控件呈现并读出“已开启 / 已关闭 / 正在更新”，不会被误报为无状态普通按钮。
+- 所有披露控件的键盘操作和 VoiceOver 状态保持一致，展开或折叠后立即更新读出值。
+- 刷新、退出、关闭均有稳定键盘路径；刷新期间不可重复触发，关闭后没有残留焦点。
+- 辅助功能导航顺序只包含有意义的状态与控件，不停留在装饰图形上。
 
 ## Release Gate
 
