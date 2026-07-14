@@ -188,6 +188,9 @@ final class StatusPopoverSnapshotTests: XCTestCase {
         XCTAssertTrue(source.contains("DisclosureGroup(\"字段\", isExpanded"))
         XCTAssertTrue(source.contains("DisclosureGroup("))
         XCTAssertTrue(source.contains("\"全部 \\("))
+        XCTAssertTrue(source.contains("Image(systemName: \"chevron.right\")"))
+        XCTAssertTrue(source.contains(".rotationEffect(.degrees(showsAllResetCredits ? 90 : 0))"))
+        XCTAssertTrue(source.contains("MetallicPalette.redBright"))
         XCTAssertFalse(source.contains("Text(\"当前状态\")"))
         XCTAssertFalse(source.contains("Text(\"重置次数\")"))
         XCTAssertFalse(source.contains("查看全部（"))
@@ -226,8 +229,10 @@ final class StatusPopoverSnapshotTests: XCTestCase {
         XCTAssertFalse(source.contains("Text(\"开机启动已启用\")"))
         XCTAssertTrue(source.contains("launchAtLoginToggle(controlSize: .mini, isLowEmphasis: true)"))
         XCTAssertTrue(source.contains("launchAtLoginToggle(controlSize: .small, isLowEmphasis: false)"))
-        XCTAssertTrue(source.contains(".opacity(isLowEmphasis ? 0.62 : 1)"))
-        XCTAssertTrue(source.contains(".scaleEffect(isLowEmphasis ? 0.86 : 1)"))
+        XCTAssertTrue(source.contains("Image(systemName: \"checkmark\")"))
+        XCTAssertTrue(source.contains("Color.white.opacity(0.72)"))
+        XCTAssertFalse(source.contains(".opacity(isLowEmphasis ? 0.62 : 1)"))
+        XCTAssertFalse(source.contains(".scaleEffect(isLowEmphasis ? 0.86 : 1)"))
     }
 
     func testMetallicPopoverSourceContainsReferencePanelSections() throws {

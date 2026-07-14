@@ -195,14 +195,51 @@ struct StatusPopoverView: View {
     }
 
     private func launchAtLoginToggle(controlSize: ControlSize, isLowEmphasis: Bool) -> some View {
-        Toggle("", isOn: launchAtLoginBinding)
-            .labelsHidden()
+        let dimension: CGFloat = isLowEmphasis ? 22 : 24
+
+        return Button {
+            launchAtLoginBinding.wrappedValue.toggle()
+        } label: {
+            ZStack {
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(
+                        launchAtLoginManager.shouldLaunchAtLogin
+                            ? MetallicPalette.red
+                            : Color.white.opacity(0.08)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .stroke(
+                                launchAtLoginManager.shouldLaunchAtLogin
+                                    ? MetallicPalette.redBright
+                                    : Color.white.opacity(0.72),
+                                lineWidth: 1.5
+                            )
+                    }
+
+                if launchAtLoginManager.isUpdating {
+                    ProgressView()
+                        .controlSize(controlSize)
+                        .tint(.white)
+                } else if launchAtLoginManager.shouldLaunchAtLogin {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 13, weight: .black))
+                        .foregroundStyle(.white)
+                }
+            }
+            .frame(width: dimension, height: dimension)
+            .shadow(
+                color: launchAtLoginManager.shouldLaunchAtLogin
+                    ? MetallicPalette.red.opacity(0.45)
+                    : .clear,
+                radius: 4
+            )
+            .contentShape(Rectangle())
+        }
+            .buttonStyle(.plain)
             .disabled(launchAtLoginManager.isUpdating)
-            .controlSize(controlSize)
-            .tint(MetallicPalette.red)
-            .opacity(isLowEmphasis ? 0.62 : 1)
-            .scaleEffect(isLowEmphasis ? 0.86 : 1)
             .accessibilityLabel("开机启动")
+            .accessibilityValue(launchAtLoginManager.shouldLaunchAtLogin ? "已开启" : "已关闭")
     }
 
     private var actions: some View {

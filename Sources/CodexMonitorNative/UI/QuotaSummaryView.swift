@@ -117,10 +117,29 @@ struct QuotaSummaryView: View {
                 let disclosureTitle = summary.additionalCreditItems.isEmpty && summary.featuredCreditItem == nil
                     ? "字段详情"
                     : "全部 \(summary.additionalCreditItems.count + (summary.featuredCreditItem == nil ? 0 : 1))"
-                DisclosureGroup(
-                    disclosureTitle,
-                    isExpanded: $showsAllResetCredits
-                ) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        showsAllResetCredits.toggle()
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "chevron.right")
+                            .font(.caption2.weight(.black))
+                            .foregroundStyle(MetallicPalette.redBright)
+                            .rotationEffect(.degrees(showsAllResetCredits ? 90 : 0))
+                            .frame(width: 12, height: 16)
+                        Text(disclosureTitle)
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(MetallicPalette.foreground)
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(disclosureTitle)
+                .accessibilityValue(showsAllResetCredits ? "已展开" : "已折叠")
+
+                if showsAllResetCredits {
                     VStack(alignment: .leading, spacing: 8) {
                         if let featured = summary.featuredCreditItem {
                             resetCreditDetailRow(featured)
@@ -146,8 +165,6 @@ struct QuotaSummaryView: View {
                     }
                     .padding(.top, 8)
                 }
-                .font(.caption)
-                .tint(MetallicPalette.muted)
             }
         }
         .padding(.horizontal, 10)
