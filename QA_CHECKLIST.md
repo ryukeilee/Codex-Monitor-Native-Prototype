@@ -27,11 +27,12 @@
 
 - [ ] only-weekly：Popover 只出现周额度，不出现 5 小时固定占位
 - [ ] only-monthly：Popover 与 Widget 都显示月额度，且菜单栏保持 `--%`
-- [ ] only-unknown：Popover 与 Widget 显示“未知额度”，不改标为周/月额度
+- [ ] only-unknown：Popover 与 Widget 不生成额度卡片，也不改标为周/月额度
 - [ ] 5 小时 + 周 + 月：按该语义顺序显示，数字、进度、状态和恢复时间一致
-- [ ] 多个未知窗口：标签带稳定序号且彼此可区分
-- [ ] 缓存窗口：百分比与“历史缓存”标记分开显示
-- [ ] 无效或演示窗口：不出现伪造的真实百分比或进度
+- [ ] 多个未知窗口：全部隐藏，不占用面板或 Widget 容量
+- [ ] 缓存窗口：不生成额度卡片
+- [ ] 无效或演示窗口：不生成额度卡片，也不出现伪造的真实百分比或进度
+- [ ] 同时返回 canonical 与 fallback 周窗口时只显示 canonical 周额度，不出现“周额度 1 / 2”
 - [ ] 超过两行时 Popover 可纵向滚动；打开期间刷新增减窗口后面板尺寸随之更新
 - [ ] Widget 小尺寸选择确定性 primary；中尺寸最多展示三个窗口，额外窗口显示 `+N`
 
@@ -95,8 +96,9 @@ ps -axo pid,%cpu,rss,etime,comm | rg 'CodexMonitorNative.app/Contents/MacOS/Code
 
 - [ ] 在 Popover 中检查 1、3、5 个窗口：两列对齐稳定，5 个窗口时最后一行可滚动到达
 - [ ] Popover 打开时触发一次窗口集合变化，确认高度更新且没有被裁切的不可达内容
-- [ ] 在小/中 Widget 中检查 only-monthly、only-unknown 和 4 个窗口：primary 标签真实，溢出分别显示 `+N`
-- [ ] 未知窗口长标签不会撑破卡片；多个未知窗口仍能凭序号区分
+- [ ] 在小/中 Widget 中检查 only-monthly、only-unknown 和重复 known-kind：primary 标签真实，未知窗口不占容量
+- [ ] Widget 能量核心只显示动态纯数字；有可信 5 小时时优先显示 5 小时额度，中心不出现 `%`、中文标签或状态
+- [ ] Widget 背景细圈、光晕与能量核心严格同心，六个装饰节点围绕核心对称分布
 
 ## D. 记录区
 

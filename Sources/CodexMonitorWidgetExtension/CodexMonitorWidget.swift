@@ -225,9 +225,6 @@ struct CodexMonitorWidgetView: View {
             .overlay {
                 bottomArmorBands
             }
-            .overlay(alignment: .center) {
-                reactorBackdrop
-            }
             .overlay {
                 panelBottomShadeOverlay
             }
@@ -236,9 +233,6 @@ struct CodexMonitorWidgetView: View {
             }
             .overlay {
                 panelInnerBorderOverlay
-            }
-            .overlay {
-                panelHaloOverlay
             }
     }
 
@@ -333,24 +327,20 @@ struct CodexMonitorWidgetView: View {
                 width: activeFamily == .systemSmall ? 118 : 142,
                 height: activeFamily == .systemSmall ? 118 : 142
             )
-            .offset(y: activeFamily == .systemSmall ? -6 : -8)
     }
 
     private var reactorBackdrop: some View {
         ZStack {
             let outerDiameter = activeFamily == .systemSmall ? 106.0 : 136.0
             let chamberDiameter = activeFamily == .systemSmall ? 82.0 : 104.0
-            let yOffset = activeFamily == .systemSmall ? -4.0 : -6.0
 
             Circle()
                 .stroke(Color.white.opacity(0.05), lineWidth: 1)
                 .frame(width: outerDiameter, height: outerDiameter)
-                .offset(y: yOffset)
 
             Circle()
                 .stroke(Color(red: 0.70, green: 0.20, blue: 0.18).opacity(0.22), lineWidth: activeFamily == .systemSmall ? 9 : 12)
                 .frame(width: chamberDiameter, height: chamberDiameter)
-                .offset(y: yOffset)
 
             Circle()
                 .stroke(
@@ -366,21 +356,26 @@ struct CodexMonitorWidgetView: View {
                     lineWidth: activeFamily == .systemSmall ? 1.2 : 1.4
                 )
                 .frame(width: chamberDiameter + 12, height: chamberDiameter + 12)
-                .offset(y: yOffset)
 
             Circle()
                 .fill(Color(red: 0.44, green: 0.84, blue: 1.0).opacity(activeFamily == .systemSmall ? 0.18 : 0.22))
                 .blur(radius: activeFamily == .systemSmall ? 18 : 24)
                 .frame(width: activeFamily == .systemSmall ? 54 : 70, height: activeFamily == .systemSmall ? 54 : 70)
-                .offset(y: yOffset - 1)
 
             ForEach(0..<6, id: \.self) { index in
                 Capsule(style: .continuous)
                     .fill(index.isMultiple(of: 2) ? Color.white.opacity(0.06) : Color(red: 0.73, green: 0.22, blue: 0.17).opacity(0.14))
                     .frame(width: activeFamily == .systemSmall ? 6 : 7, height: activeFamily == .systemSmall ? 16 : 20)
-                    .offset(y: (activeFamily == .systemSmall ? -42 : -52) + yOffset)
+                    .offset(y: activeFamily == .systemSmall ? -42 : -52)
                     .rotationEffect(.degrees(Double(index) * 60))
             }
+        }
+    }
+
+    private var concentricCoreBackdrop: some View {
+        ZStack {
+            reactorBackdrop
+            panelHaloOverlay
         }
     }
 
@@ -428,30 +423,19 @@ struct CodexMonitorWidgetView: View {
 
     private func energyCore(diameter: CGFloat, valueFont: Font) -> some View {
         MechanicalEnergyCore(diameter: diameter, progress: gaugeProgress) {
-            VStack(spacing: 0) {
-                Text(centerQuotaNumberText)
-                    .font(valueFont)
-                    .foregroundStyle(.white)
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.72)
-                    .allowsTightening(true)
-                    .shadow(color: Color(red: 0.52, green: 0.90, blue: 1.0).opacity(0.30), radius: 2)
-
-                Text(primaryQuota.map { shortMetricLabel($0.label) } ?? "额度")
-                    .font(.system(size: isSmall ? 6.5 : 7, weight: .semibold, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.72))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.72)
-
-                if let primaryQuota {
-                    Text(primaryQuota.stateText)
-                        .font(.system(size: 5.5, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.58))
-                        .lineLimit(1)
-                }
-            }
+            Text(centerQuotaNumberText)
+                .font(valueFont)
+                .foregroundStyle(.white)
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.62)
+                .allowsTightening(true)
+                .shadow(color: Color(red: 0.52, green: 0.90, blue: 1.0).opacity(0.30), radius: 2)
+                .accessibilityLabel(primaryQuota.map { "\($0.label) \($0.percentText)" } ?? "额度不可用")
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .background {
+            concentricCoreBackdrop
         }
         .offset(y: isSmall ? -1 : -3)
     }

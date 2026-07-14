@@ -357,14 +357,17 @@ enum StatusPopoverFormatting {
         locale: Locale = .current,
         timeZone: TimeZone = .current
     ) -> [QuotaWindowDisplayItem] {
-        let dynamicWindows = snapshot.quotaWindows.sorted(by: compareQuotaWindowDisplayOrder)
+        guard snapshot.dataSource == .real, showsQuotaValues(for: status) else {
+            return []
+        }
+
+        let dynamicWindows = preferredCurrentQuotaWindows(from: snapshot.quotaWindows)
         var candidates: [(window: QuotaWindow, origin: QuotaWindowDisplayItem.Origin)] = dynamicWindows.map {
             ($0, .dynamic)
         }
 
         if !dynamicWindows.contains(where: { $0.kind == .fiveHour }),
-           snapshot.dataSource == .real,
-           snapshot.fiveHourQuotaState.isDisplayable {
+           snapshot.fiveHourQuotaState.isCurrent {
             candidates.append((
                 QuotaWindow(
                     limitId: "legacy",
@@ -380,8 +383,7 @@ enum StatusPopoverFormatting {
         }
 
         if !dynamicWindows.contains(where: { $0.kind == .weekly }),
-           snapshot.dataSource == .real,
-           snapshot.weeklyQuotaState.isDisplayable {
+           snapshot.weeklyQuotaState.isCurrent {
             candidates.append((
                 QuotaWindow(
                     limitId: "legacy",
@@ -418,6 +420,44 @@ enum StatusPopoverFormatting {
                 timeZone: timeZone
             )
         }
+    }
+
+    /// Keep only current, trustworthy windows. Known quota kinds represent one
+    /// semantic meter, so prefer the canonical server source instead of
+    /// rendering duplicate cards from fallback buckets.
+    private static func preferredCurrentQuotaWindows(from windows: [QuotaWindow]) -> [QuotaWindow] {
+        let currentWindows = windows.filter { $0.state.isCurrent }
+        let knownKinds: [QuotaWindowKind] = [.fiveHour, .weekly, .monthly]
+        let selected = knownKinds.compactMap { kind in
+            preferredCurrentQuotaWindow(
+                kind: kind,
+                from: currentWindows.filter { $0.kind == kind }
+            )
+        }
+        return selected.sorted(by: compareQuotaWindowDisplayOrder)
+    }
+
+    private static func preferredCurrentQuotaWindow(
+        kind: QuotaWindowKind,
+        from windows: [QuotaWindow]
+    ) -> QuotaWindow? {
+        let canonicalIdentity: (limitId: String, windowId: String)?
+        switch kind {
+        case .fiveHour:
+            canonicalIdentity = ("codex", "primary")
+        case .weekly:
+            canonicalIdentity = ("codex", "secondary")
+        case .monthly, .unknown:
+            canonicalIdentity = nil
+        }
+
+        if let canonicalIdentity,
+           let canonical = windows.first(where: {
+               $0.limitId == canonicalIdentity.limitId && $0.windowId == canonicalIdentity.windowId
+           }) {
+            return canonical
+        }
+        return windows.sorted(by: compareQuotaWindowDisplayOrder).first
     }
 
     static func quotaWindowLayoutSignal(

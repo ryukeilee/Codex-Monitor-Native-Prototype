@@ -107,7 +107,7 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         XCTAssertEqual(state.weeklyQuotaText, "71%")
     }
 
-    func testWidgetQuotaTextCarriesFieldTrustMarker() {
+    func testWidgetQuotaTextHidesHistoricalFields() {
         let now = Date()
         let snapshot = QuotaSnapshot(
             weeklyQuotaPercent: 71,
@@ -127,10 +127,10 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         )
 
         XCTAssertEqual(state.fiveHourQuotaText, "--")
-        XCTAssertEqual(state.weeklyQuotaText, "71%（历史缓存）")
+        XCTAssertEqual(state.weeklyQuotaText, "--")
     }
 
-    func testWidgetQuotaDisplayKeepsHistoryCaptionOutOfNumericText() {
+    func testWidgetQuotaDisplayDoesNotExposeHistoricalCache() {
         let snapshot = QuotaSnapshot(
             weeklyQuotaPercent: 71,
             fiveHourQuotaPercent: 64,
@@ -147,8 +147,8 @@ final class WidgetTimelineBridgeTests: XCTestCase {
             savedAt: snapshot.refreshedAt
         )
 
-        XCTAssertEqual(state.weeklyQuotaDisplay.percentText, "71%")
-        XCTAssertEqual(state.weeklyQuotaDisplay.historyCaption, "（历史缓存）")
+        XCTAssertEqual(state.weeklyQuotaDisplay.percentText, "--")
+        XCTAssertNil(state.weeklyQuotaDisplay.historyCaption)
     }
 
     func testWidgetSelectionShowsOnlyMonthlyWindowAsPrimary() {
@@ -187,7 +187,7 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         XCTAssertEqual(selection.overflowCount, 0)
     }
 
-    func testWidgetSelectionShowsOnlyUnknownWindowWithoutRelabellingIt() {
+    func testWidgetSelectionHidesOnlyUnknownWindow() {
         let snapshot = QuotaSnapshot(
             weeklyQuotaPercent: 0,
             fiveHourQuotaPercent: 0,
@@ -216,11 +216,8 @@ final class WidgetTimelineBridgeTests: XCTestCase {
 
         let selection = state.quotaSelection(capacity: 1, now: snapshot.refreshedAt)
 
-        XCTAssertEqual(selection.primaryItem?.kind, .unknown)
-        XCTAssertEqual(selection.primaryItem?.label, "未知额度 1 · 12小时")
-        XCTAssertEqual(selection.primaryItem?.percentText, "47%")
-        XCTAssertFalse(selection.primaryItem?.label.contains("周") ?? true)
-        XCTAssertFalse(selection.primaryItem?.label.contains("5小时") ?? true)
+        XCTAssertNil(selection.primaryItem)
+        XCTAssertEqual(selection.overflowCount, 0)
     }
 
     func testWidgetSelectionReportsOverflowAndUsesStablePrimaryOrder() {
@@ -251,12 +248,12 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         let medium = state.quotaSelection(capacity: 3, now: snapshot.refreshedAt)
 
         XCTAssertEqual(compact.primaryItem?.kind, .fiveHour)
-        XCTAssertEqual(compact.overflowCount, 3)
+        XCTAssertEqual(compact.overflowCount, 2)
         XCTAssertEqual(medium.visibleItems.map(\.kind), [.fiveHour, .weekly, .monthly])
-        XCTAssertEqual(medium.overflowCount, 1)
+        XCTAssertEqual(medium.overflowCount, 0)
     }
 
-    func testWidgetPrimarySkipsUntrustedEarlierWindowButStillCountsItAsOverflow() {
+    func testWidgetSelectionDropsUntrustedWindowWithoutCountingItAsOverflow() {
         let snapshot = QuotaSnapshot(
             weeklyQuotaPercent: 0,
             fiveHourQuotaPercent: 0,
@@ -288,7 +285,7 @@ final class WidgetTimelineBridgeTests: XCTestCase {
 
         XCTAssertEqual(selection.primaryItem?.kind, .monthly)
         XCTAssertEqual(selection.primaryItem?.percentText, "45%")
-        XCTAssertEqual(selection.overflowCount, 1)
+        XCTAssertEqual(selection.overflowCount, 0)
     }
 
     func testWidgetEarliestResetCreditLineUsesEarliestAvailableExpiry() {
