@@ -189,6 +189,10 @@ final class StatusPopoverSnapshotTests: XCTestCase {
         XCTAssertTrue(source.contains("DisclosureGroup("))
         XCTAssertTrue(source.contains("\"全部 \\("))
         XCTAssertTrue(source.contains("Image(systemName: \"chevron.right\")"))
+        XCTAssertEqual(
+            source.components(separatedBy: "Image(systemName: \"chevron.right\")").count - 1,
+            1
+        )
         XCTAssertTrue(source.contains(".rotationEffect(.degrees(showsAllResetCredits ? 90 : 0))"))
         XCTAssertTrue(source.contains("MetallicPalette.redBright"))
         XCTAssertFalse(source.contains("Text(\"当前状态\")"))

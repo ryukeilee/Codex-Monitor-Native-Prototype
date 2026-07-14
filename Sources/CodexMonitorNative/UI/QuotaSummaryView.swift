@@ -83,9 +83,6 @@ struct QuotaSummaryView: View {
                     .foregroundStyle(MetallicPalette.foreground)
                     .accessibilityLabel("重置次数 \(summary.countLine)")
                 Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(MetallicPalette.muted)
             }
                     .padding(.vertical, 8)
 
