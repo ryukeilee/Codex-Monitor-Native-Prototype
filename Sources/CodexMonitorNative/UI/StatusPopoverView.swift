@@ -201,19 +201,19 @@ struct StatusPopoverView: View {
             launchAtLoginBinding.wrappedValue.toggle()
         } label: {
             ZStack {
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                Circle()
                     .fill(
                         launchAtLoginManager.shouldLaunchAtLogin
                             ? MetallicPalette.red
-                            : Color.white.opacity(0.08)
+                            : MetallicPalette.red.opacity(0.12)
                     )
                     .overlay {
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        Circle()
                             .stroke(
                                 launchAtLoginManager.shouldLaunchAtLogin
                                     ? MetallicPalette.redBright
-                                    : Color.white.opacity(0.72),
-                                lineWidth: 1.5
+                                    : MetallicPalette.red.opacity(0.9),
+                                lineWidth: 2
                             )
                     }
 

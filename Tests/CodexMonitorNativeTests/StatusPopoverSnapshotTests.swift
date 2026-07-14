@@ -234,7 +234,9 @@ final class StatusPopoverSnapshotTests: XCTestCase {
         XCTAssertTrue(source.contains("launchAtLoginToggle(controlSize: .mini, isLowEmphasis: true)"))
         XCTAssertTrue(source.contains("launchAtLoginToggle(controlSize: .small, isLowEmphasis: false)"))
         XCTAssertTrue(source.contains("Image(systemName: \"checkmark\")"))
-        XCTAssertTrue(source.contains("Color.white.opacity(0.72)"))
+        XCTAssertTrue(source.contains("Circle()"))
+        XCTAssertTrue(source.contains("MetallicPalette.red.opacity(0.9)"))
+        XCTAssertFalse(source.contains("Color.white.opacity(0.72)"))
         XCTAssertFalse(source.contains(".opacity(isLowEmphasis ? 0.62 : 1)"))
         XCTAssertFalse(source.contains(".scaleEffect(isLowEmphasis ? 0.86 : 1)"))
     }
