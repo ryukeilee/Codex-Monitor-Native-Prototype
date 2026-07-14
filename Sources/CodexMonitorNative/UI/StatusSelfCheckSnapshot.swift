@@ -19,10 +19,11 @@ struct StatusSelfCheckSnapshot: Equatable {
         let widgetStateURL = WidgetDisplayStateStore.stateURL(fileManager: fileManager)
         let widgetStateExists = fileManager.fileExists(atPath: widgetStateURL.path)
         let widgetState = widgetStateExists ? WidgetDisplayStateStore.load(fileManager: fileManager) : nil
+        let presentationSnapshot = appState.presentationSnapshot
 
         let refreshSummary = formattedRefreshSummary(
-            lastSuccess: appState.lastSuccessAt,
-            lastAttempt: appState.lastAttemptAt,
+            lastSuccess: presentationSnapshot.lastSuccessAt,
+            lastAttempt: presentationSnapshot.lastAttemptAt,
             now: now,
             calendar: calendar,
             locale: locale,

@@ -10,16 +10,17 @@ final class AppState: ObservableObject {
 
     // MARK: - Published state
 
-    @Published private(set) var snapshot: QuotaSnapshot
-    @Published private(set) var status: QuotaRefreshStatus = .noSnapshot
+    @Published private(set) var presentationSnapshot: QuotaPresentationSnapshot = .placeholder
+    private(set) var snapshot: QuotaSnapshot
+    private(set) var status: QuotaRefreshStatus = .noSnapshot
 
     // MARK: - Diagnostics
 
-    @Published private(set) var lastAttemptAt: Date?
-    @Published private(set) var lastSuccessAt: Date?
-    @Published private(set) var failureCount: Int = 0
-    @Published private(set) var lastErrorSummary: String?
-    @Published private(set) var realQuotaHealth = RealQuotaHealthDiagnostic(
+    private(set) var lastAttemptAt: Date?
+    private(set) var lastSuccessAt: Date?
+    private(set) var failureCount: Int = 0
+    private(set) var lastErrorSummary: String?
+    private(set) var realQuotaHealth = RealQuotaHealthDiagnostic(
         kind: .waitingForFirstRequest,
         isUsingCachedSnapshot: false
     )
@@ -28,7 +29,7 @@ final class AppState: ObservableObject {
 
     /// The current backoff interval, if consecutive failures are escalating.
     /// Callers should use this as the timer interval instead of the default 5 min.
-    @Published private(set) var backoffInterval: TimeInterval = 300
+    private(set) var backoffInterval: TimeInterval = 300
 
     /// Called when the backoff interval changes so the scheduler can adapt.
     var onBackoffChanged: (@MainActor (TimeInterval) -> Void)?
@@ -105,6 +106,7 @@ final class AppState: ObservableObject {
             AppLogger.snapshot.info("No persisted snapshot; starting in not-connected state")
         }
 
+        synchronizePresentationSnapshot()
     }
 
     // MARK: - Formatters
@@ -200,7 +202,7 @@ final class AppState: ObservableObject {
             realQuotaHealth = RealQuotaHealthDiagnostic(kind: .waitingForFirstRequest, isUsingCachedSnapshot: false)
         }
         lastErrorSummary = nil
-        persistState()
+        commitState()
     }
 
     private func beginRefresh(trigger: RefreshTrigger) -> QuotaSnapshot {
@@ -214,7 +216,7 @@ final class AppState: ObservableObject {
         )
 
         let baselineSnapshot = latestRealSnapshot ?? snapshot
-        persistState()
+        commitState()
         AppLogger.refresh.info("Starting \(triggerName, privacy: .public) refresh (baseline source=\(baselineSnapshot.dataSource.rawValue, privacy: .public))")
         return baselineSnapshot
     }
@@ -234,7 +236,7 @@ final class AppState: ObservableObject {
                     snapshot = latestRealSnapshot
                     status = latestRealSnapshot.isFresh(referenceDate: .now, staleAfterInterval: staleAfterInterval) ? .success : .stale
                     realQuotaHealth = RealQuotaHealthDiagnostic(kind: .requestSucceeded, isUsingCachedSnapshot: true)
-                    persistState()
+                    commitState()
                     AppLogger.refresh.error("Ignored out-of-order real refresh refreshedAt=\(refreshed.refreshedAt.timeIntervalSince1970, format: .fixed(precision: 0)) olderThan=\(latestRealSnapshot.refreshedAt.timeIntervalSince1970, format: .fixed(precision: 0))")
                     return
                 }
@@ -247,7 +249,7 @@ final class AppState: ObservableObject {
                 status = .success
                 realQuotaHealth = RealQuotaHealthDiagnostic(kind: .requestSucceeded, isUsingCachedSnapshot: false)
                 setBackoffInterval(defaultInterval)
-                persistState()
+                commitState()
                 scheduleFreshnessCheck()
                 AppLogger.refresh.info("Real refresh succeeded: weekly=\(refreshed.weeklyQuotaPercent)% fiveHour=\(refreshed.fiveHourQuotaPercent)%")
             } else {
@@ -255,7 +257,7 @@ final class AppState: ObservableObject {
                 status = .demoMode
                 lastErrorSummary = nil
                 realQuotaHealth = RealQuotaHealthDiagnostic(kind: .waitingForFirstRequest, isUsingCachedSnapshot: false)
-                persistState()
+                commitState()
                 AppLogger.refresh.info("Mock refresh succeeded")
             }
         case .failure(let error):
@@ -268,7 +270,7 @@ final class AppState: ObservableObject {
             realQuotaHealth = healthDiagnostic(for: error)
             if let real = latestRealSnapshot { snapshot = real }
             setBackoffInterval(backoffFor(consecutiveFailures: consecutiveFailures))
-            persistState()
+            commitState()
             AppLogger.refresh.error("Refresh failed (consecutive=\(self.consecutiveFailures)) status=\(classifiedStatus.rawValue, privacy: .public) backoff=\(self.backoffInterval)s")
         }
     }
@@ -416,6 +418,7 @@ final class AppState: ObservableObject {
         if remaining <= 0 {
             if status == .success {
                 status = .stale
+                synchronizePresentationSnapshot()
             }
             return
         }
@@ -434,12 +437,14 @@ final class AppState: ObservableObject {
 
                 self.status = .stale
                 self.lastErrorSummary = nil
+                self.synchronizePresentationSnapshot()
                 AppLogger.refresh.info("Marked data stale after \(self.staleAfterInterval, format: .fixed(precision: 0)) seconds without a successful refresh")
             }
         }
     }
 
-    private func persistState() {
+    private func commitState() {
+        synchronizePresentationSnapshot()
         snapshotStore.saveState(PersistedAppState(
             snapshot: snapshot,
             status: status,
@@ -447,6 +452,16 @@ final class AppState: ObservableObject {
             lastAttemptAt: lastAttemptAt,
             failureCount: failureCount
         ))
+    }
+
+    private func synchronizePresentationSnapshot() {
+        presentationSnapshot = QuotaPresentationSnapshot.make(
+            snapshot: snapshot,
+            status: displayStatus,
+            lastSuccessAt: lastSuccessAt,
+            lastAttemptAt: lastAttemptAt,
+            effectiveFiveHourResetAt: effectiveFiveHourResetAt
+        )
     }
 
     private func triggerName(for trigger: RefreshTrigger) -> String {

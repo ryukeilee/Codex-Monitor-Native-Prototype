@@ -1,18 +1,18 @@
 import SwiftUI
 
 struct QuotaSummaryView: View {
-    @ObservedObject var appState: AppState
+    let presentationSnapshot: QuotaPresentationSnapshot
     let onLayoutChange: (Bool) -> Void
     @Binding private var showsAllResetCredits: Bool
     @Binding private var showsResetCreditFields: Bool
 
     init(
-        appState: AppState,
+        presentationSnapshot: QuotaPresentationSnapshot,
         showsAllResetCredits: Binding<Bool> = .constant(false),
         showsResetCreditFields: Binding<Bool> = .constant(false),
         onLayoutChange: @escaping (Bool) -> Void = { _ in }
     ) {
-        self.appState = appState
+        self.presentationSnapshot = presentationSnapshot
         self._showsAllResetCredits = showsAllResetCredits
         self._showsResetCreditFields = showsResetCreditFields
         self.onLayoutChange = onLayoutChange
@@ -51,8 +51,8 @@ struct QuotaSummaryView: View {
 
     private var quotaItems: [StatusPopoverFormatting.QuotaWindowDisplayItem] {
         StatusPopoverFormatting.quotaWindowDisplayItems(
-            snapshot: appState.snapshot,
-            status: appState.displayStatus
+            snapshot: presentationSnapshot.snapshot,
+            status: presentationSnapshot.status
         )
     }
 
@@ -65,8 +65,8 @@ struct QuotaSummaryView: View {
 
     private var resetCreditsSummary: StatusPopoverFormatting.ResetCreditsSummary? {
         StatusPopoverFormatting.resetCreditsSummary(
-            snapshot: appState.snapshot,
-            status: appState.displayStatus
+            snapshot: presentationSnapshot.snapshot,
+            status: presentationSnapshot.status
         )
     }
 

@@ -15,18 +15,10 @@ final class StatusBarController {
         statusItem.isVisible = true
         configureButton()
 
-        // Observe both snapshot and status changes to keep menu bar accurate
-        appState.$snapshot
+        appState.$presentationSnapshot
             .receive(on: RunLoop.main)
-            .sink { [weak self] snapshot in
-                self?.updateTitle(with: snapshot, status: appState.status)
-            }
-            .store(in: &cancellables)
-
-        appState.$status
-            .receive(on: RunLoop.main)
-            .sink { [weak self] status in
-                self?.updateTitle(with: appState.snapshot, status: status)
+            .sink { [weak self] presentationSnapshot in
+                self?.updateTitle(with: presentationSnapshot)
             }
             .store(in: &cancellables)
     }
@@ -58,7 +50,9 @@ final class StatusBarController {
         AppLogger.statusBar.info("Status item created; waiting for first quota data")
     }
 
-    private func updateTitle(with snapshot: QuotaSnapshot, status: QuotaRefreshStatus) {
+    private func updateTitle(with presentationSnapshot: QuotaPresentationSnapshot) {
+        let snapshot = presentationSnapshot.snapshot
+        let status = presentationSnapshot.status
         let title: String
 
         switch status {

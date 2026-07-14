@@ -270,6 +270,11 @@ struct WidgetDisplayState: Codable, Equatable {
     }
 }
 
+/// The immutable presentation snapshot shared by the app, menu bar, popover,
+/// and widget. Keep `WidgetDisplayState` as the concrete persisted type so
+/// existing widget payloads remain source- and wire-compatible.
+typealias QuotaPresentationSnapshot = WidgetDisplayState
+
 enum WidgetDisplayStateStore {
     private static let encoder = JSONEncoder()
     private static let decoder = JSONDecoder()

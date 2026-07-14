@@ -1,8 +1,47 @@
+import Combine
 import XCTest
 @testable import CodexMonitorNative
 
 @MainActor
 final class AppStateTests: XCTestCase {
+    func testPresentationSnapshotPublishesOneCoherentValuePerRefreshPhase() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.presentationSnapshot.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let initial = QuotaSnapshot(
+            weeklyQuotaPercent: 72,
+            fiveHourQuotaPercent: 61,
+            refreshedAt: .now.addingTimeInterval(-60),
+            dataSource: .real
+        )
+        let refreshed = QuotaSnapshot(
+            weeklyQuotaPercent: 83,
+            fiveHourQuotaPercent: 74,
+            refreshedAt: .now,
+            dataSource: .real
+        )
+        store.saveSnapshot(initial)
+        let appState = AppState(
+            snapshotStore: store,
+            refreshService: MockRefreshService(snapshot: refreshed)
+        )
+        var emittedSnapshots: [QuotaPresentationSnapshot] = []
+        let cancellable = appState.$presentationSnapshot
+            .dropFirst()
+            .sink { emittedSnapshots.append($0) }
+
+        await appState.refreshNow(trigger: .manual)
+
+        XCTAssertEqual(emittedSnapshots.count, 2)
+        XCTAssertEqual(emittedSnapshots[0].snapshot, initial)
+        XCTAssertEqual(emittedSnapshots[0].status, .refreshing)
+        XCTAssertNotNil(emittedSnapshots[0].lastAttemptAt)
+        XCTAssertEqual(emittedSnapshots[1].snapshot, refreshed)
+        XCTAssertEqual(emittedSnapshots[1].status, .success)
+        XCTAssertEqual(emittedSnapshots[1].lastSuccessAt, refreshed.refreshedAt)
+        XCTAssertTrue(emittedSnapshots[1].isEquivalent(to: appState.presentationSnapshot))
+        _ = cancellable
+    }
+
     func testLatestOverlappingRefreshWinsStateAndPersistence() async {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.latestOverlap.\(UUID().uuidString)")!
         let store = SnapshotStore(defaults: defaults, key: "snapshot")

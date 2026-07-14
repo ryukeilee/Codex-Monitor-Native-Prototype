@@ -779,6 +779,7 @@ final class WidgetTimelineBridgeTests: XCTestCase {
             await appState.refreshNow(trigger: .manual)
         }
 
+        await service.waitForStart()
         await fulfillment(of: [refreshingStateSaved], timeout: 1)
 
         XCTAssertEqual(savedStates.last?.snapshot, initial)

@@ -46,6 +46,7 @@ struct StatusPopoverView: View {
     }
 
     private var isPanelActive: Bool { presentationState.isPanelActive }
+    private var presentationSnapshot: QuotaPresentationSnapshot { appState.presentationSnapshot }
 
     var body: some View {
         MetallicPanelBackground {
@@ -72,8 +73,8 @@ struct StatusPopoverView: View {
 
     private var quotaLayoutSignal: StatusPopoverFormatting.QuotaWindowLayoutSignal {
         StatusPopoverFormatting.quotaWindowLayoutSignal(
-            snapshot: appState.snapshot,
-            status: appState.displayStatus,
+            snapshot: presentationSnapshot.snapshot,
+            status: presentationSnapshot.status,
             columns: 2
         )
     }
@@ -83,7 +84,7 @@ struct StatusPopoverView: View {
         VStack(alignment: .leading, spacing: 10) {
             header
             QuotaSummaryView(
-                appState: appState,
+                presentationSnapshot: presentationSnapshot,
                 showsAllResetCredits: $showsAllResetCredits,
                 showsResetCreditFields: $showsResetCreditFields,
                 onLayoutChange: { expanded in
@@ -117,7 +118,7 @@ struct StatusPopoverView: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
-            if appState.isRefreshing {
+            if presentationSnapshot.status == .refreshing {
                 ProgressView()
                     .controlSize(.small)
                     .tint(MetallicPalette.redBright)
@@ -136,11 +137,11 @@ struct StatusPopoverView: View {
     }
 
     private var statusLine: String {
-        StatusPopoverFormatting.titleSummary(for: appState.displayStatus)
+        StatusPopoverFormatting.titleSummary(for: presentationSnapshot.status)
     }
 
     private var refreshTimeText: String {
-        appState.snapshot.refreshedAt.formatted(date: .omitted, time: .shortened)
+        presentationSnapshot.snapshot.refreshedAt.formatted(date: .omitted, time: .shortened)
     }
 
     private var launchAtLoginBinding: Binding<Bool> {
@@ -250,7 +251,7 @@ struct StatusPopoverView: View {
             }
             .buttonStyle(.borderless)
             .foregroundStyle(MetallicPalette.redBright)
-            .disabled(appState.isRefreshing)
+            .disabled(presentationSnapshot.status == .refreshing)
 
             Spacer()
 
@@ -297,16 +298,16 @@ struct StatusPopoverView: View {
 
     private var environmentInfoLine: String? {
         StatusPopoverFormatting.environmentInfoLine(
-            lastSuccess: appState.lastSuccessAt,
-            lastAttempt: appState.lastAttemptAt,
-            dataSource: appState.dataSource,
-            status: appState.displayStatus,
+            lastSuccess: presentationSnapshot.lastSuccessAt,
+            lastAttempt: presentationSnapshot.lastAttemptAt,
+            dataSource: presentationSnapshot.snapshot.dataSource,
+            status: presentationSnapshot.status,
             showsSourceStatus: hasDisplayableSourceStatus
         )
     }
 
     private var hasDisplayableSourceStatus: Bool {
-        appState.dataSource == .real || appState.displayStatus == .demoMode
+        presentationSnapshot.snapshot.dataSource == .real || presentationSnapshot.status == .demoMode
     }
 
     private var selfCheckSnapshot: StatusSelfCheckSnapshot {
@@ -338,7 +339,7 @@ struct StatusPopoverView: View {
     }
 
     private var supportLine: String? {
-        switch appState.displayStatus {
+        switch presentationSnapshot.status {
         case .refreshing:
             return "正在刷新，先显示当前快照"
         case .networkFailed, .authRequired, .parseFailed:
@@ -362,7 +363,7 @@ struct StatusPopoverView: View {
 
     private var refreshSummaryLine: String? {
         StatusPopoverFormatting.freshnessSummary(
-            for: appState.displayStatus,
+            for: presentationSnapshot.status,
             isUsingCachedSnapshot: appState.isUsingCachedSnapshot
         )
     }
