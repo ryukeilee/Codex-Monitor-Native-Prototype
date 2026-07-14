@@ -2,20 +2,17 @@ import SwiftUI
 
 struct QuotaSummaryView: View {
     @ObservedObject var appState: AppState
-    let isPanelActive: Bool
     let onLayoutChange: (Bool) -> Void
     @Binding private var showsAllResetCredits: Bool
     @Binding private var showsResetCreditFields: Bool
 
     init(
         appState: AppState,
-        isPanelActive: Bool = true,
         showsAllResetCredits: Binding<Bool> = .constant(false),
         showsResetCreditFields: Binding<Bool> = .constant(false),
         onLayoutChange: @escaping (Bool) -> Void = { _ in }
     ) {
         self.appState = appState
-        self.isPanelActive = isPanelActive
         self._showsAllResetCredits = showsAllResetCredits
         self._showsResetCreditFields = showsResetCreditFields
         self.onLayoutChange = onLayoutChange
@@ -23,48 +20,18 @@ struct QuotaSummaryView: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            HStack(alignment: .center, spacing: 6) {
-                QuotaGaugeView(
-                    title: "5小时额度",
-                    value: fiveHourQuotaDisplay.percentText,
-                    historyCaption: fiveHourQuotaDisplay.historyCaption,
-                    progress: quotaProgress(
-                        for: appState.snapshot.fiveHourQuotaPercent,
-                        state: appState.snapshot.fiveHourQuotaState
-                    )
-                )
-
-                ReactorView(isPanelActive: isPanelActive)
-                    .frame(width: 88, height: 88)
-
-                QuotaGaugeView(
-                    title: "周额度",
-                    value: weeklyQuotaDisplay.percentText,
-                    historyCaption: weeklyQuotaDisplay.historyCaption,
-                    progress: quotaProgress(
-                        for: appState.snapshot.weeklyQuotaPercent,
-                        state: appState.snapshot.weeklyQuotaState
-                    )
-                )
-            }
-            .frame(maxWidth: .infinity)
-
-            let additionalWindows = appState.snapshot.quotaWindows.filter {
-                $0.kind == .monthly || $0.kind == .unknown
-            }
-            if !additionalWindows.isEmpty {
-                HStack(alignment: .top, spacing: 14) {
-                    ForEach(additionalWindows) { window in
-                        let display = StatusPopoverFormatting.quotaWindowValueDisplay(
-                            window,
-                            status: appState.displayStatus
-                        )
-                        QuotaGaugeView(
-                            title: window.displayName,
-                            value: display.percentText,
-                            historyCaption: display.historyCaption,
-                            progress: quotaProgress(for: window.remainingPercent, state: window.state)
-                        )
+            if quotaItems.isEmpty {
+                Text("暂无可显示的额度窗口")
+                    .font(.subheadline)
+                    .foregroundStyle(MetallicPalette.muted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(10)
+                    .background(MetallicPalette.card)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            } else {
+                LazyVGrid(columns: quotaColumns, alignment: .leading, spacing: 8) {
+                    ForEach(quotaItems) { item in
+                        QuotaGaugeView(item: item)
                     }
                 }
                 .frame(maxWidth: .infinity)
@@ -82,30 +49,18 @@ struct QuotaSummaryView: View {
         }
     }
 
-    private var fiveHourQuotaDisplay: StatusPopoverFormatting.QuotaValueDisplay {
-        StatusPopoverFormatting.quotaValueDisplay(
-            for: .fiveHour,
+    private var quotaItems: [StatusPopoverFormatting.QuotaWindowDisplayItem] {
+        StatusPopoverFormatting.quotaWindowDisplayItems(
             snapshot: appState.snapshot,
             status: appState.displayStatus
         )
     }
 
-    private var weeklyQuotaDisplay: StatusPopoverFormatting.QuotaValueDisplay {
-        StatusPopoverFormatting.quotaValueDisplay(
-            for: .weekly,
-            snapshot: appState.snapshot,
-            status: appState.displayStatus
-        )
-    }
-
-    private func quotaProgress(for value: Int, state: QuotaFieldState) -> Double? {
-        guard appState.displayStatus != .noSnapshot,
-              appState.displayStatus != .idle,
-              appState.displayStatus != .demoMode,
-              state.isDisplayable else {
-            return nil
-        }
-        return Double(value) / 100
+    private var quotaColumns: [GridItem] {
+        [
+            GridItem(.flexible(minimum: 140), spacing: 8, alignment: .top),
+            GridItem(.flexible(minimum: 140), spacing: 8, alignment: .top)
+        ]
     }
 
     private var resetCreditsSummary: StatusPopoverFormatting.ResetCreditsSummary? {
@@ -244,30 +199,28 @@ struct QuotaSummaryView: View {
 }
 
 struct QuotaGaugeView: View {
-    let title: String
-    let value: String
-    let historyCaption: String?
-    let progress: Double?
-
-    init(title: String, value: String, historyCaption: String? = nil, progress: Double?) {
-        self.title = title
-        self.value = value
-        self.historyCaption = historyCaption
-        self.progress = progress
-    }
+    let item: StatusPopoverFormatting.QuotaWindowDisplayItem
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(MetallicPalette.foreground)
-                .lineLimit(1)
-            Text(value)
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text(item.label)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(MetallicPalette.foreground)
+                    .lineLimit(1)
+                    .help(item.label)
+                Spacer(minLength: 2)
+                Text(item.stateText)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(MetallicPalette.muted)
+                    .lineLimit(1)
+            }
+            Text(item.percentText)
                 .font(.system(size: 22, weight: .semibold, design: .rounded))
                 .foregroundStyle(MetallicPalette.foreground)
                 .lineLimit(nil)
                 .fixedSize(horizontal: true, vertical: false)
-            if let historyCaption {
+            if let historyCaption = item.historyCaption {
                 Text(historyCaption)
                     .font(.caption2)
                     .foregroundStyle(MetallicPalette.muted)
@@ -279,13 +232,31 @@ struct QuotaGaugeView: View {
                     .overlay(alignment: .leading) {
                         Capsule(style: .continuous)
                             .fill(MetallicPalette.redGradient)
-                            .frame(width: max(0, geometry.size.width * (progress ?? 0)))
+                            .frame(width: max(0, geometry.size.width * (item.progress ?? 0)))
                     }
             }
             .frame(height: 6)
+            Text("恢复 \(item.resetText)")
+                .font(.caption2)
+                .foregroundStyle(MetallicPalette.muted)
+                .lineLimit(1)
+                .minimumScaleFactor(0.78)
+            Text("还需 \(item.resetRemainingText)")
+                .font(.caption2)
+                .foregroundStyle(MetallicPalette.muted)
+                .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(MetallicPalette.card)
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(MetallicPalette.border, lineWidth: 1)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(title) \(value)")
+        .accessibilityLabel(
+            "\(item.label) \(item.percentText)，\(item.stateText)，恢复 \(item.resetText)"
+        )
     }
 }

@@ -161,6 +161,26 @@ struct WidgetDisplayState: Codable, Equatable {
         StatusPopoverFormatting.titleSummary(for: status)
     }
 
+    func quotaItems(now: Date = .now) -> [StatusPopoverFormatting.QuotaWindowDisplayItem] {
+        StatusPopoverFormatting.quotaWindowDisplayItems(
+            snapshot: snapshot,
+            status: status,
+            now: now
+        )
+    }
+
+    func quotaSelection(
+        capacity: Int,
+        now: Date = .now
+    ) -> StatusPopoverFormatting.QuotaWindowSelection {
+        StatusPopoverFormatting.quotaWindowSelection(
+            snapshot: snapshot,
+            status: status,
+            capacity: capacity,
+            now: now
+        )
+    }
+
     var fiveHourQuotaText: String {
         StatusPopoverFormatting.quotaValueText(for: .fiveHour, snapshot: snapshot, status: status)
     }

@@ -90,37 +90,17 @@ final class StatusBarController {
     }
 
     private func weeklyQuotaTitle(for snapshot: QuotaSnapshot, status: QuotaRefreshStatus) -> String {
-        guard snapshot.dataSource == .real else {
-            return "--%"
-        }
-
-        let value = StatusPopoverFormatting.quotaValueDisplay(
-            for: .weekly,
+        StatusPopoverFormatting.weeklyQuotaMenuTitle(
             snapshot: snapshot,
             status: status
         )
-        return value.percentText
     }
 
     private func tooltip(for snapshot: QuotaSnapshot, status: QuotaRefreshStatus) -> String {
         StatusPopoverFormatting.quotaTooltip(
             snapshot: snapshot,
-            status: status,
-            resetAt: appStateResetAt(for: snapshot, status: status)
+            status: status
         )
-    }
-
-    private func appStateResetAt(for snapshot: QuotaSnapshot, status: QuotaRefreshStatus) -> Date? {
-        guard snapshot.dataSource == .real else {
-            return nil
-        }
-
-        switch status {
-        case .success, .stale, .refreshing, .networkFailed, .authRequired, .parseFailed:
-            return snapshot.fiveHourResetAt
-        case .noSnapshot, .idle, .demoMode:
-            return nil
-        }
     }
 
     private func applyTitle(_ title: String) {

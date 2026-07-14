@@ -52,6 +52,22 @@ struct CodexMonitorWidgetView: View {
         activeFamily == .systemSmall
     }
 
+    private var quotaCapacity: Int {
+        isSmall ? 1 : 3
+    }
+
+    private var quotaSelection: StatusPopoverFormatting.QuotaWindowSelection {
+        entry.state.quotaSelection(capacity: quotaCapacity, now: entry.date)
+    }
+
+    private var primaryQuota: StatusPopoverFormatting.QuotaWindowDisplayItem? {
+        quotaSelection.primaryItem
+    }
+
+    private var supplementaryQuotas: [StatusPopoverFormatting.QuotaWindowDisplayItem] {
+        Array(quotaSelection.visibleItems.dropFirst())
+    }
+
     var body: some View {
         dashboardLayout
             .padding(.top, isSmall ? 14 : 11)
@@ -79,15 +95,7 @@ struct CodexMonitorWidgetView: View {
 
     private var instrumentCluster: some View {
         HStack(alignment: .center, spacing: isSmall ? 8 : 18) {
-            metricColumn(
-                top: (
-                    "周额度",
-                    entry.state.weeklyQuotaDisplay.percentText,
-                    entry.state.weeklyQuotaDisplay.historyCaption
-                ),
-                bottom: ("恢复时间", shortRecoveryText),
-                alignment: .trailing
-            )
+            quotaSideColumn
 
             energyCore(
                 diameter: isSmall ? 72 : 74,
@@ -120,6 +128,10 @@ struct CodexMonitorWidgetView: View {
 
             Spacer(minLength: 4)
 
+            if quotaSelection.overflowCount > 0 {
+                quotaOverflowBadge
+            }
+
             if isSmall {
                 compactStatusIndicator
             } else {
@@ -128,6 +140,60 @@ struct CodexMonitorWidgetView: View {
         }
         .padding(.top, isSmall ? 4 : 5)
         .padding(.horizontal, isSmall ? 3 : 4)
+    }
+
+    private var quotaSideColumn: some View {
+        VStack(alignment: .trailing, spacing: isSmall ? 12 : 14) {
+            if let primaryQuota, isSmall || supplementaryQuotas.isEmpty {
+                quotaMetricCell(primaryQuota, alignment: .trailing)
+            } else {
+                ForEach(supplementaryQuotas) { item in
+                    quotaMetricCell(item, alignment: .trailing)
+                }
+            }
+
+            if let primaryQuota, isSmall || supplementaryQuotas.count < 2 {
+                metricCell(
+                    label: "恢复时间",
+                    value: condensedTimeText(from: primaryQuota.resetText),
+                    caption: primaryQuota.resetRemainingText == "--"
+                        ? nil
+                        : "还需 \(primaryQuota.resetRemainingText)",
+                    alignment: .trailing,
+                    tone: .subdued
+                )
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func quotaMetricCell(
+        _ item: StatusPopoverFormatting.QuotaWindowDisplayItem,
+        alignment: HorizontalAlignment
+    ) -> some View {
+        metricCell(
+            label: item.label,
+            value: item.percentText,
+            caption: item.historyCaption ?? item.stateText,
+            alignment: alignment
+        )
+    }
+
+    private var quotaOverflowBadge: some View {
+        Text("+\(quotaSelection.overflowCount)")
+            .font(.system(size: isSmall ? 8 : 9, weight: .bold, design: .rounded))
+            .foregroundStyle(.white.opacity(0.9))
+            .padding(.horizontal, isSmall ? 5 : 6)
+            .padding(.vertical, 3)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(Color.black.opacity(0.18))
+                    .overlay {
+                        Capsule(style: .continuous)
+                            .stroke(Color.white.opacity(0.15), lineWidth: 0.7)
+                    }
+            )
+            .accessibilityLabel("另有 \(quotaSelection.overflowCount) 个额度窗口")
     }
 
     private func metricColumn(
@@ -362,15 +428,30 @@ struct CodexMonitorWidgetView: View {
 
     private func energyCore(diameter: CGFloat, valueFont: Font) -> some View {
         MechanicalEnergyCore(diameter: diameter, progress: gaugeProgress) {
-            Text(centerQuotaNumberText)
-                .font(valueFont)
-                .foregroundStyle(.white)
-                .monospacedDigit()
-                .lineLimit(1)
-                .minimumScaleFactor(0.72)
-                .allowsTightening(true)
-                .shadow(color: Color(red: 0.52, green: 0.90, blue: 1.0).opacity(0.30), radius: 2)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            VStack(spacing: 0) {
+                Text(centerQuotaNumberText)
+                    .font(valueFont)
+                    .foregroundStyle(.white)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+                    .allowsTightening(true)
+                    .shadow(color: Color(red: 0.52, green: 0.90, blue: 1.0).opacity(0.30), radius: 2)
+
+                Text(primaryQuota.map { shortMetricLabel($0.label) } ?? "额度")
+                    .font(.system(size: isSmall ? 6.5 : 7, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.72))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+
+                if let primaryQuota {
+                    Text(primaryQuota.stateText)
+                        .font(.system(size: 5.5, weight: .medium, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.58))
+                        .lineLimit(1)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .offset(y: isSmall ? -1 : -3)
     }
@@ -449,20 +530,6 @@ struct CodexMonitorWidgetView: View {
         .blendMode(.screen)
     }
 
-    private var shortRecoveryText: String {
-        let line = recoveryPair.value
-        if line == "--" {
-            return line
-        }
-
-        return condensedTimeText(from: line)
-    }
-
-    private var recoveryPair: (label: String, value: String) {
-        let recovery = entry.state.recoveryDetails(now: entry.date)
-        return ("恢复时间", recovery.resetText)
-    }
-
     private var updatedShortText: String {
         var line = entry.state.updatedLine(now: entry.date)
 
@@ -522,11 +589,11 @@ struct CodexMonitorWidgetView: View {
     }
 
     private var centerQuotaNumberText: String {
-        guard entry.state.snapshot.fiveHourQuotaState.isDisplayable else {
+        guard let primaryQuota else {
             return "--"
         }
 
-        return entry.state.fiveHourQuotaDisplay.percentText.replacingOccurrences(of: "%", with: "")
+        return primaryQuota.percentText.replacingOccurrences(of: "%", with: "")
     }
 
     private func shortMetricLabel(_ label: String) -> String {
@@ -545,13 +612,12 @@ struct CodexMonitorWidgetView: View {
     }
 
     private var gaugeProgress: CGFloat {
-        guard entry.state.snapshot.fiveHourQuotaState.isDisplayable else {
+        guard let progress = primaryQuota?.progress else {
             return 0.05
         }
 
-        let value = Double(entry.state.snapshot.fiveHourQuotaPercent)
-        let clamped = min(max(value / 100, 0.05), 1.0)
-        return clamped
+        let clamped = min(max(progress, 0.05), 1.0)
+        return CGFloat(clamped)
     }
 
     private var statusColor: Color {
@@ -576,7 +642,7 @@ struct CodexMonitorQuotaWidget: Widget {
             CodexMonitorWidgetView(entry: entry)
         }
         .configurationDisplayName("Codex Monitor")
-        .description("显示 Codex 5小时额度、周额度、恢复时间和刷新状态。")
+        .description("显示 Codex 动态额度窗口、恢复时间和刷新状态。")
         .supportedFamilies([.systemSmall, .systemMedium])
         .contentMarginsDisabled()
         .containerBackgroundRemovable()

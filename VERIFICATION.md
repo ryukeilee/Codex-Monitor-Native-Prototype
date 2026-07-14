@@ -26,12 +26,16 @@ swift test
 
 - App 可以通过 SwiftPM 成功构建，`./script/build_and_run.sh --verify` 可完成覆盖安装，确认实际运行进程来自最终安装路径，并确认 Widget 注册路径属于该安装包。
 - 菜单栏 App 以 `LSUIElement = true` 方式打包，无常规主窗口。
-- 菜单栏标题策略只显示周额度百分比或 `--%`，不会显示 5 小时额度。
+- 菜单栏标题策略只显示可信周额度百分比或 `--%`，不会用 5 小时、月或未知窗口替代周额度。
 - Popover 包含：
   - 更新时间 / 最近尝试时间
   - 数据来源与刷新状态
   - 真实链路健康诊断
   - 手动刷新按钮
+- Popover、status-item tooltip 与 Widget 共用同一个动态额度窗口投影：按 5 小时、周、月、未知窗口排序，多个未知窗口具有稳定且有长度边界的可区分标签。
+- 投影把可信百分比、进度、字段状态、恢复时间和缓存标记绑定在同一 item；只有语义动态窗口缺失时才使用可信 legacy 5 小时/周字段补位。
+- Popover 使用两列动态网格；窗口超过两行时切换到有高度上限的滚动视口，窗口集合变化通过 `StatusPopoverView` 的布局信号触发 `PopoverController` 重新测量。
+- Widget 小尺寸容量为 1、中尺寸容量为 3；only-monthly / only-unknown 会成为真实 primary，额外窗口通过 `+N` 显示溢出数量。
 - 真实刷新失败时会保留上次成功的真实快照，不会立即清空菜单栏数字。
 - 真实链路错误可以区分为至少以下几类：
   - 需要登录 / 认证失败
@@ -50,6 +54,10 @@ swift test
 - 并发刷新去重
 - scheduler tick
 - sleep / wake notification wiring
+- 动态投影稳定排序、legacy fallback 边界、字段信任、缓存标记与 reset 一致性
+- Popover only-weekly、only-unknown、5 小时 + 周 + 月、多窗口行数与滚动信号
+- Widget only-monthly、only-unknown、primary 选择和 overflow 计数
+- 旧 Widget persisted payload 解码与 envelope 向后兼容
 
 ## Manual Verification Still Required
 
@@ -119,9 +127,25 @@ CODEX_MONITOR_FORCE_REFRESH_FAILURE=1 ./script/build_and_run.sh
 
 预期结果：
 
-- 有真实数据时，菜单栏只显示周额度百分比。
+- 有可信周窗口时，菜单栏只显示该周额度百分比。
 - 失败但有缓存时，Popover 明确写出“显示上次成功数据”。
 - 无真实快照时，菜单栏显示 `--%`，Popover 不冒充真实额度。
+
+### 5. Dynamic Quota Window Presentation
+
+步骤：
+
+1. 分别准备 only-weekly、only-monthly、only-unknown、5 小时 + 周 + 月、5 个以上窗口的快照或真实响应。
+2. 打开 Popover，检查窗口顺序、未知窗口序号、缓存标记、reset 文案和滚动可达性。
+3. 保持 Popover 打开并触发刷新，确认窗口数量变化后面板重新测量，不出现不可滚动的裁切。
+4. 在小尺寸与中尺寸 Widget 中检查相同快照；重点观察 only-monthly、only-unknown 和超过容量时的 `+N`。
+
+预期结果：
+
+- 没有的 5 小时或周窗口不会出现固定占位；只有可信 legacy 同语义字段才允许补位。
+- 月窗口与未知窗口保持真实语义，多个未知窗口可区分；无效或演示字段不显示成真实百分比。
+- Popover 超高内容可滚动到达；Widget compact primary 可预测，中尺寸最多展示三个窗口并明确报告溢出。
+- 无可信周窗口时，菜单栏始终为 `--%`，不会取用月或未知窗口。
 
 ## Release Gate
 

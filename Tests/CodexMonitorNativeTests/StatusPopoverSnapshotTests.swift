@@ -83,6 +83,63 @@ final class StatusPopoverSnapshotTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: outputURL.path))
     }
 
+    func testRenderDynamicQuotaWindowsPopoverSnapshot() async throws {
+        let outputURL = URL(fileURLWithPath: "/private/tmp/codex-monitor-status-popover-dynamic-windows.png")
+        try await renderSnapshot(
+            snapshot: QuotaSnapshot(
+                weeklyQuotaPercent: 0,
+                fiveHourQuotaPercent: 0,
+                weeklyQuotaState: .unavailable,
+                fiveHourQuotaState: .unavailable,
+                refreshedAt: makeDate("2026-06-26T11:40:00Z"),
+                dataSource: .real,
+                quotaWindows: [
+                    QuotaWindow(
+                        limitId: "codex",
+                        windowId: "primary",
+                        kind: .fiveHour,
+                        durationMinutes: 300,
+                        remainingPercent: 64,
+                        resetAt: makeDate("2026-06-26T14:10:00Z")
+                    ),
+                    QuotaWindow(
+                        limitId: "codex",
+                        windowId: "secondary",
+                        kind: .weekly,
+                        durationMinutes: 10_080,
+                        remainingPercent: 71,
+                        state: .cached
+                    ),
+                    QuotaWindow(
+                        limitId: "codex",
+                        windowId: "monthly",
+                        kind: .monthly,
+                        durationMinutes: 43_200,
+                        remainingPercent: 56
+                    ),
+                    QuotaWindow(
+                        limitId: "future",
+                        windowId: "short",
+                        kind: .unknown,
+                        durationMinutes: 720,
+                        remainingPercent: 83
+                    ),
+                    QuotaWindow(
+                        limitId: "future",
+                        windowId: "long",
+                        kind: .unknown,
+                        durationMinutes: 2_880,
+                        remainingPercent: 37,
+                        state: .invalid
+                    )
+                ]
+            ),
+            outputURL: outputURL
+        )
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outputURL.path))
+    }
+
     func testRenderMechanicalEnergyCoreSizeMatrix() throws {
         let outputURL = URL(fileURLWithPath: "/private/tmp/codex-monitor-energy-core-sizes.png")
         let view = AnyView(
@@ -275,7 +332,28 @@ final class StatusPopoverSnapshotTests: XCTestCase {
         XCTAssertTrue(source.contains("ScrollView(.vertical)"))
         XCTAssertTrue(source.contains("expandedViewportHeight"))
         XCTAssertTrue(source.contains("isQuotaExpanded"))
+        XCTAssertTrue(source.contains("quotaLayoutSignal.requiresScrolling"))
+        XCTAssertTrue(source.contains(".onChange(of: quotaLayoutSignal)"))
         XCTAssertTrue(source.contains("quota-scroll-viewport"))
+    }
+
+    func testQuotaSummaryUsesProjectionDrivenBoundedGridWithoutFixedWindowPlaceholders() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repoRoot.appendingPathComponent("Sources/CodexMonitorNative/UI/QuotaSummaryView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains("quotaWindowDisplayItems("))
+        XCTAssertTrue(source.contains("LazyVGrid(columns: quotaColumns"))
+        XCTAssertTrue(source.contains("ForEach(quotaItems)"))
+        XCTAssertTrue(source.contains("QuotaGaugeView(item: item)"))
+        XCTAssertFalse(source.contains("title: \"5小时额度\""))
+        XCTAssertFalse(source.contains("title: \"周额度\""))
+        XCTAssertFalse(source.contains("additionalWindows"))
     }
 
     func testPopoverControllerSourceWiresEscAndLifecycleCleanup() throws {

@@ -303,7 +303,7 @@ final class StatusPopoverFormattingTests: XCTestCase {
         )
         XCTAssertEqual(
             StatusPopoverFormatting.quotaSummaryLine(snapshot: snapshot, status: .success),
-            "5小时额度 -- · 周额度 71%（历史缓存）"
+            "周额度 71%（历史缓存）"
         )
     }
 
@@ -344,7 +344,7 @@ final class StatusPopoverFormattingTests: XCTestCase {
         let summary = StatusPopoverFormatting.quotaSummaryLine(snapshot: snapshot, status: .success)
 
         XCTAssertTrue(summary.contains("月额度 55%"))
-        XCTAssertTrue(summary.contains("未知额度 90%"))
+        XCTAssertTrue(summary.contains("未知额度 1 · 1234分 90%"))
     }
 
     func testWeeklyDisplayFallsBackToTrustedLegacyCacheWhenResponseHasOnlyUnknownWindow() {
@@ -377,6 +377,299 @@ final class StatusPopoverFormattingTests: XCTestCase {
         XCTAssertEqual(display.historyCaption, "（历史缓存）")
     }
 
+    func testQuotaProjectionSortsSemanticKindsAndDistinguishesUnknownWindows() {
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 0,
+            fiveHourQuotaPercent: 0,
+            weeklyQuotaState: .unavailable,
+            fiveHourQuotaState: .unavailable,
+            refreshedAt: .now,
+            dataSource: .real,
+            quotaWindows: [
+                QuotaWindow(limitId: "zeta", windowId: "future", kind: .unknown, remainingPercent: 44),
+                QuotaWindow(limitId: "codex", windowId: "monthly", kind: .monthly, durationMinutes: 43_200, remainingPercent: 55),
+                QuotaWindow(limitId: "alpha", windowId: "short", kind: .unknown, durationMinutes: 90, remainingPercent: 66),
+                QuotaWindow(limitId: "codex", windowId: "secondary", kind: .weekly, durationMinutes: 10_080, remainingPercent: 70),
+                QuotaWindow(limitId: "codex", windowId: "primary", kind: .fiveHour, durationMinutes: 300, remainingPercent: 80)
+            ]
+        )
+
+        let items = StatusPopoverFormatting.quotaWindowDisplayItems(snapshot: snapshot, status: .success)
+
+        XCTAssertEqual(items.map(\.kind), [.fiveHour, .weekly, .monthly, .unknown, .unknown])
+        XCTAssertEqual(items.map(\.id), [
+            "codex.primary",
+            "codex.secondary",
+            "codex.monthly",
+            "alpha.short",
+            "zeta.future"
+        ])
+        XCTAssertEqual(items.suffix(2).map(\.label), ["未知额度 1 · 90分", "未知额度 2"])
+        XCTAssertEqual(Set(items.suffix(2).map(\.label)).count, 2)
+        XCTAssertTrue(items.allSatisfy { $0.label.count <= 18 })
+    }
+
+    func testQuotaProjectionKeepsTrustResetAndCacheMarkerOnOneItem() {
+        let now = makeDate("2026-06-19T12:40:00Z")
+        let resetAt = makeDate("2026-06-19T14:10:00Z")
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 0,
+            fiveHourQuotaPercent: 0,
+            weeklyQuotaState: .unavailable,
+            fiveHourQuotaState: .unavailable,
+            refreshedAt: now,
+            dataSource: .real,
+            quotaWindows: [
+                QuotaWindow(
+                    limitId: "codex",
+                    windowId: "monthly",
+                    kind: .monthly,
+                    durationMinutes: 43_200,
+                    remainingPercent: 55,
+                    state: .cached,
+                    resetAt: resetAt
+                ),
+                QuotaWindow(
+                    limitId: "future",
+                    windowId: "invalid",
+                    kind: .unknown,
+                    durationMinutes: 720,
+                    remainingPercent: 91,
+                    state: .invalid,
+                    resetAt: resetAt
+                )
+            ]
+        )
+
+        let items = StatusPopoverFormatting.quotaWindowDisplayItems(
+            snapshot: snapshot,
+            status: .success,
+            now: now,
+            calendar: Calendar(identifier: .gregorian).setting(timeZone: TimeZone(secondsFromGMT: 0)!),
+            locale: Locale(identifier: "en_US"),
+            timeZone: TimeZone(secondsFromGMT: 0)!
+        )
+
+        XCTAssertEqual(items[0].trustedPercent, 55)
+        XCTAssertEqual(items[0].progress, 0.55)
+        XCTAssertEqual(items[0].percentText, "55%")
+        XCTAssertEqual(items[0].historyCaption, "（历史缓存）")
+        XCTAssertEqual(items[0].stateText, "历史缓存")
+        XCTAssertEqual(items[0].resetAt, resetAt)
+        XCTAssertEqual(items[0].resetText, "今天 14:10")
+        XCTAssertEqual(items[0].resetRemainingText, "1小时30分")
+        XCTAssertNil(items[1].trustedPercent)
+        XCTAssertNil(items[1].progress)
+        XCTAssertEqual(items[1].percentText, "--")
+        XCTAssertNil(items[1].historyCaption)
+        XCTAssertEqual(items[1].stateText, "数据无效")
+        XCTAssertEqual(items[1].resetText, "--")
+    }
+
+    func testQuotaProjectionUsesLegacyFallbackOnlyWhenSemanticWindowIsMissing() {
+        let unknown = QuotaWindow(
+            limitId: "future",
+            windowId: "primary",
+            kind: .unknown,
+            durationMinutes: 600,
+            remainingPercent: 42
+        )
+        let fallbackSnapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 72,
+            fiveHourQuotaPercent: 0,
+            weeklyQuotaState: .cached,
+            fiveHourQuotaState: .unavailable,
+            refreshedAt: .now,
+            dataSource: .real,
+            quotaWindows: [unknown]
+        )
+
+        let fallbackItems = StatusPopoverFormatting.quotaWindowDisplayItems(
+            snapshot: fallbackSnapshot,
+            status: .networkFailed
+        )
+
+        XCTAssertEqual(fallbackItems.map(\.kind), [.weekly, .unknown])
+        XCTAssertEqual(fallbackItems[0].id, "legacy.weekly")
+        XCTAssertEqual(fallbackItems[0].origin, .legacyFallback)
+        XCTAssertEqual(fallbackItems[0].trustedPercent, 72)
+        XCTAssertEqual(fallbackItems[0].historyCaption, "（历史缓存）")
+
+        let dynamicUnavailable = QuotaSnapshot(
+            weeklyQuotaPercent: 72,
+            fiveHourQuotaPercent: 0,
+            weeklyQuotaState: .cached,
+            fiveHourQuotaState: .unavailable,
+            refreshedAt: .now,
+            dataSource: .real,
+            quotaWindows: [
+                QuotaWindow(
+                    limitId: "codex",
+                    windowId: "secondary",
+                    kind: .weekly,
+                    durationMinutes: 10_080,
+                    remainingPercent: 0,
+                    state: .invalid
+                )
+            ]
+        )
+        let unavailableItems = StatusPopoverFormatting.quotaWindowDisplayItems(
+            snapshot: dynamicUnavailable,
+            status: .success
+        )
+
+        XCTAssertEqual(unavailableItems.count, 1)
+        XCTAssertEqual(unavailableItems[0].id, "codex.secondary")
+        XCTAssertEqual(unavailableItems[0].origin, .dynamic)
+        XCTAssertNil(unavailableItems[0].trustedPercent)
+    }
+
+    func testPopoverProjectionCoversOnlyWeeklyOnlyUnknownAndKnownTriple() {
+        let weeklyOnly = QuotaSnapshot(
+            weeklyQuotaPercent: 0,
+            fiveHourQuotaPercent: 0,
+            weeklyQuotaState: .unavailable,
+            fiveHourQuotaState: .unavailable,
+            refreshedAt: .now,
+            dataSource: .real,
+            quotaWindows: [
+                QuotaWindow(limitId: "codex", windowId: "secondary", kind: .weekly, remainingPercent: 62)
+            ]
+        )
+        let unknownOnly = QuotaSnapshot(
+            weeklyQuotaPercent: 0,
+            fiveHourQuotaPercent: 0,
+            weeklyQuotaState: .unavailable,
+            fiveHourQuotaState: .unavailable,
+            refreshedAt: .now,
+            dataSource: .real,
+            quotaWindows: [
+                QuotaWindow(limitId: "future", windowId: "bank", kind: .unknown, durationMinutes: 720, remainingPercent: 73)
+            ]
+        )
+        let knownTriple = QuotaSnapshot(
+            weeklyQuotaPercent: 0,
+            fiveHourQuotaPercent: 0,
+            weeklyQuotaState: .unavailable,
+            fiveHourQuotaState: .unavailable,
+            refreshedAt: .now,
+            dataSource: .real,
+            quotaWindows: [
+                QuotaWindow(limitId: "codex", windowId: "monthly", kind: .monthly, remainingPercent: 51),
+                QuotaWindow(limitId: "codex", windowId: "primary", kind: .fiveHour, remainingPercent: 81),
+                QuotaWindow(limitId: "codex", windowId: "secondary", kind: .weekly, remainingPercent: 61)
+            ]
+        )
+
+        XCTAssertEqual(
+            StatusPopoverFormatting.quotaWindowDisplayItems(snapshot: weeklyOnly, status: .success).map(\.kind),
+            [.weekly]
+        )
+        XCTAssertEqual(
+            StatusPopoverFormatting.quotaWindowDisplayItems(snapshot: unknownOnly, status: .success).map(\.kind),
+            [.unknown]
+        )
+        XCTAssertEqual(
+            StatusPopoverFormatting.quotaWindowDisplayItems(snapshot: knownTriple, status: .success).map(\.kind),
+            [.fiveHour, .weekly, .monthly]
+        )
+    }
+
+    func testPopoverLayoutSignalChangesWithDynamicWindowRowsAndEnablesScrolling() {
+        let fourWindows = [
+            QuotaWindow(limitId: "codex", windowId: "primary", kind: .fiveHour, remainingPercent: 80),
+            QuotaWindow(limitId: "codex", windowId: "secondary", kind: .weekly, remainingPercent: 70),
+            QuotaWindow(limitId: "codex", windowId: "monthly", kind: .monthly, remainingPercent: 60),
+            QuotaWindow(limitId: "future", windowId: "a", kind: .unknown, durationMinutes: 600, remainingPercent: 50)
+        ]
+        let makeSnapshot: ([QuotaWindow]) -> QuotaSnapshot = { windows in
+            QuotaSnapshot(
+                weeklyQuotaPercent: 0,
+                fiveHourQuotaPercent: 0,
+                weeklyQuotaState: .unavailable,
+                fiveHourQuotaState: .unavailable,
+                refreshedAt: .now,
+                dataSource: .real,
+                quotaWindows: windows
+            )
+        }
+        let compact = StatusPopoverFormatting.quotaWindowLayoutSignal(
+            snapshot: makeSnapshot(fourWindows),
+            status: .success
+        )
+        let expanded = StatusPopoverFormatting.quotaWindowLayoutSignal(
+            snapshot: makeSnapshot(fourWindows + [
+                QuotaWindow(limitId: "future", windowId: "b", kind: .unknown, durationMinutes: 720, remainingPercent: 40)
+            ]),
+            status: .success
+        )
+
+        XCTAssertEqual(compact.rowCount, 2)
+        XCTAssertFalse(compact.requiresScrolling)
+        XCTAssertEqual(expanded.rowCount, 3)
+        XCTAssertTrue(expanded.requiresScrolling)
+        XCTAssertNotEqual(compact, expanded)
+        XCTAssertEqual(expanded.itemTokens.count, 5)
+    }
+
+    func testWeeklyMenuTitleNeverSubstitutesMonthlyOrUnknownWindow() {
+        let makeSnapshot: (QuotaWindow) -> QuotaSnapshot = { window in
+            QuotaSnapshot(
+                weeklyQuotaPercent: 0,
+                fiveHourQuotaPercent: 0,
+                weeklyQuotaState: .unavailable,
+                fiveHourQuotaState: .unavailable,
+                refreshedAt: .now,
+                dataSource: .real,
+                quotaWindows: [window]
+            )
+        }
+
+        XCTAssertEqual(
+            StatusPopoverFormatting.weeklyQuotaMenuTitle(
+                snapshot: makeSnapshot(QuotaWindow(limitId: "codex", windowId: "monthly", kind: .monthly, remainingPercent: 88)),
+                status: .success
+            ),
+            "--%"
+        )
+        XCTAssertEqual(
+            StatusPopoverFormatting.weeklyQuotaMenuTitle(
+                snapshot: makeSnapshot(QuotaWindow(limitId: "future", windowId: "bank", kind: .unknown, remainingPercent: 77)),
+                status: .success
+            ),
+            "--%"
+        )
+        XCTAssertEqual(
+            StatusPopoverFormatting.weeklyQuotaMenuTitle(
+                snapshot: makeSnapshot(QuotaWindow(limitId: "codex", windowId: "secondary", kind: .weekly, remainingPercent: 66)),
+                status: .success
+            ),
+            "66%"
+        )
+    }
+
+    func testDemoProjectionNeverExposesMockPercentAsTrusted() {
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 0,
+            fiveHourQuotaPercent: 0,
+            refreshedAt: .now,
+            dataSource: .mock,
+            quotaWindows: [
+                QuotaWindow(limitId: "demo", windowId: "monthly", kind: .monthly, remainingPercent: 99)
+            ]
+        )
+
+        let item = StatusPopoverFormatting.quotaWindowDisplayItems(
+            snapshot: snapshot,
+            status: .demoMode
+        ).first
+
+        XCTAssertEqual(item?.percentText, "演示")
+        XCTAssertNil(item?.trustedPercent)
+        XCTAssertNil(item?.progress)
+        XCTAssertEqual(item?.stateText, "演示")
+    }
+
     func testQuotaTooltipKeepsSameQuotaValuesWhileRefreshing() {
         let now = makeDate("2026-06-19T12:40:00Z")
         let resetAt = makeDate("2026-06-19T14:10:00Z")
@@ -391,14 +684,13 @@ final class StatusPopoverFormattingTests: XCTestCase {
         let formatted = StatusPopoverFormatting.quotaTooltip(
             snapshot: snapshot,
             status: .refreshing,
-            resetAt: resetAt,
             now: now,
             calendar: Calendar(identifier: .gregorian).setting(timeZone: TimeZone(secondsFromGMT: 0)!),
             locale: Locale(identifier: "en_US"),
             timeZone: TimeZone(secondsFromGMT: 0)!
         )
 
-        XCTAssertEqual(formatted, "Codex Monitor：5小时额度 43% · 周额度 58% · 恢复 今天 14:10 · 还需 1小时30分 · 正在刷新")
+        XCTAssertEqual(formatted, "Codex Monitor：5小时额度 43% · 周额度 58% · 5小时额度恢复 今天 14:10 · 还需 1小时30分 · 正在刷新")
     }
 
     func testQuotaTooltipKeepsSameQuotaValuesOnAuthFailure() {
@@ -415,14 +707,13 @@ final class StatusPopoverFormattingTests: XCTestCase {
         let formatted = StatusPopoverFormatting.quotaTooltip(
             snapshot: snapshot,
             status: .authRequired,
-            resetAt: resetAt,
             now: now,
             calendar: Calendar(identifier: .gregorian).setting(timeZone: TimeZone(secondsFromGMT: 0)!),
             locale: Locale(identifier: "en_US"),
             timeZone: TimeZone(secondsFromGMT: 0)!
         )
 
-        XCTAssertEqual(formatted, "Codex Monitor：5小时额度 37% · 周额度 52% · 恢复 今天 13:25 · 还需 45分 · 需要登录，显示上次数据")
+        XCTAssertEqual(formatted, "Codex Monitor：5小时额度 37% · 周额度 52% · 5小时额度恢复 今天 13:25 · 还需 45分 · 需要登录，显示上次数据")
     }
 
     func testQuotaSummaryLineUsesPlaceholderWithoutRealSnapshot() {
@@ -433,7 +724,7 @@ final class StatusPopoverFormattingTests: XCTestCase {
             status: .noSnapshot
         )
 
-        XCTAssertEqual(formatted, "5小时额度 -- · 周额度 --")
+        XCTAssertEqual(formatted, "额度 --")
     }
 
     func testRecoverySummaryLineUsesPlaceholdersWithoutUsableQuotaState() {

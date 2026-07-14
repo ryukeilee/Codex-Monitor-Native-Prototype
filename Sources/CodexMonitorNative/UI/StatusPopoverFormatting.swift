@@ -21,6 +21,51 @@ enum StatusPopoverFormatting {
         }
     }
 
+    /// The single presentation contract consumed by the popover, status-item
+    /// tooltip, and Widget. A trusted number and its progress always travel
+    /// together, while cache provenance remains separate from the number.
+    struct QuotaWindowDisplayItem: Equatable, Identifiable {
+        enum Origin: Equatable {
+            case dynamic
+            case legacyFallback
+        }
+
+        let id: String
+        let semanticIdentity: String
+        let kind: QuotaWindowKind
+        let label: String
+        let percentText: String
+        let historyCaption: String?
+        let trustedPercent: Int?
+        let progress: Double?
+        let fieldState: QuotaFieldState
+        let stateText: String
+        let resetAt: Date?
+        let resetText: String
+        let resetRemainingText: String
+        let origin: Origin
+
+        var combinedPercentText: String {
+            guard let historyCaption else { return percentText }
+            return "\(percentText)\(historyCaption)"
+        }
+    }
+
+    struct QuotaWindowLayoutSignal: Equatable {
+        let itemTokens: [String]
+        let rowCount: Int
+        let requiresScrolling: Bool
+    }
+
+    struct QuotaWindowSelection: Equatable {
+        let visibleItems: [QuotaWindowDisplayItem]
+        let overflowCount: Int
+
+        var primaryItem: QuotaWindowDisplayItem? {
+            visibleItems.first
+        }
+    }
+
     struct ResetBankDisplayItem: Equatable, Identifiable {
         let id: String
         let resetText: String
@@ -281,21 +326,169 @@ enum StatusPopoverFormatting {
 
     static func quotaSummaryLine(
         snapshot: QuotaSnapshot,
-        status: QuotaRefreshStatus
+        status: QuotaRefreshStatus,
+        now: Date = .now,
+        calendar: Calendar = .current,
+        locale: Locale = .current,
+        timeZone: TimeZone = .current
     ) -> String {
-        let base = [
-            "5小时额度 \(quotaValueText(for: .fiveHour, snapshot: snapshot, status: status))",
-            "周额度 \(quotaValueText(for: .weekly, snapshot: snapshot, status: status))"
-        ]
-        guard !snapshot.quotaWindows.isEmpty else {
-            return base.joined(separator: " · ")
+        let items = quotaWindowDisplayItems(
+            snapshot: snapshot,
+            status: status,
+            now: now,
+            calendar: calendar,
+            locale: locale,
+            timeZone: timeZone
+        )
+        guard !items.isEmpty else {
+            return "额度 --"
         }
 
-        let extras = snapshot.quotaWindows
-            .filter { $0.kind == .monthly || $0.kind == .unknown }
-            .sorted { $0.id < $1.id }
-            .map { "\($0.displayName) \(quotaWindowValueDisplay($0, status: status).combinedText)" }
-        return (base + extras).joined(separator: " · ")
+        return items
+            .map { "\($0.label) \($0.combinedPercentText)" }
+            .joined(separator: " · ")
+    }
+
+    static func quotaWindowDisplayItems(
+        snapshot: QuotaSnapshot,
+        status: QuotaRefreshStatus,
+        now: Date = .now,
+        calendar: Calendar = .current,
+        locale: Locale = .current,
+        timeZone: TimeZone = .current
+    ) -> [QuotaWindowDisplayItem] {
+        let dynamicWindows = snapshot.quotaWindows.sorted(by: compareQuotaWindowDisplayOrder)
+        var candidates: [(window: QuotaWindow, origin: QuotaWindowDisplayItem.Origin)] = dynamicWindows.map {
+            ($0, .dynamic)
+        }
+
+        if !dynamicWindows.contains(where: { $0.kind == .fiveHour }),
+           snapshot.dataSource == .real,
+           snapshot.fiveHourQuotaState.isDisplayable {
+            candidates.append((
+                QuotaWindow(
+                    limitId: "legacy",
+                    windowId: "fiveHour",
+                    kind: .fiveHour,
+                    durationMinutes: 300,
+                    remainingPercent: snapshot.fiveHourQuotaPercent,
+                    state: snapshot.fiveHourQuotaState,
+                    resetAt: snapshot.fiveHourResetAt
+                ),
+                .legacyFallback
+            ))
+        }
+
+        if !dynamicWindows.contains(where: { $0.kind == .weekly }),
+           snapshot.dataSource == .real,
+           snapshot.weeklyQuotaState.isDisplayable {
+            candidates.append((
+                QuotaWindow(
+                    limitId: "legacy",
+                    windowId: "weekly",
+                    kind: .weekly,
+                    durationMinutes: 10_080,
+                    remainingPercent: snapshot.weeklyQuotaPercent,
+                    state: snapshot.weeklyQuotaState,
+                    resetAt: nil
+                ),
+                .legacyFallback
+            ))
+        }
+
+        candidates.sort { compareQuotaWindowDisplayOrder($0.window, $1.window) }
+
+        return candidates.enumerated().map { index, candidate in
+            let sameKind = candidates.filter { $0.window.kind == candidate.window.kind }
+            let ordinal = candidates[..<index].filter { $0.window.kind == candidate.window.kind }.count + 1
+            let label = quotaWindowLabel(
+                for: candidate.window,
+                ordinal: ordinal,
+                count: sameKind.count
+            )
+            return makeQuotaWindowDisplayItem(
+                window: candidate.window,
+                label: label,
+                origin: candidate.origin,
+                dataSource: snapshot.dataSource,
+                status: status,
+                now: now,
+                calendar: calendar,
+                locale: locale,
+                timeZone: timeZone
+            )
+        }
+    }
+
+    static func quotaWindowLayoutSignal(
+        snapshot: QuotaSnapshot,
+        status: QuotaRefreshStatus,
+        columns: Int = 2
+    ) -> QuotaWindowLayoutSignal {
+        let safeColumns = max(1, columns)
+        let items = quotaWindowDisplayItems(snapshot: snapshot, status: status)
+        let rowCount = (items.count + safeColumns - 1) / safeColumns
+        return QuotaWindowLayoutSignal(
+            itemTokens: items.map {
+                "\($0.id)|\($0.label)|\($0.historyCaption == nil ? "current" : "cached")"
+            },
+            rowCount: rowCount,
+            requiresScrolling: rowCount > 2
+        )
+    }
+
+    static func quotaWindowSelection(
+        snapshot: QuotaSnapshot,
+        status: QuotaRefreshStatus,
+        capacity: Int,
+        now: Date = .now,
+        calendar: Calendar = .current,
+        locale: Locale = .current,
+        timeZone: TimeZone = .current
+    ) -> QuotaWindowSelection {
+        guard capacity > 0 else {
+            return QuotaWindowSelection(visibleItems: [], overflowCount: quotaWindowDisplayItems(
+                snapshot: snapshot,
+                status: status,
+                now: now,
+                calendar: calendar,
+                locale: locale,
+                timeZone: timeZone
+            ).count)
+        }
+
+        let items = quotaWindowDisplayItems(
+            snapshot: snapshot,
+            status: status,
+            now: now,
+            calendar: calendar,
+            locale: locale,
+            timeZone: timeZone
+        )
+        guard !items.isEmpty else {
+            return QuotaWindowSelection(visibleItems: [], overflowCount: 0)
+        }
+        let primaryIndex = items.firstIndex(where: { $0.trustedPercent != nil }) ?? items.startIndex
+
+        let primary = items[primaryIndex]
+        let selectionOrder = [primary] + items.enumerated().compactMap { index, item in
+            index == primaryIndex ? nil : item
+        }
+        let visibleItems = Array(selectionOrder.prefix(capacity))
+        return QuotaWindowSelection(
+            visibleItems: visibleItems,
+            overflowCount: max(0, selectionOrder.count - visibleItems.count)
+        )
+    }
+
+    static func weeklyQuotaMenuTitle(
+        snapshot: QuotaSnapshot,
+        status: QuotaRefreshStatus
+    ) -> String {
+        guard snapshot.dataSource == .real else { return "--%" }
+        let weeklyItem = quotaWindowDisplayItems(snapshot: snapshot, status: status)
+            .first { $0.kind == .weekly && $0.trustedPercent != nil }
+        return weeklyItem?.percentText ?? "--%"
     }
 
     static func quotaValueText(
@@ -314,19 +507,6 @@ enum StatusPopoverFormatting {
         status: QuotaRefreshStatus
     ) -> QuotaValueDisplay {
         quotaDisplay(for: metric, snapshot: snapshot, status: status)
-    }
-
-    static func quotaWindowValueDisplay(
-        _ window: QuotaWindow,
-        status: QuotaRefreshStatus
-    ) -> QuotaValueDisplay {
-        guard showsQuotaValues(for: status), window.state.isDisplayable else {
-            return QuotaValueDisplay(percentText: status == .demoMode ? "演示" : "--", historyCaption: nil)
-        }
-        return QuotaValueDisplay(
-            percentText: "\(window.remainingPercent)%",
-            historyCaption: window.state == .cached ? "（历史缓存）" : nil
-        )
     }
 
     static func recoverySummaryLine(
@@ -487,34 +667,47 @@ enum StatusPopoverFormatting {
     static func quotaTooltip(
         snapshot: QuotaSnapshot,
         status: QuotaRefreshStatus,
-        resetAt: Date? = nil,
         now: Date = .now,
         calendar: Calendar = .current,
         locale: Locale = .current,
         timeZone: TimeZone = .current
     ) -> String {
-        let recovery = recoverySummaryLine(
-            resetAt: resetAt,
+        let summary = quotaSummaryLine(
+            snapshot: snapshot,
             status: status,
             now: now,
             calendar: calendar,
             locale: locale,
             timeZone: timeZone
         )
+        let selection = quotaWindowSelection(
+            snapshot: snapshot,
+            status: status,
+            capacity: 1,
+            now: now,
+            calendar: calendar,
+            locale: locale,
+            timeZone: timeZone
+        )
+        let recovery = selection.primaryItem.flatMap { item -> String? in
+            guard item.trustedPercent != nil else { return nil }
+            return "\(item.label)恢复 \(item.resetText) · 还需 \(item.resetRemainingText)"
+        }
+        let detail = [summary, recovery].compactMap { $0 }.joined(separator: " · ")
 
         switch status {
         case .success:
-            return "Codex Monitor：\(quotaSummaryLine(snapshot: snapshot, status: status)) · \(recovery)"
+            return "Codex Monitor：\(detail)"
         case .refreshing:
-            return "Codex Monitor：\(quotaSummaryLine(snapshot: snapshot, status: status)) · \(recovery) · 正在刷新"
+            return "Codex Monitor：\(detail) · 正在刷新"
         case .networkFailed:
-            return "Codex Monitor：\(quotaSummaryLine(snapshot: snapshot, status: status)) · \(recovery) · 网络异常，显示上次数据"
+            return "Codex Monitor：\(detail) · 网络异常，显示上次数据"
         case .authRequired:
-            return "Codex Monitor：\(quotaSummaryLine(snapshot: snapshot, status: status)) · \(recovery) · 需要登录，显示上次数据"
+            return "Codex Monitor：\(detail) · 需要登录，显示上次数据"
         case .parseFailed:
-            return "Codex Monitor：\(quotaSummaryLine(snapshot: snapshot, status: status)) · \(recovery) · 数据异常，显示上次数据"
+            return "Codex Monitor：\(detail) · 数据异常，显示上次数据"
         case .stale:
-            return "Codex Monitor：\(quotaSummaryLine(snapshot: snapshot, status: status)) · \(recovery) · 数据已过期"
+            return "Codex Monitor：\(detail) · 数据已过期"
         case .noSnapshot:
             return "Codex Monitor：等待连接"
         case .idle:
@@ -522,6 +715,179 @@ enum StatusPopoverFormatting {
         case .demoMode:
             return "Codex Monitor：演示模式"
         }
+    }
+
+    private static func makeQuotaWindowDisplayItem(
+        window: QuotaWindow,
+        label: String,
+        origin: QuotaWindowDisplayItem.Origin,
+        dataSource: QuotaDataSource,
+        status: QuotaRefreshStatus,
+        now: Date,
+        calendar: Calendar,
+        locale: Locale,
+        timeZone: TimeZone
+    ) -> QuotaWindowDisplayItem {
+        let isTrusted = showsQuotaValues(for: status)
+            && dataSource == .real
+            && window.state.isDisplayable
+        let trustedPercent = isTrusted ? window.remainingPercent : nil
+        let percentText: String
+        if let trustedPercent {
+            percentText = "\(trustedPercent)%"
+        } else {
+            percentText = status == .demoMode ? "演示" : "--"
+        }
+
+        let resetText: String
+        let resetRemainingText: String
+        if isTrusted, let resetAt = window.resetAt {
+            resetText = shortTimestamp(
+                for: resetAt,
+                now: now,
+                calendar: calendar,
+                locale: locale,
+                timeZone: timeZone
+            )
+            resetRemainingText = relativeRecoveryLine(for: resetAt, now: now)
+        } else if isTrusted {
+            resetText = "未暴露"
+            resetRemainingText = "未暴露"
+        } else {
+            resetText = "--"
+            resetRemainingText = "--"
+        }
+
+        return QuotaWindowDisplayItem(
+            id: window.id,
+            semanticIdentity: window.semanticIdentity,
+            kind: window.kind,
+            label: label,
+            percentText: percentText,
+            historyCaption: isTrusted && window.state == .cached ? "（历史缓存）" : nil,
+            trustedPercent: trustedPercent,
+            progress: trustedPercent.map { Double($0) / 100 },
+            fieldState: window.state,
+            stateText: quotaWindowStateText(
+                state: window.state,
+                dataSource: dataSource,
+                status: status
+            ),
+            resetAt: window.resetAt,
+            resetText: resetText,
+            resetRemainingText: resetRemainingText,
+            origin: origin
+        )
+    }
+
+    private static func quotaWindowStateText(
+        state: QuotaFieldState,
+        dataSource: QuotaDataSource,
+        status: QuotaRefreshStatus
+    ) -> String {
+        if status == .demoMode || dataSource != .real {
+            return status == .demoMode ? "演示" : "不可用"
+        }
+
+        guard showsQuotaValues(for: status) else {
+            return "等待同步"
+        }
+
+        switch state {
+        case .cached:
+            return "历史缓存"
+        case .unavailable:
+            return "不可用"
+        case .invalid:
+            return "数据无效"
+        case .live:
+            switch status {
+            case .success:
+                return "最新"
+            case .refreshing:
+                return "刷新中"
+            case .stale:
+                return "已过期"
+            case .networkFailed, .authRequired, .parseFailed:
+                return "上次数据"
+            case .noSnapshot, .idle:
+                return "等待同步"
+            case .demoMode:
+                return "演示"
+            }
+        }
+    }
+
+    private static func compareQuotaWindowDisplayOrder(_ lhs: QuotaWindow, _ rhs: QuotaWindow) -> Bool {
+        let leftRank = quotaWindowKindRank(lhs.kind)
+        let rightRank = quotaWindowKindRank(rhs.kind)
+        if leftRank != rightRank {
+            return leftRank < rightRank
+        }
+
+        switch (lhs.durationMinutes, rhs.durationMinutes) {
+        case let (left?, right?) where left != right:
+            return left < right
+        case (_?, nil):
+            return true
+        case (nil, _?):
+            return false
+        default:
+            break
+        }
+
+        if lhs.limitId != rhs.limitId {
+            return lhs.limitId < rhs.limitId
+        }
+        if lhs.windowId != rhs.windowId {
+            return lhs.windowId < rhs.windowId
+        }
+        return lhs.id < rhs.id
+    }
+
+    private static func quotaWindowKindRank(_ kind: QuotaWindowKind) -> Int {
+        switch kind {
+        case .fiveHour:
+            return 0
+        case .weekly:
+            return 1
+        case .monthly:
+            return 2
+        case .unknown:
+            return 3
+        }
+    }
+
+    private static func quotaWindowLabel(
+        for window: QuotaWindow,
+        ordinal: Int,
+        count: Int
+    ) -> String {
+        let label: String
+        if window.kind == .unknown {
+            let duration = window.durationMinutes.flatMap(quotaWindowDurationLabel)
+            let durationSuffix = duration.map { " · \($0)" } ?? ""
+            label = "未知额度 \(ordinal)\(durationSuffix)"
+        } else if count > 1 {
+            label = "\(window.displayName) \(ordinal)"
+        } else {
+            label = window.displayName
+        }
+
+        let maximumLength = 18
+        guard label.count > maximumLength else { return label }
+        return "\(label.prefix(maximumLength - 1))…"
+    }
+
+    private static func quotaWindowDurationLabel(_ minutes: Int) -> String? {
+        guard minutes > 0 else { return nil }
+        if minutes.isMultiple(of: 1_440) {
+            return "\(minutes / 1_440)天"
+        }
+        if minutes.isMultiple(of: 60) {
+            return "\(minutes / 60)小时"
+        }
+        return "\(minutes)分"
     }
 
     private static func sourceLabel(for dataSource: QuotaDataSource) -> String {
@@ -546,45 +912,23 @@ enum StatusPopoverFormatting {
         snapshot: QuotaSnapshot,
         status: QuotaRefreshStatus
     ) -> QuotaValueDisplay {
-        guard showsQuotaValues(for: status) else {
-            return QuotaValueDisplay(percentText: status == .demoMode ? "演示" : "--", historyCaption: nil)
-        }
-
-        guard snapshot.dataSource == .real else {
-            return QuotaValueDisplay(percentText: "--", historyCaption: nil)
-        }
-
-        if !snapshot.quotaWindows.isEmpty {
-            let kind: QuotaWindowKind = metric == .fiveHour ? .fiveHour : .weekly
-            if let window = snapshot.quotaWindows.first(where: { $0.kind == kind && $0.state.isDisplayable })
-                ?? snapshot.quotaWindows.first(where: { $0.kind == kind }) {
-                return quotaWindowValueDisplay(window, status: status)
-            }
-            // A new response can expose only an unknown window while an older
-            // persisted snapshot still supplies a trusted legacy projection.
-            // Keep that cache visible without relabelling the unknown window.
-        }
-
+        let kind: QuotaWindowKind
         switch metric {
         case .fiveHour:
-            return quotaValueDisplay(snapshot.fiveHourQuotaPercent, state: snapshot.fiveHourQuotaState)
+            kind = .fiveHour
         case .weekly:
-            return quotaValueDisplay(snapshot.weeklyQuotaPercent, state: snapshot.weeklyQuotaState)
+            kind = .weekly
         }
-    }
 
-    private static func quotaValueDisplay(_ value: Int, state: QuotaFieldState) -> QuotaValueDisplay {
-        guard state.isDisplayable else {
-            return QuotaValueDisplay(percentText: "--", historyCaption: nil)
+        let candidates = quotaWindowDisplayItems(snapshot: snapshot, status: status)
+            .filter { $0.kind == kind }
+        guard let item = candidates.first(where: { $0.trustedPercent != nil }) ?? candidates.first else {
+            return QuotaValueDisplay(
+                percentText: status == .demoMode ? "演示" : "--",
+                historyCaption: nil
+            )
         }
-        return QuotaValueDisplay(
-            percentText: "\(value)%",
-            historyCaption: state == .cached ? "（历史缓存）" : nil
-        )
-    }
-
-    private static func quotaValue(_ value: Int, state: QuotaFieldState) -> String {
-        quotaValueDisplay(value, state: state).combinedText
+        return QuotaValueDisplay(percentText: item.percentText, historyCaption: item.historyCaption)
     }
 
     private static func showsQuotaValues(for status: QuotaRefreshStatus) -> Bool {

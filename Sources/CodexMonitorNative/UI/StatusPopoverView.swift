@@ -63,10 +63,19 @@ struct StatusPopoverView: View {
         .frame(maxWidth: .infinity)
         .onChange(of: showsSelfCheck) { _, _ in onLayoutChange() }
         .onChange(of: showsDiagnostics) { _, _ in onLayoutChange() }
+        .onChange(of: quotaLayoutSignal) { _, _ in onLayoutChange() }
     }
 
     private var hasExpandedContent: Bool {
-        isQuotaExpanded || showsSelfCheck || showsDiagnostics
+        isQuotaExpanded || showsSelfCheck || showsDiagnostics || quotaLayoutSignal.requiresScrolling
+    }
+
+    private var quotaLayoutSignal: StatusPopoverFormatting.QuotaWindowLayoutSignal {
+        StatusPopoverFormatting.quotaWindowLayoutSignal(
+            snapshot: appState.snapshot,
+            status: appState.displayStatus,
+            columns: 2
+        )
     }
 
     @ViewBuilder
@@ -75,7 +84,6 @@ struct StatusPopoverView: View {
             header
             QuotaSummaryView(
                 appState: appState,
-                isPanelActive: isPanelActive,
                 showsAllResetCredits: $showsAllResetCredits,
                 showsResetCreditFields: $showsResetCreditFields,
                 onLayoutChange: { expanded in

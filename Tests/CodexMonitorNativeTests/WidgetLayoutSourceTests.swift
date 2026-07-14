@@ -50,7 +50,13 @@ final class WidgetLayoutSourceTests: XCTestCase {
         XCTAssertTrue(source.contains("MechanicalEnergyCore(diameter: diameter, progress: gaugeProgress)"))
         XCTAssertTrue(source.contains("Text(centerQuotaNumberText)"))
         XCTAssertTrue(source.contains("diameter: isSmall ? 72 : 74"))
+        XCTAssertTrue(source.contains("entry.state.quotaSelection(capacity: quotaCapacity"))
+        XCTAssertTrue(source.contains("quotaOverflowBadge"))
+        XCTAssertTrue(source.contains("supplementaryQuotas"))
         XCTAssertTrue(project.contains("MechanicalEnergyCore.swift in Sources"))
         XCTAssertFalse(source.contains("TimelineView"))
+        XCTAssertFalse(source.contains("entry.state.weeklyQuotaDisplay"))
+        XCTAssertFalse(source.contains("snapshot.fiveHourQuotaPercent"))
+        XCTAssertFalse(source.contains("snapshot.weeklyQuotaPercent"))
     }
 }

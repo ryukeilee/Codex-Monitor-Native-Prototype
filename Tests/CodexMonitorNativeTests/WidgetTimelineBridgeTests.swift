@@ -151,6 +151,146 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         XCTAssertEqual(state.weeklyQuotaDisplay.historyCaption, "（历史缓存）")
     }
 
+    func testWidgetSelectionShowsOnlyMonthlyWindowAsPrimary() {
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 0,
+            fiveHourQuotaPercent: 0,
+            weeklyQuotaState: .unavailable,
+            fiveHourQuotaState: .unavailable,
+            refreshedAt: .now,
+            dataSource: .real,
+            quotaWindows: [
+                QuotaWindow(
+                    limitId: "codex",
+                    windowId: "monthly",
+                    kind: .monthly,
+                    durationMinutes: 43_200,
+                    remainingPercent: 58
+                )
+            ]
+        )
+        let state = WidgetDisplayState.make(
+            snapshot: snapshot,
+            status: .success,
+            lastSuccessAt: snapshot.refreshedAt,
+            lastAttemptAt: snapshot.refreshedAt,
+            effectiveFiveHourResetAt: nil,
+            savedAt: snapshot.refreshedAt
+        )
+
+        let selection = state.quotaSelection(capacity: 1, now: snapshot.refreshedAt)
+
+        XCTAssertEqual(selection.primaryItem?.kind, .monthly)
+        XCTAssertEqual(selection.primaryItem?.label, "月额度")
+        XCTAssertEqual(selection.primaryItem?.percentText, "58%")
+        XCTAssertEqual(selection.primaryItem?.trustedPercent, 58)
+        XCTAssertEqual(selection.overflowCount, 0)
+    }
+
+    func testWidgetSelectionShowsOnlyUnknownWindowWithoutRelabellingIt() {
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 0,
+            fiveHourQuotaPercent: 0,
+            weeklyQuotaState: .unavailable,
+            fiveHourQuotaState: .unavailable,
+            refreshedAt: .now,
+            dataSource: .real,
+            quotaWindows: [
+                QuotaWindow(
+                    limitId: "future",
+                    windowId: "bank",
+                    kind: .unknown,
+                    durationMinutes: 720,
+                    remainingPercent: 47
+                )
+            ]
+        )
+        let state = WidgetDisplayState.make(
+            snapshot: snapshot,
+            status: .success,
+            lastSuccessAt: snapshot.refreshedAt,
+            lastAttemptAt: snapshot.refreshedAt,
+            effectiveFiveHourResetAt: nil,
+            savedAt: snapshot.refreshedAt
+        )
+
+        let selection = state.quotaSelection(capacity: 1, now: snapshot.refreshedAt)
+
+        XCTAssertEqual(selection.primaryItem?.kind, .unknown)
+        XCTAssertEqual(selection.primaryItem?.label, "未知额度 1 · 12小时")
+        XCTAssertEqual(selection.primaryItem?.percentText, "47%")
+        XCTAssertFalse(selection.primaryItem?.label.contains("周") ?? true)
+        XCTAssertFalse(selection.primaryItem?.label.contains("5小时") ?? true)
+    }
+
+    func testWidgetSelectionReportsOverflowAndUsesStablePrimaryOrder() {
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 0,
+            fiveHourQuotaPercent: 0,
+            weeklyQuotaState: .unavailable,
+            fiveHourQuotaState: .unavailable,
+            refreshedAt: .now,
+            dataSource: .real,
+            quotaWindows: [
+                QuotaWindow(limitId: "future", windowId: "bank", kind: .unknown, remainingPercent: 40),
+                QuotaWindow(limitId: "codex", windowId: "monthly", kind: .monthly, remainingPercent: 50),
+                QuotaWindow(limitId: "codex", windowId: "secondary", kind: .weekly, remainingPercent: 60),
+                QuotaWindow(limitId: "codex", windowId: "primary", kind: .fiveHour, remainingPercent: 70)
+            ]
+        )
+        let state = WidgetDisplayState.make(
+            snapshot: snapshot,
+            status: .success,
+            lastSuccessAt: snapshot.refreshedAt,
+            lastAttemptAt: snapshot.refreshedAt,
+            effectiveFiveHourResetAt: nil,
+            savedAt: snapshot.refreshedAt
+        )
+
+        let compact = state.quotaSelection(capacity: 1, now: snapshot.refreshedAt)
+        let medium = state.quotaSelection(capacity: 3, now: snapshot.refreshedAt)
+
+        XCTAssertEqual(compact.primaryItem?.kind, .fiveHour)
+        XCTAssertEqual(compact.overflowCount, 3)
+        XCTAssertEqual(medium.visibleItems.map(\.kind), [.fiveHour, .weekly, .monthly])
+        XCTAssertEqual(medium.overflowCount, 1)
+    }
+
+    func testWidgetPrimarySkipsUntrustedEarlierWindowButStillCountsItAsOverflow() {
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 0,
+            fiveHourQuotaPercent: 0,
+            weeklyQuotaState: .unavailable,
+            fiveHourQuotaState: .unavailable,
+            refreshedAt: .now,
+            dataSource: .real,
+            quotaWindows: [
+                QuotaWindow(
+                    limitId: "codex",
+                    windowId: "primary",
+                    kind: .fiveHour,
+                    remainingPercent: 99,
+                    state: .invalid
+                ),
+                QuotaWindow(limitId: "codex", windowId: "monthly", kind: .monthly, remainingPercent: 45)
+            ]
+        )
+        let state = WidgetDisplayState.make(
+            snapshot: snapshot,
+            status: .success,
+            lastSuccessAt: snapshot.refreshedAt,
+            lastAttemptAt: snapshot.refreshedAt,
+            effectiveFiveHourResetAt: nil,
+            savedAt: snapshot.refreshedAt
+        )
+
+        let selection = state.quotaSelection(capacity: 1, now: snapshot.refreshedAt)
+
+        XCTAssertEqual(selection.primaryItem?.kind, .monthly)
+        XCTAssertEqual(selection.primaryItem?.percentText, "45%")
+        XCTAssertEqual(selection.overflowCount, 1)
+    }
+
     func testWidgetEarliestResetCreditLineUsesEarliestAvailableExpiry() {
         let now = Date(timeIntervalSince1970: 1_720_000_000)
         let snapshot = QuotaSnapshot(
