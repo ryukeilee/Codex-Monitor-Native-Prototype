@@ -70,7 +70,6 @@ final class StatusPopoverBehaviorTests: XCTestCase {
         XCTAssertFalse(
             StatusPopoverInteractionPolicy.requiresScrollableViewport(
                 isQuotaExpanded: false,
-                isSelfCheckExpanded: false,
                 isDiagnosticsExpanded: false,
                 quotaLayoutSignal: compact
             )
@@ -78,7 +77,6 @@ final class StatusPopoverBehaviorTests: XCTestCase {
         XCTAssertTrue(
             StatusPopoverInteractionPolicy.requiresScrollableViewport(
                 isQuotaExpanded: true,
-                isSelfCheckExpanded: false,
                 isDiagnosticsExpanded: false,
                 quotaLayoutSignal: compact
             )
@@ -86,15 +84,6 @@ final class StatusPopoverBehaviorTests: XCTestCase {
         XCTAssertTrue(
             StatusPopoverInteractionPolicy.requiresScrollableViewport(
                 isQuotaExpanded: false,
-                isSelfCheckExpanded: true,
-                isDiagnosticsExpanded: false,
-                quotaLayoutSignal: compact
-            )
-        )
-        XCTAssertTrue(
-            StatusPopoverInteractionPolicy.requiresScrollableViewport(
-                isQuotaExpanded: false,
-                isSelfCheckExpanded: false,
                 isDiagnosticsExpanded: true,
                 quotaLayoutSignal: compact
             )
@@ -102,7 +91,6 @@ final class StatusPopoverBehaviorTests: XCTestCase {
         XCTAssertTrue(
             StatusPopoverInteractionPolicy.requiresScrollableViewport(
                 isQuotaExpanded: false,
-                isSelfCheckExpanded: false,
                 isDiagnosticsExpanded: false,
                 quotaLayoutSignal: overflowing
             )
@@ -156,7 +144,6 @@ final class StatusPopoverBehaviorTests: XCTestCase {
                 StatusPopoverAccessibilityContract.launchAtLoginToggleIdentifier,
                 StatusPopoverAccessibilityContract.refreshButtonIdentifier,
                 StatusPopoverAccessibilityContract.quitButtonIdentifier,
-                StatusPopoverAccessibilityContract.selfCheckDisclosureIdentifier,
                 StatusPopoverAccessibilityContract.diagnosticsDisclosureIdentifier,
                 StatusPopoverAccessibilityContract.resetCreditsDisclosureIdentifier,
                 StatusPopoverAccessibilityContract.resetCreditFieldsDisclosureIdentifier
@@ -165,7 +152,6 @@ final class StatusPopoverBehaviorTests: XCTestCase {
                 "launch-at-login-toggle",
                 "refresh-button",
                 "quit-button",
-                "self-check-disclosure",
                 "diagnostics-disclosure",
                 "reset-credits-disclosure",
                 "reset-credit-fields-disclosure"

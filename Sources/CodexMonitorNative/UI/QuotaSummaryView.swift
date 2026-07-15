@@ -83,11 +83,11 @@ struct QuotaSummaryView: View {
     @ViewBuilder
     private func resetCreditsSection(_ summary: StatusPopoverFormatting.ResetCreditsSummary) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 12) {
+            HStack(spacing: MetallicControlMetrics.rowSpacing) {
                 Image(systemName: "arrow.clockwise")
                     .font(.headline.weight(.semibold))
                     .foregroundStyle(MetallicPalette.red)
-                    .frame(width: 22)
+                    .frame(width: MetallicControlMetrics.iconColumnWidth)
                 Text(summary.countLine)
                     .font(.headline.weight(.semibold))
                     .foregroundStyle(MetallicPalette.foreground)
@@ -98,11 +98,11 @@ struct QuotaSummaryView: View {
 
             Divider().overlay(MetallicPalette.separator)
 
-            HStack(spacing: 12) {
+            HStack(spacing: MetallicControlMetrics.rowSpacing) {
                 Image(systemName: "clock")
                     .font(.headline.weight(.semibold))
                     .foregroundStyle(MetallicPalette.red)
-                    .frame(width: 22)
+                    .frame(width: MetallicControlMetrics.iconColumnWidth)
 
                 if let featured = summary.featuredCreditItem {
                     featuredResetCreditSummary(featured)
@@ -144,8 +144,6 @@ struct QuotaSummaryView: View {
                                 }
                                 .padding(.top, 4)
                             }
-                            .font(.caption)
-                            .tint(MetallicPalette.muted)
                             .accessibilityValue(
                                 StatusPopoverAccessibilityContract.disclosureValue(
                                     isExpanded: showsResetCreditFields
@@ -163,11 +161,11 @@ struct QuotaSummaryView: View {
                         Text(disclosureTitle)
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(MetallicPalette.foreground)
+                            .padding(.leading, MetallicControlMetrics.textColumnOffset)
                         Spacer()
                     }
                     .contentShape(Rectangle())
                 }
-                .tint(MetallicPalette.redBright)
                 .accessibilityLabel("重置额度详情，\(disclosureTitle)")
                 .accessibilityValue(
                     StatusPopoverAccessibilityContract.disclosureValue(
@@ -176,9 +174,10 @@ struct QuotaSummaryView: View {
                 )
                 .accessibilityHint("显示或隐藏重置额度详情")
                 .accessibilityIdentifier(StatusPopoverAccessibilityContract.resetCreditsDisclosureIdentifier)
+                .disclosureGroupStyle(MetallicDisclosureGroupStyle(horizontalInset: 0))
             }
         }
-        .padding(.horizontal, 10)
+        .padding(.horizontal, MetallicControlMetrics.sectionHorizontalInset)
         .background(MetallicPalette.card)
         .overlay {
             RoundedRectangle(cornerRadius: 12, style: .continuous)

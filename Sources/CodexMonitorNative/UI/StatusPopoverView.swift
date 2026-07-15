@@ -22,7 +22,6 @@ struct StatusPopoverView: View {
     let onQuit: () -> Void
     let onLayoutChange: () -> Void
     @State private var showsDiagnostics = false
-    @State private var showsSelfCheck = false
     @State private var isQuotaExpanded = false
     @State private var showsAllResetCredits = false
     @State private var showsResetCreditFields = false
@@ -60,7 +59,6 @@ struct StatusPopoverView: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .onChange(of: showsSelfCheck) { _, _ in onLayoutChange() }
         .onChange(of: showsDiagnostics) { _, _ in onLayoutChange() }
         .onChange(of: quotaLayoutSignal) { _, _ in onLayoutChange() }
     }
@@ -68,7 +66,6 @@ struct StatusPopoverView: View {
     private var hasExpandedContent: Bool {
         StatusPopoverInteractionPolicy.requiresScrollableViewport(
             isQuotaExpanded: isQuotaExpanded,
-            isSelfCheckExpanded: showsSelfCheck,
             isDiagnosticsExpanded: showsDiagnostics,
             quotaLayoutSignal: quotaLayoutSignal
         )
@@ -104,6 +101,7 @@ struct StatusPopoverView: View {
             diagnostics
         }
         .padding(12)
+        .disclosureGroupStyle(MetallicDisclosureGroupStyle())
     }
 
     private var header: some View {
@@ -162,11 +160,11 @@ struct StatusPopoverView: View {
 
     @ViewBuilder
     private var launchAtLoginSection: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: MetallicControlMetrics.rowSpacing) {
             Image(systemName: "power")
                 .font(.headline.weight(.semibold))
                 .foregroundStyle(launchAtLoginManager.shouldLaunchAtLogin ? Color.green : MetallicPalette.red)
-                .frame(width: 20)
+                .frame(width: MetallicControlMetrics.iconColumnWidth)
             VStack(alignment: .leading, spacing: 1) {
                 if usesCompactLaunchAtLoginSection {
                     Text("开机启动 · 已启用")
@@ -180,14 +178,14 @@ struct StatusPopoverView: View {
                         .lineLimit(1)
                 }
             }
-            Spacer(minLength: 8)
+            Spacer(minLength: MetallicControlMetrics.rowSpacing)
             if usesCompactLaunchAtLoginSection {
-                launchAtLoginToggle(controlSize: .mini, isLowEmphasis: true)
+                launchAtLoginToggle(controlSize: .mini)
             } else {
-                launchAtLoginToggle(controlSize: .small, isLowEmphasis: false)
+                launchAtLoginToggle(controlSize: .small)
             }
         }
-        .padding(.horizontal, 10)
+        .padding(.horizontal, MetallicControlMetrics.sectionHorizontalInset)
         .padding(.vertical, 8)
         .background(MetallicPalette.card)
         .overlay {
@@ -201,9 +199,7 @@ struct StatusPopoverView: View {
         launchAtLoginManager.statusInfo == .enabled
     }
 
-    private func launchAtLoginToggle(controlSize: ControlSize, isLowEmphasis: Bool) -> some View {
-        let dimension: CGFloat = isLowEmphasis ? 22 : 24
-
+    private func launchAtLoginToggle(controlSize: ControlSize) -> some View {
         return Toggle(isOn: launchAtLoginBinding) {
             ZStack {
                 Circle()
@@ -218,7 +214,7 @@ struct StatusPopoverView: View {
                                 launchAtLoginManager.shouldLaunchAtLogin
                                     ? MetallicPalette.redBright
                                     : MetallicPalette.red.opacity(0.9),
-                                lineWidth: 2
+                                lineWidth: MetallicControlMetrics.accessoryBorderWidth
                             )
                     }
 
@@ -232,12 +228,20 @@ struct StatusPopoverView: View {
                         .foregroundStyle(.white)
                 }
             }
-            .frame(width: dimension, height: dimension)
+            .frame(
+                width: MetallicControlMetrics.accessorySize,
+                height: MetallicControlMetrics.accessorySize
+            )
             .shadow(
                 color: launchAtLoginManager.shouldLaunchAtLogin
                     ? MetallicPalette.red.opacity(0.45)
                     : .clear,
                 radius: 4
+            )
+            .frame(
+                width: MetallicControlMetrics.accessoryHitSize,
+                height: MetallicControlMetrics.accessoryHitSize,
+                alignment: .trailing
             )
             .contentShape(Rectangle())
         }
@@ -261,6 +265,7 @@ struct StatusPopoverView: View {
             Button(action: onRefresh) {
                 Label("刷新", systemImage: "arrow.clockwise")
                     .font(.subheadline.weight(.medium))
+                    .frame(minHeight: MetallicControlMetrics.actionRowHeight)
             }
             .buttonStyle(.borderless)
             .foregroundStyle(MetallicPalette.redBright)
@@ -276,6 +281,7 @@ struct StatusPopoverView: View {
             Button(action: onQuit) {
                 Label("退出", systemImage: "rectangle.portrait.and.arrow.right")
                     .font(.subheadline.weight(.medium))
+                    .frame(minHeight: MetallicControlMetrics.actionRowHeight)
             }
             .buttonStyle(.borderless)
             .foregroundStyle(MetallicPalette.foreground)
@@ -284,7 +290,7 @@ struct StatusPopoverView: View {
             .accessibilityHint("退出应用")
             .accessibilityIdentifier(StatusPopoverAccessibilityContract.quitButtonIdentifier)
         }
-        .padding(.horizontal, 10)
+        .padding(.horizontal, MetallicControlMetrics.sectionHorizontalInset)
         .padding(.vertical, 2)
     }
 
@@ -297,15 +303,6 @@ struct StatusPopoverView: View {
                 .lineLimit(2)
         }
 
-        DisclosureGroup("自检", isExpanded: $showsSelfCheck) {
-            selfCheckSection
-        }
-        .font(.caption)
-        .tint(MetallicPalette.muted)
-        .accessibilityValue(StatusPopoverAccessibilityContract.disclosureValue(isExpanded: showsSelfCheck))
-        .accessibilityHint("显示或隐藏自检信息")
-        .accessibilityIdentifier(StatusPopoverAccessibilityContract.selfCheckDisclosureIdentifier)
-
         if hasDiagnosticsContent {
             DisclosureGroup("诊断", isExpanded: $showsDiagnostics) {
                 VStack(alignment: .leading, spacing: 6) {
@@ -316,8 +313,6 @@ struct StatusPopoverView: View {
                 .foregroundStyle(MetallicPalette.muted)
                 .padding(.top, 4)
             }
-            .font(.caption)
-            .tint(MetallicPalette.muted)
             .accessibilityValue(StatusPopoverAccessibilityContract.disclosureValue(isExpanded: showsDiagnostics))
             .accessibilityHint("显示或隐藏诊断信息")
             .accessibilityIdentifier(StatusPopoverAccessibilityContract.diagnosticsDisclosureIdentifier)
@@ -336,34 +331,6 @@ struct StatusPopoverView: View {
 
     private var hasDisplayableSourceStatus: Bool {
         presentationSnapshot.snapshot.dataSource == .real || presentationSnapshot.status == .demoMode
-    }
-
-    private var selfCheckSnapshot: StatusSelfCheckSnapshot {
-        StatusSelfCheckSnapshot.capture(appState: appState)
-    }
-
-    private var selfCheckSection: some View {
-        let snapshot = selfCheckSnapshot
-        return VStack(alignment: .leading, spacing: 6) {
-            selfCheckRow(title: "版本", value: snapshot.version)
-            selfCheckRow(title: "安装", value: snapshot.installPath)
-            selfCheckRow(title: "最近刷新", value: snapshot.refreshSummary)
-            selfCheckRow(title: "Widget", value: snapshot.widgetSummary)
-        }
-        .font(.caption2)
-        .foregroundStyle(MetallicPalette.muted)
-        .padding(.top, 4)
-    }
-
-    private func selfCheckRow(title: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(title)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(MetallicPalette.foreground)
-            Text(value)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-        }
     }
 
     private var supportLine: String? {

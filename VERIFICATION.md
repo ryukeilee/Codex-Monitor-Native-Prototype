@@ -35,7 +35,7 @@ swift test
 - Popover、status-item tooltip 与 Widget 共用同一个动态额度窗口投影：按 5 小时、周、月排序，只展示语义明确且当前可信的窗口。
 - 投影只生成当前实时且可信的 item，并把百分比、进度、字段状态和恢复时间绑定在一起；同语义已知窗口只保留 canonical 来源，只有语义动态窗口缺失时才使用实时 legacy 5 小时/周字段补位。
 - Popover 使用两列动态网格；窗口超过两行时切换到有高度上限的滚动视口，窗口集合变化通过 `StatusPopoverView` 的布局信号触发 `PopoverController` 重新测量。
-- Popover 的圆形开机启动控件由系统 `Toggle` 承载，重置额度、自检、诊断和字段详情由系统 `DisclosureGroup` 承载；视觉样式不再依赖普通按钮模拟开关或披露语义。
+- Popover 的圆形开机启动控件由系统 `Toggle` 承载，重置额度、诊断和字段详情由系统 `DisclosureGroup` 承载；视觉样式不再依赖普通按钮模拟开关或披露语义。
 - Popover 保持系统原生的 Tab 阅读顺序，不用底部操作抢占焦点或改变初始滚动位置；同时支持 `Command-R` 刷新、`Command-Q` 退出和 `Escape` 关闭，交互控件暴露稳定的辅助功能标识及动态开关、展开和刷新状态。
 - 进程内键盘测试把真实 `StatusPopoverView` 挂到隐藏 `NSWindow`，发送 `Command-R` / `Command-Q` 键等价事件，直接证明动作路由有效，并证明刷新状态发布到 SwiftUI 后禁用按钮会拦截重复 `Command-R`。
 - UI 门禁以可执行行为契约为准：Popover 的纯交互契约覆盖滚动视口、嵌套披露、辅助功能状态和 Escape 关闭条件；Widget 的纯呈现输入覆盖容量、primary/overflow、中心数值、进度与 footer 文案。不再以源码字符串或“PNG 文件已写出”作为通过条件；Popover 的真实辅助功能树和 Widget extension 的实际渲染仍列入人工门禁。
@@ -163,8 +163,8 @@ CODEX_MONITOR_FORCE_REFRESH_FAILURE=1 ./script/build_and_run.sh
 2. 打开 Popover，不点击内容，确认内容仍位于顶部且没有因底部控件获取焦点而滚动。
 3. 使用 `Tab` / `Shift-Tab` 遍历所有当前可见控件，确认首次 Tab 按阅读顺序进入控件、焦点环可见，且顺序与面板从上到下的阅读顺序一致。
 4. 聚焦开机启动与各披露控件，使用空格及系统披露键盘操作切换状态；再用 `Command-R` 刷新、`Escape` 关闭面板。
-5. 开启 VoiceOver，并用 Accessibility Inspector 核对启动开关、刷新、退出、自检、诊断和重置详情控件的 identifier、角色、名称、值、禁用状态与展开状态；确认纯装饰能量核心不进入导航。
-6. 展开自检或重置详情，确认出现 identifier 为 `quota-scroll-viewport` 的纵向滚动区域；折叠全部内容后确认该滚动区域消失，Popover 会重新测量且内容不被裁切。
+5. 开启 VoiceOver，并用 Accessibility Inspector 核对启动开关、刷新、退出、诊断和重置详情控件的 identifier、角色、名称、值、禁用状态与展开状态；确认纯装饰能量核心不进入导航。
+6. 展开诊断或重置详情，确认出现 identifier 为 `quota-scroll-viewport` 的纵向滚动区域；折叠全部内容后确认该滚动区域消失，Popover 会重新测量且内容不被裁切。
 7. 展开重置额度详情，确认额度卡片读出百分比、状态、恢复时间与“还需”时间。
 
 预期结果：
