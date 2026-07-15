@@ -1,7 +1,31 @@
+import Darwin
 import XCTest
 @testable import CodexMonitorNative
 
 final class RealQuotaProviderTests: XCTestCase {
+    func testRPCEventQueueReleasesProcessedOperationWhileDrainRemainsActive() async {
+        let queue = CodexRPCEventQueue()
+        let firstProcessed = XCTestExpectation(description: "first operation processed")
+        let firstReleased = XCTestExpectation(description: "first operation released")
+        let secondStarted = XCTestExpectation(description: "second operation started")
+        let gate = AsyncTestGate()
+
+        do {
+            let probe = LifetimeProbe { firstReleased.fulfill() }
+            queue.enqueue {
+                probe.touch()
+                firstProcessed.fulfill()
+            }
+        }
+        queue.enqueue {
+            secondStarted.fulfill()
+            await gate.wait()
+        }
+
+        await fulfillment(of: [firstProcessed, secondStarted, firstReleased], timeout: 1)
+        await gate.open()
+    }
+
     func testProcessTransportClearsHandlersAfterLaunchFailure() throws {
         let process = ControlledProcessHandle(
             terminateExits: false,
@@ -31,6 +55,57 @@ final class RealQuotaProviderTests: XCTestCase {
         XCTAssertTrue(process.handlersCleared)
     }
 
+    func testProcessTransportConcurrentShutdownIsIdempotentAndClosesEveryPipeEndpoint() async throws {
+        let process = ControlledProcessHandle(terminateExits: false, killExits: true)
+        let transport = ProcessRPCTransport(process: process, shutdownGraceSeconds: 0)
+        try transport.start(stdout: { _ in }, stdoutEOF: {}, stderr: { _ in }, termination: { _ in })
+
+        let results = await withTaskGroup(of: Bool.self, returning: [Bool].self) { group in
+            for _ in 0..<8 {
+                group.addTask {
+                    do {
+                        try transport.shutdownAndWait()
+                        return true
+                    } catch {
+                        return false
+                    }
+                }
+            }
+            var results: [Bool] = []
+            for await result in group {
+                results.append(result)
+            }
+            return results
+        }
+
+        XCTAssertEqual(results, Array(repeating: true, count: 8))
+        XCTAssertEqual(process.terminateCount, 1)
+        XCTAssertEqual(process.killCount, 1)
+        XCTAssertTrue(process.handlersCleared)
+    }
+
+    func testProcessTransportRepeatedCyclesCloseFileDescriptorsWhileTransportsRemainRetained() throws {
+        for _ in 0..<5 {
+            try autoreleasepool {
+                try runCompletedTransportCycle()
+            }
+        }
+        let baselineCount = openFileDescriptorCount()
+        var retainedTransports: [ProcessRPCTransport] = []
+
+        for _ in 0..<100 {
+            let process = ControlledProcessHandle(terminateExits: true, killExits: true)
+            let transport = ProcessRPCTransport(process: process, shutdownGraceSeconds: 0)
+            try transport.start(stdout: { _ in }, stdoutEOF: {}, stderr: { _ in }, termination: { _ in })
+            try transport.shutdownAndWait()
+            XCTAssertTrue(process.handlersCleared)
+            retainedTransports.append(transport)
+        }
+
+        XCTAssertLessThanOrEqual(openFileDescriptorCount(), baselineCount)
+        withExtendedLifetime(retainedTransports) {}
+    }
+
     func testProcessTransportThrowsCleanupFailureWhenChildSurvivesKill() throws {
         let process = ControlledProcessHandle(terminateExits: false, killExits: false)
         let transport = ProcessRPCTransport(process: process, shutdownGraceSeconds: 0)
@@ -49,6 +124,9 @@ final class RealQuotaProviderTests: XCTestCase {
         let transport = ProcessRPCTransport(process: process, shutdownGraceSeconds: 0)
         try transport.start(stdout: { _ in }, stdoutEOF: {}, stderr: { _ in }, termination: { _ in })
 
+        XCTAssertThrowsError(try transport.shutdownAndWait()) { error in
+            XCTAssertEqual(error as? ProcessCleanupError, .forceKillFailed)
+        }
         XCTAssertThrowsError(try transport.shutdownAndWait()) { error in
             XCTAssertEqual(error as? ProcessCleanupError, .forceKillFailed)
         }
@@ -87,6 +165,22 @@ final class RealQuotaProviderTests: XCTestCase {
         XCTAssertLessThan(try XCTUnwrap(events.order.firstIndex(of: "stdout")), terminationIndex)
         XCTAssertLessThan(try XCTUnwrap(events.order.firstIndex(of: "stderr")), terminationIndex)
         XCTAssertEqual(events.order.last, "termination:7")
+        XCTAssertTrue(process.handlersCleared)
+    }
+
+    private func runCompletedTransportCycle() throws {
+        let process = ControlledProcessHandle(terminateExits: true, killExits: true)
+        let transport = ProcessRPCTransport(process: process, shutdownGraceSeconds: 0)
+        try transport.start(stdout: { _ in }, stdoutEOF: {}, stderr: { _ in }, termination: { _ in })
+        try transport.shutdownAndWait()
+    }
+
+    private func openFileDescriptorCount() -> Int {
+        (0..<Int(getdtablesize())).reduce(into: 0) { count, descriptor in
+            if fcntl(Int32(descriptor), F_GETFD) != -1 {
+                count += 1
+            }
+        }
     }
 
     func testRPCClientCompletesOnceWithForceKillFailure() async {
@@ -1038,6 +1132,41 @@ final class RealQuotaProviderTests: XCTestCase {
     }
 }
 
+private final class LifetimeProbe: @unchecked Sendable {
+    private let onDeinit: @Sendable () -> Void
+
+    init(onDeinit: @escaping @Sendable () -> Void) {
+        self.onDeinit = onDeinit
+    }
+
+    func touch() {}
+
+    deinit {
+        onDeinit()
+    }
+}
+
+private actor AsyncTestGate {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func open() {
+        isOpen = true
+        let waiters = waiters
+        self.waiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+}
+
 private final class ControlledProcessHandle: ProcessRPCProcess, @unchecked Sendable {
     var isRunning = true
     var terminationStatus: Int32 = 0
@@ -1050,6 +1179,7 @@ private final class ControlledProcessHandle: ProcessRPCProcess, @unchecked Senda
 
     let killSucceeds: Bool
     private let runError: ControlledRPCTransportError?
+    private var stdinPipe: Pipe?
     private var stdoutPipe: Pipe?
     private var stderrPipe: Pipe?
 
@@ -1065,7 +1195,8 @@ private final class ControlledProcessHandle: ProcessRPCProcess, @unchecked Senda
         self.runError = runError
     }
 
-    func configure(codexPath _: String, stdin _: Pipe, stdout: Pipe, stderr: Pipe) {
+    func configure(codexPath _: String, stdin: Pipe, stdout: Pipe, stderr: Pipe) {
+        stdinPipe = stdin
         stdoutPipe = stdout
         stderrPipe = stderr
     }

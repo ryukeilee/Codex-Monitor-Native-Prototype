@@ -10,6 +10,9 @@ final class SleepWakeObserver {
     private let dispatchTask: @Sendable (@escaping @MainActor @Sendable () -> Void) -> Void
     private let resources: SleepWakeResources
 
+    var registeredObserverCount: Int { resources.observers.count }
+    var hasPendingWakeTask: Bool { resources.pendingWakeTask != nil }
+
     /// - Parameters:
     ///   - wakeDelaySeconds: Delay after wake before triggering refresh (3–10s).
     ///     Avoids spurious network failures while the system re-establishes connectivity.

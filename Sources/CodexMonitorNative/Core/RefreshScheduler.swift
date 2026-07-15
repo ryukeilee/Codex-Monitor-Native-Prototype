@@ -8,6 +8,11 @@ final class RefreshScheduler {
     private(set) var isPaused: Bool = false
     private var isRunning: Bool = false
 
+    /// Exposed for lifecycle verification without leaking the timer itself.
+    var hasScheduledTimer: Bool {
+        timerResource.timer != nil
+    }
+
     init(interval: TimeInterval, onTick: @escaping @MainActor () -> Void) {
         self.interval = interval
         self.onTick = onTick
@@ -16,6 +21,7 @@ final class RefreshScheduler {
     func start() {
         stop()
         isRunning = true
+        isPaused = false
         AppLogger.refresh.info("Starting refresh scheduler with interval \(self.interval, format: .fixed(precision: 0)) seconds")
         scheduleTimer()
     }
@@ -25,6 +31,7 @@ final class RefreshScheduler {
             AppLogger.refresh.info("Stopping refresh scheduler")
         }
         isRunning = false
+        isPaused = false
         timerResource.invalidate()
     }
 
@@ -33,13 +40,13 @@ final class RefreshScheduler {
         guard newInterval != interval else { return }
         AppLogger.refresh.info("Updating refresh interval: \(self.interval, format: .fixed(precision: 0)) → \(newInterval, format: .fixed(precision: 0)) seconds")
         interval = newInterval
-        guard !isPaused else { return }
+        guard isRunning, !isPaused else { return }
         scheduleTimer()
     }
 
     /// Pause the scheduler during sleep. Fires are silently dropped.
     func pause() {
-        guard !isPaused else { return }
+        guard isRunning, !isPaused else { return }
         isPaused = true
         AppLogger.system.info("Refresh scheduler paused (system sleep)")
         timerResource.invalidate()
@@ -47,7 +54,7 @@ final class RefreshScheduler {
 
     /// Resume after wake. Resets the timer from now.
     func resume() {
-        guard isPaused else { return }
+        guard isRunning, isPaused else { return }
         isPaused = false
         AppLogger.system.info("Refresh scheduler resumed (system wake)")
         scheduleTimer()
@@ -57,6 +64,7 @@ final class RefreshScheduler {
 
     private func scheduleTimer() {
         timerResource.invalidate()
+        guard isRunning, !isPaused else { return }
         let onTick = self.onTick
         timerResource.timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in

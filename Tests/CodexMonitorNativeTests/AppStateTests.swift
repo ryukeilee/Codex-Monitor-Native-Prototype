@@ -4,6 +4,34 @@ import XCTest
 
 @MainActor
 final class AppStateTests: XCTestCase {
+    func testRepeatedRefreshCyclesConvergeManagedTaskResources() async {
+        let suiteName = "CodexMonitorNativeTests.refreshLifecycle.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 80,
+            fiveHourQuotaPercent: 60,
+            refreshedAt: .now,
+            dataSource: .real
+        )
+        let appState = AppState(
+            snapshotStore: SnapshotStore(defaults: defaults, key: "snapshot"),
+            refreshService: MockRefreshService(snapshot: snapshot)
+        )
+
+        for _ in 0..<500 {
+            await appState.refreshNow(trigger: .scheduled)
+            XCTAssertFalse(appState.hasManagedRefreshTask)
+        }
+
+        XCTAssertEqual(appState.status, .success)
+        XCTAssertTrue(appState.hasScheduledFreshnessTask)
+
+        appState.shutdown()
+        XCTAssertFalse(appState.hasManagedRefreshTask)
+        XCTAssertFalse(appState.hasScheduledFreshnessTask)
+    }
+
     private func assertCallCount(_ expected: Int, for service: QueueingResultRefreshService, file: StaticString = #filePath, line: UInt = #line) async {
         let actual = await service.callCount()
         XCTAssertEqual(actual, expected, file: file, line: line)
@@ -358,6 +386,60 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(appState.status, .stale)
         XCTAssertTrue(appState.isDataStale)
         XCTAssertEqual(store.loadState()?.status, .stale)
+    }
+
+    func testFreshnessTaskClearsAfterMarkingSnapshotStale() async {
+        let suiteName = "CodexMonitorNativeTests.freshnessTaskCompletes.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 72,
+            fiveHourQuotaPercent: 69,
+            refreshedAt: .now,
+            dataSource: .real
+        )
+        store.saveSnapshot(snapshot)
+        let appState = AppState(
+            snapshotStore: store,
+            refreshService: MockRefreshService(snapshot: snapshot),
+            staleAfterInterval: 0.2
+        )
+
+        XCTAssertEqual(appState.status, .success)
+        XCTAssertTrue(appState.hasScheduledFreshnessTask)
+
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        await Task.yield()
+
+        XCTAssertEqual(appState.status, .stale)
+        XCTAssertFalse(appState.hasScheduledFreshnessTask)
+    }
+
+    func testFailedRefreshReleasesCancelledFreshnessTask() async {
+        let suiteName = "CodexMonitorNativeTests.freshnessTaskFailure.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 72,
+            fiveHourQuotaPercent: 69,
+            refreshedAt: .now,
+            dataSource: .real
+        )
+        store.saveSnapshot(snapshot)
+        let appState = AppState(
+            snapshotStore: store,
+            refreshService: MockRefreshService(snapshot: nil),
+            staleAfterInterval: 60
+        )
+
+        XCTAssertTrue(appState.hasScheduledFreshnessTask)
+
+        await appState.refreshNow(trigger: .manual)
+
+        XCTAssertEqual(appState.status, .networkFailed)
+        XCTAssertFalse(appState.hasScheduledFreshnessTask)
     }
 
     func testFailedRefreshKeepsLastSuccessfulSnapshot() async {

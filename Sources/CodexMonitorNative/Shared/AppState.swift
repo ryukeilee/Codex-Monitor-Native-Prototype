@@ -84,7 +84,7 @@ final class AppState: ObservableObject {
     private var latestRealSnapshot: QuotaSnapshot?
     private var consecutiveFailures: Int = 0
     private let defaultInterval: TimeInterval = 300
-    private let staleAfterInterval: TimeInterval = 20 * 60
+    private let staleAfterInterval: TimeInterval
     private let taskResources = AppStateTaskResources()
     private var activeRefresh: ActiveRefresh?
     private var pendingRefresh: PendingRefresh?
@@ -92,6 +92,8 @@ final class AppState: ObservableObject {
 
     var isRefreshing: Bool { status == .refreshing }
     var isUsingCachedSnapshot: Bool { realQuotaHealth.isUsingCachedSnapshot }
+    var hasScheduledFreshnessTask: Bool { taskResources.freshnessTask != nil }
+    var hasManagedRefreshTask: Bool { taskResources.refreshTask != nil }
 
     var isDataStale: Bool {
         guard snapshot.dataSource == .real, let lastSuccessAt else {
@@ -103,8 +105,13 @@ final class AppState: ObservableObject {
 
     // MARK: - Init
 
-    init<T: QuotaRefreshing>(snapshotStore: SnapshotStore, refreshService: T) {
+    init<T: QuotaRefreshing>(
+        snapshotStore: SnapshotStore,
+        refreshService: T,
+        staleAfterInterval: TimeInterval = 20 * 60
+    ) {
         self.snapshotStore = snapshotStore
+        self.staleAfterInterval = staleAfterInterval
         self.refreshAction = { snapshot in
             try await refreshService.refresh(basedOn: snapshot)
         }
@@ -274,8 +281,7 @@ final class AppState: ObservableObject {
     /// until it really returns. Any later trigger is coalesced behind that barrier.
     func shutdown() {
         taskResources.refreshTask?.cancel()
-        taskResources.freshnessTask?.cancel()
-        taskResources.freshnessTask = nil
+        taskResources.cancelFreshnessTask()
 
         pendingRefresh?.resumeWaiters()
         pendingRefresh = nil
@@ -410,7 +416,7 @@ final class AppState: ObservableObject {
             let classifiedStatus = classifyError(error)
             lastErrorSummary = safeErrorMessage(from: error)
             status = classifiedStatus
-            taskResources.freshnessTask?.cancel()
+            taskResources.cancelFreshnessTask()
             realQuotaHealth = healthDiagnostic(for: error)
             if let real = latestRealSnapshot { snapshot = real }
             setBackoffInterval(backoffFor(consecutiveFailures: consecutiveFailures))
@@ -554,7 +560,7 @@ final class AppState: ObservableObject {
     }
 
     private func scheduleFreshnessCheck() {
-        taskResources.freshnessTask?.cancel()
+        taskResources.cancelFreshnessTask()
 
         guard snapshot.dataSource == .real, let lastSuccessAt else {
             return
@@ -571,6 +577,7 @@ final class AppState: ObservableObject {
             return
         }
 
+        let generation = taskResources.nextFreshnessGeneration()
         taskResources.freshnessTask = Task { [weak self] in
             let delay = UInt64(remaining * 1_000_000_000)
             do {
@@ -580,7 +587,8 @@ final class AppState: ObservableObject {
             }
 
             await MainActor.run {
-                guard let self else { return }
+                guard let self, self.taskResources.isCurrentFreshnessTask(generation) else { return }
+                defer { self.taskResources.clearFreshnessTask(for: generation) }
                 guard self.status == .success, self.isDataStale else { return }
 
                 self.status = .stale
@@ -616,7 +624,7 @@ final class AppState: ObservableObject {
         if let attemptedAt {
             lastAttemptAt = attemptedAt
         }
-        taskResources.freshnessTask?.cancel()
+        taskResources.cancelFreshnessTask()
         realQuotaHealth = RealQuotaHealthDiagnostic(
             kind: .requestInProgress,
             isUsingCachedSnapshot: latestRealSnapshot != nil
@@ -668,9 +676,30 @@ final class AppState: ObservableObject {
 private final class AppStateTaskResources {
     var freshnessTask: Task<Void, Never>?
     var refreshTask: Task<Void, Never>?
+    private var freshnessGeneration: UInt = 0
+
+    func cancelFreshnessTask() {
+        freshnessGeneration &+= 1
+        freshnessTask?.cancel()
+        freshnessTask = nil
+    }
+
+    func nextFreshnessGeneration() -> UInt {
+        freshnessGeneration &+= 1
+        return freshnessGeneration
+    }
+
+    func isCurrentFreshnessTask(_ generation: UInt) -> Bool {
+        freshnessGeneration == generation
+    }
+
+    func clearFreshnessTask(for generation: UInt) {
+        guard isCurrentFreshnessTask(generation) else { return }
+        freshnessTask = nil
+    }
 
     deinit {
-        freshnessTask?.cancel()
+        cancelFreshnessTask()
         refreshTask?.cancel()
     }
 }

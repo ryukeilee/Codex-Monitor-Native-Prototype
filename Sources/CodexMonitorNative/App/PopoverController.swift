@@ -1,6 +1,110 @@
 import AppKit
 import SwiftUI
 
+struct PopoverLifecycleState {
+    typealias Token = UInt64
+
+    private var nextToken: Token = 0
+    private(set) var activePresentationToken: Token?
+    private(set) var closingPresentationToken: Token?
+    private(set) var layoutUpdateToken: Token?
+
+    mutating func beginPresentation() -> Token {
+        let token = makeToken()
+        activePresentationToken = token
+        return token
+    }
+
+    mutating func beginClosingCurrentPresentation() -> Token? {
+        guard let activePresentationToken else { return nil }
+        closingPresentationToken = activePresentationToken
+        return activePresentationToken
+    }
+
+    mutating func consumeClosingPresentationToken() -> Token? {
+        let token = closingPresentationToken
+        closingPresentationToken = nil
+        return token
+    }
+
+    mutating func finishPresentation(_ token: Token) -> Bool {
+        guard activePresentationToken == token else { return false }
+        activePresentationToken = nil
+        return true
+    }
+
+    func isActivePresentation(_ token: Token) -> Bool {
+        activePresentationToken == token
+    }
+
+    mutating func beginLayoutUpdate() -> Token? {
+        guard activePresentationToken != nil, layoutUpdateToken == nil else { return nil }
+        let token = makeToken()
+        layoutUpdateToken = token
+        return token
+    }
+
+    func shouldRunLayoutUpdate(_ token: Token, for presentationToken: Token) -> Bool {
+        layoutUpdateToken == token && activePresentationToken == presentationToken
+    }
+
+    @discardableResult
+    mutating func finishLayoutUpdate(_ token: Token) -> Bool {
+        guard layoutUpdateToken == token else { return false }
+        layoutUpdateToken = nil
+        return true
+    }
+
+    mutating func cancelLayoutUpdate() {
+        layoutUpdateToken = nil
+    }
+
+    private mutating func makeToken() -> Token {
+        nextToken &+= 1
+        if nextToken == 0 {
+            nextToken &+= 1
+        }
+        return nextToken
+    }
+}
+
+final class PopoverEventMonitorResources {
+    private let removeMonitor: (Any) -> Void
+    private(set) var localMouse: Any?
+    private(set) var globalMouse: Any?
+    private(set) var keyboard: Any?
+
+    init(removeMonitor: @escaping (Any) -> Void) {
+        self.removeMonitor = removeMonitor
+    }
+
+    var activeCount: Int {
+        [localMouse, globalMouse, keyboard].compactMap { $0 }.count
+    }
+
+    func install(localMouse: Any?, globalMouse: Any?, keyboard: Any?) {
+        removeAll()
+        self.localMouse = localMouse
+        self.globalMouse = globalMouse
+        self.keyboard = keyboard
+    }
+
+    func removeAll() {
+        if let localMouse {
+            removeMonitor(localMouse)
+            self.localMouse = nil
+        }
+        if let globalMouse {
+            removeMonitor(globalMouse)
+            self.globalMouse = nil
+        }
+        if let keyboard {
+            removeMonitor(keyboard)
+            self.keyboard = nil
+        }
+    }
+}
+
 @MainActor
 final class PopoverController: NSObject, NSPopoverDelegate {
     private static let contentWidth: CGFloat = 340
@@ -8,10 +112,13 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     private let popover: NSPopover
     private let launchAtLoginManager: LaunchAtLoginManager
     private let presentationState: PopoverPresentationState
-    private nonisolated(unsafe) var localEventMonitor: Any?
-    private nonisolated(unsafe) var globalEventMonitor: Any?
-    private nonisolated(unsafe) var keyboardEventMonitor: Any?
+    private nonisolated(unsafe) let eventMonitors: PopoverEventMonitorResources
+    private var lifecycle = PopoverLifecycleState()
     private var layoutUpdateTask: Task<Void, Never>?
+
+    var isPopoverShown: Bool { popover.isShown }
+    var activeEventMonitorCount: Int { eventMonitors.activeCount }
+    var hasPendingLayoutUpdate: Bool { layoutUpdateTask != nil }
 
     init(appState: AppState, launchAtLoginManager: LaunchAtLoginManager) {
         let popover = NSPopover()
@@ -23,6 +130,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         self.popover = popover
         self.launchAtLoginManager = launchAtLoginManager
         self.presentationState = presentationState
+        self.eventMonitors = PopoverEventMonitorResources(removeMonitor: NSEvent.removeMonitor)
         super.init()
 
         var hostingController: NSHostingController<StatusPopoverView>?
@@ -47,15 +155,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
 
     deinit {
         // Deinitialization is nonisolated under Swift 6; clean up monitors directly.
-        if let localEventMonitor {
-            NSEvent.removeMonitor(localEventMonitor)
-        }
-        if let globalEventMonitor {
-            NSEvent.removeMonitor(globalEventMonitor)
-        }
-        if let keyboardEventMonitor {
-            NSEvent.removeMonitor(keyboardEventMonitor)
-        }
+        eventMonitors.removeAll()
         layoutUpdateTask?.cancel()
     }
 
@@ -64,6 +164,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             closePopover()
         } else {
             AppLogger.popover.info("Showing popover")
+            let presentationToken = lifecycle.beginPresentation()
             // Re-read the login item status right before presenting the popover
             // so the checkbox reflects system state instead of a stale cached value.
             launchAtLoginManager.refreshStatus()
@@ -71,7 +172,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             updateContentSize(for: button)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
             popover.contentViewController?.view.window?.becomeKey()
-            installOutsideClickMonitors()
+            installOutsideClickMonitors(for: presentationToken)
         }
     }
 
@@ -93,19 +194,28 @@ final class PopoverController: NSObject, NSPopoverDelegate {
 
     private func scheduleLayoutUpdate() {
         guard popover.isShown else { return }
-        guard layoutUpdateTask == nil else { return }
+        guard let presentationToken = lifecycle.activePresentationToken else { return }
+        guard let layoutToken = lifecycle.beginLayoutUpdate() else { return }
 
         layoutUpdateTask = Task { @MainActor [weak self] in
             await Task.yield()
             guard let self else { return }
-            defer { layoutUpdateTask = nil }
+            defer { finishLayoutUpdate(layoutToken) }
+            guard !Task.isCancelled else { return }
+            guard lifecycle.shouldRunLayoutUpdate(layoutToken, for: presentationToken) else { return }
             guard popover.isShown else { return }
             updateContentSize()
         }
     }
 
     private func cancelPendingLayoutUpdate() {
+        lifecycle.cancelLayoutUpdate()
         layoutUpdateTask?.cancel()
+        layoutUpdateTask = nil
+    }
+
+    private func finishLayoutUpdate(_ token: PopoverLifecycleState.Token) {
+        guard lifecycle.finishLayoutUpdate(token) else { return }
         layoutUpdateTask = nil
     }
 
@@ -146,22 +256,29 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     }
 
     private func closePopover() {
+        guard let presentationToken = lifecycle.beginClosingCurrentPresentation() else { return }
         AppLogger.popover.info("Closing popover")
-        cancelPendingLayoutUpdate()
-        presentationState.setPanelActive(false)
+        finishPresentation(presentationToken)
         popover.performClose(nil)
-        removeOutsideClickMonitors()
     }
 
-    private func installOutsideClickMonitors() {
-        removeOutsideClickMonitors()
+    private func finishPresentation(_ token: PopoverLifecycleState.Token) {
+        guard lifecycle.finishPresentation(token) else { return }
+        cancelPendingLayoutUpdate()
+        presentationState.setPanelActive(false)
+        eventMonitors.removeAll()
+    }
+
+    private func installOutsideClickMonitors(for presentationToken: PopoverLifecycleState.Token) {
+        eventMonitors.removeAll()
 
         let mask: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
 
-        localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+        let localMouse = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
             guard let self else {
                 return event
             }
+            guard lifecycle.isActivePresentation(presentationToken) else { return event }
 
             if shouldClose(for: event) {
                 AppLogger.popover.info("Closing popover because of outside local click")
@@ -172,10 +289,11 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             return event
         }
 
-        globalEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
+        let globalMouse = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
             guard let self else {
                 return
             }
+            guard lifecycle.isActivePresentation(presentationToken) else { return }
 
             if shouldClose(for: event) {
                 AppLogger.popover.info("Closing popover because of outside global click")
@@ -183,30 +301,15 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             }
         }
 
-        keyboardEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        let keyboard = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
+            guard lifecycle.isActivePresentation(presentationToken) else { return event }
             guard Self.shouldCloseForKeyEvent(keyCode: event.keyCode, isShown: popover.isShown) else { return event }
             AppLogger.popover.info("Closing popover because of Escape")
             closePopover()
             return nil
         }
-    }
-
-    private func removeOutsideClickMonitors() {
-        if let localEventMonitor {
-            NSEvent.removeMonitor(localEventMonitor)
-            self.localEventMonitor = nil
-        }
-
-        if let globalEventMonitor {
-            NSEvent.removeMonitor(globalEventMonitor)
-            self.globalEventMonitor = nil
-        }
-
-        if let keyboardEventMonitor {
-            NSEvent.removeMonitor(keyboardEventMonitor)
-            self.keyboardEventMonitor = nil
-        }
+        eventMonitors.install(localMouse: localMouse, globalMouse: globalMouse, keyboard: keyboard)
     }
 
     static func shouldCloseForKeyEvent(keyCode: UInt16, isShown: Bool) -> Bool {
@@ -236,9 +339,12 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         return true
     }
 
+    func popoverWillClose(_ notification: Notification) {
+        _ = lifecycle.beginClosingCurrentPresentation()
+    }
+
     func popoverDidClose(_ notification: Notification) {
-        cancelPendingLayoutUpdate()
-        presentationState.setPanelActive(false)
-        removeOutsideClickMonitors()
+        guard let presentationToken = lifecycle.consumeClosingPresentationToken() else { return }
+        finishPresentation(presentationToken)
     }
 }

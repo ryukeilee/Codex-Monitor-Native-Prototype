@@ -4,6 +4,55 @@ import XCTest
 
 @MainActor
 final class SleepWakeObserverTests: XCTestCase {
+    func testRepeatedStartStopCyclesConvergeObserverAndTaskResources() async {
+        let notificationCenter = NotificationCenter()
+        var sleepCount = 0
+        var wakeCount = 0
+        let observer = SleepWakeObserver(
+            notificationCenter: notificationCenter,
+            wakeDelaySeconds: 0,
+            onSleep: { sleepCount += 1 },
+            onWake: { wakeCount += 1 }
+        )
+
+        for _ in 0..<200 {
+            observer.start()
+            XCTAssertEqual(observer.registeredObserverCount, 2)
+            observer.stop()
+            XCTAssertEqual(observer.registeredObserverCount, 0)
+            XCTAssertFalse(observer.hasPendingWakeTask)
+        }
+
+        observer.start()
+        for expectedCount in 1...200 {
+            notificationCenter.post(name: NSWorkspace.willSleepNotification, object: nil)
+            notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+            for _ in 0..<100 {
+                if sleepCount == expectedCount,
+                   wakeCount == expectedCount,
+                   !observer.hasPendingWakeTask {
+                    break
+                }
+                await Task.yield()
+            }
+
+            XCTAssertEqual(sleepCount, expectedCount)
+            XCTAssertEqual(wakeCount, expectedCount)
+            XCTAssertEqual(observer.registeredObserverCount, 2)
+            XCTAssertFalse(observer.hasPendingWakeTask)
+        }
+
+        observer.stop()
+        notificationCenter.post(name: NSWorkspace.willSleepNotification, object: nil)
+        notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+        for _ in 0..<2 { await Task.yield() }
+
+        XCTAssertEqual(sleepCount, 200)
+        XCTAssertEqual(wakeCount, 200)
+        XCTAssertEqual(observer.registeredObserverCount, 0)
+        XCTAssertFalse(observer.hasPendingWakeTask)
+    }
+
     func testStopInvalidatesWakeDeliveredBeforeOuterTaskRuns() async {
         let notificationCenter = NotificationCenter()
         let dispatcher = ControlledMainTaskDispatcher()

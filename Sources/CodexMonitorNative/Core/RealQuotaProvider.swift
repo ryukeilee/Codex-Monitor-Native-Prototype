@@ -174,18 +174,39 @@ private final class DispatchTimeoutToken: CodexRPCCancellable, @unchecked Sendab
     }
 }
 
-private final class CodexRPCEventQueue: @unchecked Sendable {
+final class CodexRPCEventQueue: @unchecked Sendable {
+    private typealias Operation = @Sendable () async -> Void
+
     private let lock = NSLock()
-    private var tail: Task<Void, Never>?
+    private var pendingOperations: [Operation] = []
+    private var isDraining = false
 
     func enqueue(_ operation: @escaping @Sendable () async -> Void) {
         lock.lock()
-        let previous = tail
-        tail = Task {
-            await previous?.value
-            await operation()
+        pendingOperations.append(operation)
+        if !isDraining {
+            isDraining = true
+            Task {
+                await self.drain()
+            }
         }
         lock.unlock()
+    }
+
+    private func drain() async {
+        while let operation = nextOperation() {
+            await operation()
+        }
+    }
+
+    private func nextOperation() -> Operation? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !pendingOperations.isEmpty else {
+            isDraining = false
+            return nil
+        }
+        return pendingOperations.removeFirst()
     }
 }
 
@@ -195,9 +216,11 @@ final class ProcessRPCTransport: CodexRPCTransport, @unchecked Sendable {
     private let stdoutPipe = Pipe()
     private let stderrPipe = Pipe()
     private let streamLock = NSLock()
+    private let shutdownLock = NSLock()
     private var hasStarted = false
     private var isShuttingDown = false
     private var hasTerminated = false
+    private var shutdownResult: Result<Void, Error>?
     private let shutdownGraceSeconds: TimeInterval
 
     init(codexPath: String, shutdownGraceSeconds: TimeInterval = 1) {
@@ -218,6 +241,12 @@ final class ProcessRPCTransport: CodexRPCTransport, @unchecked Sendable {
         stderr: @escaping @Sendable (Data) -> Void,
         termination: @escaping @Sendable (Int32) -> Void
     ) throws {
+        shutdownLock.lock()
+        defer { shutdownLock.unlock() }
+        guard shutdownResult == nil else {
+            throw RealQuotaError.transportFailed
+        }
+
         stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             guard let self else { return }
             self.streamLock.lock()
@@ -275,21 +304,42 @@ final class ProcessRPCTransport: CodexRPCTransport, @unchecked Sendable {
     }
 
     func write(_ data: Data) throws {
+        streamLock.lock()
+        defer { streamLock.unlock() }
+        guard !isShuttingDown, !hasTerminated else {
+            throw RealQuotaError.transportFailed
+        }
         try stdinPipe.fileHandleForWriting.write(contentsOf: data)
     }
 
     func shutdownAndWait() throws {
+        shutdownLock.lock()
+        defer { shutdownLock.unlock() }
+        if let shutdownResult {
+            try shutdownResult.get()
+            return
+        }
+
+        let result: Result<Void, Error> = Result { try performShutdownAndWait() }
+        shutdownResult = result
+        try result.get()
+    }
+
+    private func performShutdownAndWait() throws {
         streamLock.lock()
         isShuttingDown = true
         stdoutPipe.fileHandleForReading.readabilityHandler = nil
         stderrPipe.fileHandleForReading.readabilityHandler = nil
         stdinPipe.fileHandleForWriting.closeFile()
+        stdinPipe.fileHandleForReading.closeFile()
         stdoutPipe.fileHandleForReading.closeFile()
+        stdoutPipe.fileHandleForWriting.closeFile()
         stderrPipe.fileHandleForReading.closeFile()
+        stderrPipe.fileHandleForWriting.closeFile()
         streamLock.unlock()
 
+        process.terminationHandler = nil
         guard hasStarted else {
-            process.terminationHandler = nil
             return
         }
         if process.isRunning {
@@ -298,12 +348,10 @@ final class ProcessRPCTransport: CodexRPCTransport, @unchecked Sendable {
         }
         if process.isRunning {
             guard process.kill() else {
-                process.terminationHandler = nil
                 throw ProcessCleanupError.forceKillFailed
             }
             waitForExit()
         }
-        process.terminationHandler = nil
         if process.isRunning {
             throw ProcessCleanupError.processDidNotExit
         }

@@ -13,11 +13,16 @@
 swift build -c debug
 swift test
 ./script/build_and_run.sh --verify
+ps -p <pid> -o pid=,ppid=,%cpu=,rss=,etime=,comm=
+pgrep -P <pid>
+lsof -p <pid>
+leaks <pid>
 ```
 
 说明：
 
 - `./script/build_and_run.sh --verify` 仍是统一安装验收入口：它会关闭旧实例、构建并签名 app 与 Widget、覆盖安装到 `/Applications/CodexMonitorNative.app`，启动最终安装包，并核对运行进程路径/版本及 `pluginkit` 的 Widget 路径。
+- `swift test` 本轮执行 247 个测试，0 失败；`swift build -c debug` 与统一安装验收均通过。
 - 本轮没有重新执行 `swift build -c release` 或 `./script/build_and_run.sh --telemetry`，因此它们不计入当前自动验证证据。
 
 ## Automated Evidence
@@ -48,6 +53,15 @@ swift test
   - 通用 RPC 失败
   - 等待首次真实请求 / 显示上次成功数据
 - 启动后刷新、定时刷新、失败退避和 wake 后触发刷新都有测试覆盖。
+- 长时间运行资源生命周期有独立的收敛门禁：
+  - 连续 500 次刷新后，每轮物理刷新任务都会清空，且全程最多保留一个有效的新鲜度任务；`shutdown` 后两类任务都归零。
+  - 100 个已完成 shutdown 但仍被强引用的真实 RPC transport 不会让进程文件描述符数高于预热基线；8 个并发 shutdown 调用只执行一次终止/强制终止清理，所有 pipe 端点在显式 shutdown 中关闭。
+  - RPC 事件队列使用单一 FIFO drain；已完成操作的捕获对象会在后续操作仍阻塞时释放，不再由整条 Task 链保留。
+  - scheduler 连续 1,000 轮 start / pause / resume / stop 后定时器归零；stop 后更新间隔或 resume 不会复活定时器。
+  - sleep/wake observer 连续 200 轮 start / stop 后观察者归零，并在持续注册期间完成 200 组 sleep / wake 通知；每轮 wake 任务都归零且观察者数固定为 2。
+  - Popover 事件监视器资源连续 1,000 轮安装/移除后归零；真实 `NSPopover` 连续 50 次打开/关闭后，每轮 3 个事件监视器和异步布局任务均归零，陈旧关闭/布局完成不能影响新一轮展示。
+  - Widget 状态连续 100 次原子移动失败后不残留 `.tmp-*` 文件。
+- 最终安装包启动 36 秒与 3 分 10 秒时的两次只读资源快照均显示 CPU `0.0%`、RSS `38,640 KB`、0 个子进程；`lsof` 描述符记录从 46 降至 45，没有增长。`leaks` 报告 0 leaks / 0 leaked bytes，physical footprint 为 14.3 MB。短时快照只证明对应时刻，长期增长由上述确定性压力门禁约束。
 
 当前测试直接覆盖的关键路径包括：
 
@@ -59,6 +73,7 @@ swift test
 - 并发刷新去重
 - scheduler tick
 - sleep / wake notification wiring
+- 刷新任务、新鲜度任务、RPC 进程/pipe、scheduler timer、sleep/wake observer/task、Popover monitor/layout task 与 Widget 临时文件的重复生命周期收敛
 - 动态投影稳定排序、known-kind 去重、legacy fallback 边界、未知/缓存/无效字段过滤与 reset 一致性
 - Popover only-weekly、only-unknown、5 小时 + 周 + 月、多窗口行数，以及滚动视口与嵌套披露的纯交互信号
 - Popover `Command-R` / `Command-Q` 的真实 `NSWindow` 键盘路由，以及刷新中禁用态对重复快捷键的拦截

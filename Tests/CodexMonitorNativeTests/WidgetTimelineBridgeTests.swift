@@ -643,6 +643,32 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager), newer)
     }
 
+    func testRepeatedFailedWidgetStateMovesDoNotAccumulateTemporaryFiles() throws {
+        let groupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexMonitorNativeTests.widgetFailedMove.\(UUID().uuidString)", isDirectory: true)
+        let fileManager = FailingMoveWidgetStateTestFileManager(groupURL: groupURL)
+        let state = WidgetDisplayState.make(
+            snapshot: .notConnected,
+            status: .noSnapshot,
+            lastSuccessAt: nil,
+            lastAttemptAt: nil,
+            effectiveFiveHourResetAt: nil,
+            savedAt: Date(timeIntervalSince1970: 200)
+        )
+
+        for _ in 0..<100 {
+            WidgetDisplayStateStore.save(state, fileManager: fileManager)
+        }
+
+        let stateURL = WidgetDisplayStateStore.stateURL(fileManager: fileManager)
+        let contents = try FileManager.default.contentsOfDirectory(
+            at: groupURL,
+            includingPropertiesForKeys: nil
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stateURL.path))
+        XCTAssertFalse(contents.contains { $0.lastPathComponent.contains(".tmp-") })
+    }
+
     func testWidgetStateDoesNotLetOlderRealSnapshotReplaceNewerRealSnapshot() {
         let groupURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("CodexMonitorNativeTests.widgetRealNewest.\(UUID().uuidString)", isDirectory: true)
@@ -1113,6 +1139,26 @@ private final class WidgetStateTestFileManager: FileManager {
 
     override func containerURL(forSecurityApplicationGroupIdentifier groupIdentifier: String) -> URL? {
         groupURL
+    }
+}
+
+private final class FailingMoveWidgetStateTestFileManager: FileManager {
+    private let groupURL: URL
+
+    init(groupURL: URL) {
+        self.groupURL = groupURL
+        super.init()
+    }
+
+    override func containerURL(forSecurityApplicationGroupIdentifier groupIdentifier: String) -> URL? {
+        groupURL
+    }
+
+    override func moveItem(at srcURL: URL, to dstURL: URL) throws {
+        if srcURL.lastPathComponent.contains(".tmp-") {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        try super.moveItem(at: srcURL, to: dstURL)
     }
 }
 

@@ -225,6 +225,98 @@ final class StatusPopoverBehaviorTests: XCTestCase {
         XCTAssertLessThanOrEqual(measured.height, 560)
     }
 
+    func testPopoverLifecycleIgnoresStaleCloseAndLayoutCompletion() {
+        var lifecycle = PopoverLifecycleState()
+        let firstPresentation = lifecycle.beginPresentation()
+        let staleLayout = lifecycle.beginLayoutUpdate()
+
+        XCTAssertNotNil(staleLayout)
+        lifecycle.cancelLayoutUpdate()
+        let currentLayout = lifecycle.beginLayoutUpdate()
+        XCTAssertNotNil(currentLayout)
+        XCTAssertFalse(lifecycle.finishLayoutUpdate(staleLayout!))
+        XCTAssertEqual(lifecycle.layoutUpdateToken, currentLayout)
+
+        XCTAssertEqual(lifecycle.beginClosingCurrentPresentation(), firstPresentation)
+        XCTAssertTrue(lifecycle.finishPresentation(firstPresentation))
+        let secondPresentation = lifecycle.beginPresentation()
+        let delayedClose = lifecycle.consumeClosingPresentationToken()
+
+        XCTAssertEqual(delayedClose, firstPresentation)
+        XCTAssertFalse(lifecycle.finishPresentation(delayedClose!))
+        XCTAssertEqual(lifecycle.activePresentationToken, secondPresentation)
+        XCTAssertFalse(lifecycle.shouldRunLayoutUpdate(currentLayout!, for: firstPresentation))
+        XCTAssertNil(lifecycle.consumeClosingPresentationToken())
+        XCTAssertEqual(lifecycle.activePresentationToken, secondPresentation)
+    }
+
+    func testPopoverMonitorResourcesStayBoundedAcrossRepeatedPresentationCycles() {
+        final class MonitorToken {
+            let id: Int
+
+            init(id: Int) {
+                self.id = id
+            }
+        }
+
+        var removedIdentifiers: Set<Int> = []
+        let resources = PopoverEventMonitorResources { monitor in
+            removedIdentifiers.insert((monitor as! MonitorToken).id)
+        }
+        var installedIdentifiers: Set<Int> = []
+
+        for cycle in 0..<1_000 {
+            let identifiers = (0..<3).map { cycle * 3 + $0 }
+            let monitors = identifiers.map(MonitorToken.init)
+            installedIdentifiers.formUnion(identifiers)
+            resources.install(
+                localMouse: monitors[0],
+                globalMouse: monitors[1],
+                keyboard: monitors[2]
+            )
+            XCTAssertEqual(resources.activeCount, 3)
+            resources.removeAll()
+            XCTAssertEqual(resources.activeCount, 0)
+        }
+
+        XCTAssertEqual(removedIdentifiers, installedIdentifiers)
+
+        resources.removeAll()
+        XCTAssertEqual(removedIdentifiers.count, 3_000)
+    }
+
+    func testRealPopoverRepeatedToggleReclaimsMonitorsAndLayoutTask() async throws {
+        _ = NSApplication.shared
+        let suiteName = "CodexMonitorNativeTests.popoverLifecycle.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(
+            snapshotStore: SnapshotStore(defaults: defaults, key: "snapshot"),
+            refreshService: SuspendedSnapshotRefreshService()
+        )
+        defer { appState.shutdown() }
+        let launchManager = LaunchAtLoginManager(
+            loginItemManager: SnapshotLoginItemManager(status: .enabled)
+        )
+        let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        defer { NSStatusBar.system.removeStatusItem(statusItem) }
+        let button = try XCTUnwrap(statusItem.button)
+        button.title = "--%"
+        let controller = PopoverController(appState: appState, launchAtLoginManager: launchManager)
+
+        for _ in 0..<50 {
+            controller.toggle(relativeTo: button)
+            XCTAssertTrue(controller.isPopoverShown)
+            XCTAssertEqual(controller.activeEventMonitorCount, 3)
+
+            controller.toggle(relativeTo: button)
+            await Task.yield()
+            XCTAssertFalse(controller.isPopoverShown)
+            XCTAssertEqual(controller.activeEventMonitorCount, 0)
+            XCTAssertFalse(controller.hasPendingLayoutUpdate)
+        }
+    }
+
     private func performCommandShortcut(_ character: String, keyCode: UInt16, in window: NSWindow) -> Bool {
         let event = NSEvent.keyEvent(
             with: .keyDown,

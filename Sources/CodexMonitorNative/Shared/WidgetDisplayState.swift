@@ -402,6 +402,12 @@ enum WidgetDisplayStateStore {
                 }
             }
             let temporaryURL = url.appendingPathExtension("tmp-\(UUID().uuidString)")
+            defer {
+                // A failed replace/move must not leave one orphan per refresh.
+                // On success the temporary path no longer exists, so this stays
+                // harmless while making every failure path self-cleaning.
+                try? fileManager.removeItem(at: temporaryURL)
+            }
             try data.write(to: temporaryURL, options: .atomic)
             if fileManager.fileExists(atPath: url.path) {
                 _ = try fileManager.replaceItemAt(url, withItemAt: temporaryURL)
