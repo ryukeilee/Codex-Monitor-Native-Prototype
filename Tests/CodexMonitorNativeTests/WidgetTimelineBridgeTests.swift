@@ -431,6 +431,205 @@ final class WidgetTimelineBridgeTests: XCTestCase {
                       FileManager.default.fileExists(atPath: stateURL.deletingPathExtension().appendingPathComponent("WidgetDisplayState.corrupt").path))
     }
 
+    func testWidgetStateDoesNotBypassOrQuarantineUnsupportedEnvelopeThroughLegacyFields() throws {
+        let groupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexMonitorNativeTests.widgetUnsupportedEnvelope.\(UUID().uuidString)", isDirectory: true)
+        let fileManager = WidgetStateTestFileManager(groupURL: groupURL)
+        let stateURL = WidgetDisplayStateStore.stateURL(fileManager: fileManager)
+        let state = WidgetDisplayState.make(
+            snapshot: QuotaSnapshot(
+                weeklyQuotaPercent: 81,
+                fiveHourQuotaPercent: 63,
+                refreshedAt: Date(timeIntervalSince1970: 200),
+                dataSource: .real
+            ),
+            status: .success,
+            lastSuccessAt: Date(timeIntervalSince1970: 200),
+            lastAttemptAt: nil,
+            effectiveFiveHourResetAt: nil,
+            savedAt: Date(timeIntervalSince1970: 200)
+        )
+        var object = try JSONSerialization.jsonObject(
+            with: legacyCompatibleEnvelopeData(state, revision: 1)
+        ) as! [String: Any]
+        object["formatVersion"] = PersistenceEnvelope.currentFormatVersion + 1
+        let unsupportedData = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        try FileManager.default.createDirectory(at: groupURL, withIntermediateDirectories: true)
+        try unsupportedData.write(to: stateURL)
+
+        XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager), .placeholder)
+        XCTAssertEqual(try Data(contentsOf: stateURL), unsupportedData)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stateURL.appendingPathExtension("corrupt").path))
+    }
+
+    func testWidgetStateDoesNotBypassChecksumFailureThroughLegacyFields() throws {
+        let groupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexMonitorNativeTests.widgetChecksumEnvelope.\(UUID().uuidString)", isDirectory: true)
+        let fileManager = WidgetStateTestFileManager(groupURL: groupURL)
+        let stateURL = WidgetDisplayStateStore.stateURL(fileManager: fileManager)
+        let state = WidgetDisplayState.make(
+            snapshot: .notConnected,
+            status: .noSnapshot,
+            lastSuccessAt: nil,
+            lastAttemptAt: nil,
+            effectiveFiveHourResetAt: nil,
+            savedAt: Date(timeIntervalSince1970: 200)
+        )
+        var object = try JSONSerialization.jsonObject(
+            with: legacyCompatibleEnvelopeData(state, revision: 1)
+        ) as! [String: Any]
+        object["checksum"] = "invalid"
+        let corruptData = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        try FileManager.default.createDirectory(at: groupURL, withIntermediateDirectories: true)
+        try corruptData.write(to: stateURL)
+
+        XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager), .placeholder)
+        XCTAssertEqual(try Data(contentsOf: stateURL.appendingPathExtension("corrupt")), corruptData)
+    }
+
+    func testWidgetStateRecoversBackupWhenFutureEnvelopeChecksumIsInvalid() throws {
+        let groupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexMonitorNativeTests.widgetCorruptFutureEnvelope.\(UUID().uuidString)", isDirectory: true)
+        let fileManager = WidgetStateTestFileManager(groupURL: groupURL)
+        let stateURL = WidgetDisplayStateStore.stateURL(fileManager: fileManager)
+        let trusted = WidgetDisplayState.make(
+            snapshot: QuotaSnapshot(
+                weeklyQuotaPercent: 75,
+                fiveHourQuotaPercent: 55,
+                refreshedAt: Date(timeIntervalSince1970: 100),
+                dataSource: .real
+            ),
+            status: .success,
+            lastSuccessAt: Date(timeIntervalSince1970: 100),
+            lastAttemptAt: nil,
+            effectiveFiveHourResetAt: nil,
+            savedAt: Date(timeIntervalSince1970: 100)
+        )
+        let backupData = try legacyCompatibleEnvelopeData(trusted, revision: 1)
+        var corruptObject = try JSONSerialization.jsonObject(
+            with: legacyCompatibleEnvelopeData(trusted, revision: 2)
+        ) as! [String: Any]
+        corruptObject["formatVersion"] = PersistenceEnvelope.currentFormatVersion + 1
+        corruptObject["checksum"] = "invalid"
+        let corruptData = try JSONSerialization.data(withJSONObject: corruptObject, options: [.sortedKeys])
+        try FileManager.default.createDirectory(at: groupURL, withIntermediateDirectories: true)
+        try corruptData.write(to: stateURL)
+        try backupData.write(to: stateURL.appendingPathExtension("backup"))
+
+        XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager), trusted)
+        XCTAssertEqual(try Data(contentsOf: stateURL), backupData)
+        XCTAssertEqual(try Data(contentsOf: stateURL.appendingPathExtension("corrupt")), corruptData)
+    }
+
+    func testWidgetStateRecoversAndMigratesLegacyRawBackup() throws {
+        let groupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexMonitorNativeTests.widgetLegacyBackup.\(UUID().uuidString)", isDirectory: true)
+        let fileManager = WidgetStateTestFileManager(groupURL: groupURL)
+        let stateURL = WidgetDisplayStateStore.stateURL(fileManager: fileManager)
+        let state = WidgetDisplayState.make(
+            snapshot: QuotaSnapshot(
+                weeklyQuotaPercent: 78,
+                fiveHourQuotaPercent: 52,
+                refreshedAt: Date(timeIntervalSince1970: 100),
+                dataSource: .real
+            ),
+            status: .success,
+            lastSuccessAt: Date(timeIntervalSince1970: 100),
+            lastAttemptAt: nil,
+            effectiveFiveHourResetAt: nil,
+            savedAt: Date(timeIntervalSince1970: 100)
+        )
+        try FileManager.default.createDirectory(at: groupURL, withIntermediateDirectories: true)
+        try Data("truncated".utf8).write(to: stateURL)
+        try JSONEncoder().encode(state).write(to: stateURL.appendingPathExtension("backup"))
+
+        XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager), state)
+        let migratedData = try Data(contentsOf: stateURL)
+        let envelope = try JSONDecoder().decode(PersistenceEnvelope.self, from: migratedData)
+        XCTAssertEqual(try envelope.decode(WidgetDisplayState.self), state)
+        XCTAssertEqual(try Data(contentsOf: stateURL.appendingPathExtension("corrupt")), Data("truncated".utf8))
+    }
+
+    func testWidgetStateUsesBackupWithoutDowngradingFutureSnapshotSchema() throws {
+        let groupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexMonitorNativeTests.widgetFutureSchema.\(UUID().uuidString)", isDirectory: true)
+        let fileManager = WidgetStateTestFileManager(groupURL: groupURL)
+        let stateURL = WidgetDisplayStateStore.stateURL(fileManager: fileManager)
+        let trusted = WidgetDisplayState.make(
+            snapshot: QuotaSnapshot(
+                weeklyQuotaPercent: 70,
+                fiveHourQuotaPercent: 60,
+                refreshedAt: Date(timeIntervalSince1970: 100),
+                dataSource: .real
+            ),
+            status: .success,
+            lastSuccessAt: Date(timeIntervalSince1970: 100),
+            lastAttemptAt: nil,
+            effectiveFiveHourResetAt: nil,
+            savedAt: Date(timeIntervalSince1970: 100)
+        )
+        let future = WidgetDisplayState.make(
+            snapshot: QuotaSnapshot(
+                weeklyQuotaPercent: 90,
+                fiveHourQuotaPercent: 80,
+                refreshedAt: Date(timeIntervalSince1970: 300),
+                dataSource: .real,
+                schemaVersion: QuotaSnapshot.currentSchemaVersion + 1
+            ),
+            status: .success,
+            lastSuccessAt: Date(timeIntervalSince1970: 300),
+            lastAttemptAt: nil,
+            effectiveFiveHourResetAt: nil,
+            savedAt: Date(timeIntervalSince1970: 300)
+        )
+        let futureData = try legacyCompatibleEnvelopeData(future, revision: 2)
+        try FileManager.default.createDirectory(at: groupURL, withIntermediateDirectories: true)
+        try futureData.write(to: stateURL)
+
+        WidgetDisplayStateStore.save(trusted, fileManager: fileManager)
+        XCTAssertEqual(try Data(contentsOf: stateURL), futureData)
+
+        try legacyCompatibleEnvelopeData(trusted, revision: 1)
+            .write(to: stateURL.appendingPathExtension("backup"))
+        XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager), trusted)
+        XCTAssertEqual(try Data(contentsOf: stateURL), futureData)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stateURL.appendingPathExtension("corrupt").path))
+    }
+
+    func testWidgetStatePreservesRawFutureSnapshotSchemaWhileUsingBackup() throws {
+        let groupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexMonitorNativeTests.widgetRawFutureSchema.\(UUID().uuidString)", isDirectory: true)
+        let fileManager = WidgetStateTestFileManager(groupURL: groupURL)
+        let stateURL = WidgetDisplayStateStore.stateURL(fileManager: fileManager)
+        let trusted = WidgetDisplayState.make(
+            snapshot: QuotaSnapshot(weeklyQuotaPercent: 70, fiveHourQuotaPercent: 60, refreshedAt: Date(timeIntervalSince1970: 100), dataSource: .real),
+            status: .success,
+            lastSuccessAt: Date(timeIntervalSince1970: 100),
+            lastAttemptAt: nil,
+            effectiveFiveHourResetAt: nil,
+            savedAt: Date(timeIntervalSince1970: 100)
+        )
+        let future = WidgetDisplayState.make(
+            snapshot: QuotaSnapshot(weeklyQuotaPercent: 90, fiveHourQuotaPercent: 80, refreshedAt: Date(timeIntervalSince1970: 300), dataSource: .real, schemaVersion: QuotaSnapshot.currentSchemaVersion + 1),
+            status: .success,
+            lastSuccessAt: Date(timeIntervalSince1970: 300),
+            lastAttemptAt: nil,
+            effectiveFiveHourResetAt: nil,
+            savedAt: Date(timeIntervalSince1970: 300)
+        )
+        let futureData = try JSONEncoder().encode(future)
+        try FileManager.default.createDirectory(at: groupURL, withIntermediateDirectories: true)
+        try futureData.write(to: stateURL)
+        try legacyCompatibleEnvelopeData(trusted, revision: 1)
+            .write(to: stateURL.appendingPathExtension("backup"))
+
+        WidgetDisplayStateStore.save(trusted, fileManager: fileManager)
+        XCTAssertEqual(try Data(contentsOf: stateURL), futureData)
+        XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager), trusted)
+        XCTAssertEqual(try Data(contentsOf: stateURL), futureData)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stateURL.appendingPathExtension("corrupt").path))
+    }
+
     func testWidgetStateDoesNotLetOlderWriteReplaceNewerState() {
         let groupURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("CodexMonitorNativeTests.widgetNewest.\(UUID().uuidString)", isDirectory: true)
@@ -915,6 +1114,20 @@ private final class WidgetStateTestFileManager: FileManager {
     override func containerURL(forSecurityApplicationGroupIdentifier groupIdentifier: String) -> URL? {
         groupURL
     }
+}
+
+private func legacyCompatibleEnvelopeData(
+    _ state: WidgetDisplayState,
+    revision: UInt64
+) throws -> Data {
+    let encoder = JSONEncoder()
+    let envelope = try PersistenceEnvelope(value: state, revision: revision)
+    var envelopeObject = try JSONSerialization.jsonObject(with: encoder.encode(envelope)) as! [String: Any]
+    let legacyObject = try JSONSerialization.jsonObject(with: encoder.encode(state)) as! [String: Any]
+    for (key, value) in legacyObject {
+        envelopeObject[key] = value
+    }
+    return try JSONSerialization.data(withJSONObject: envelopeObject, options: [.sortedKeys])
 }
 
 private struct WidgetBridgeFailingRefreshService: QuotaRefreshing {

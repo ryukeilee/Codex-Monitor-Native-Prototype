@@ -37,33 +37,28 @@ struct SnapshotStore {
     func loadState() -> PersistedAppState? {
         lock.lock()
         defer { lock.unlock() }
+        let primaryData = defaults.data(forKey: key)
+        let primaryWasWrittenByNewerVersion = primaryData.map(containsNewerPersistenceVersion) ?? false
 
-        if let state = decodeState(from: defaults.data(forKey: key)) {
+        if let state = decodeState(from: primaryData) {
             return migratePersistedStateIfNeeded(state)
         }
 
-        if let data = defaults.data(forKey: key), let legacy = decodeRawSnapshot(data) {
-            let migrated = hasSchemaVersion(in: data) && legacy.schemaVersion < QuotaSnapshot.currentSchemaVersion ? migrate(legacy) : legacy
-            let state = PersistedAppState(
-                snapshot: migrated,
-                status: migrated.dataSource == .real ? .success : .demoMode,
-                lastSuccessAt: migrated.dataSource == .real ? migrated.refreshedAt : nil,
-                lastAttemptAt: nil,
-                failureCount: 0
-            )
+        if let data = primaryData, let state = decodeLegacyState(from: data) {
             saveStateUnlocked(state)
-            AppLogger.snapshot.info("Migrated legacy snapshot schemaV\(legacy.schemaVersion) to unified persistence")
+            AppLogger.snapshot.info("Migrated legacy snapshot schemaV\(state.snapshot.schemaVersion) to unified persistence")
             return state
         }
 
-        if let backup = defaults.data(forKey: backupKey), let state = decodeState(from: backup) {
-            quarantinePrimary()
-            defaults.set(backup, forKey: key)
-            AppLogger.snapshot.error("Recovered persisted app state from backup after primary corruption")
-            return migratePersistedStateIfNeeded(state)
+        if let state = recoverStateFromBackup(preservingPrimary: primaryWasWrittenByNewerVersion) {
+            return state
         }
 
-        quarantinePrimary()
+        if primaryWasWrittenByNewerVersion {
+            AppLogger.snapshot.error("Persisted app state uses a newer persistence version; preserving primary and starting not-connected")
+            return nil
+        }
+
         AppLogger.snapshot.error("No trusted persisted app state remained; starting not-connected")
         return nil
     }
@@ -84,7 +79,19 @@ struct SnapshotStore {
         defer { lock.unlock() }
 
         let currentData = defaults.data(forKey: key)
+        guard isSupported(state) else {
+            AppLogger.snapshot.error("Refused to persist app state with an unsupported schema")
+            return
+        }
+        guard currentData.map(containsNewerPersistenceVersion) != true else {
+            AppLogger.snapshot.error("Refused to overwrite persisted app state written by a newer persistence version")
+            return
+        }
         let current = loadEnvelope(from: currentData)
+        if let current, !isSupported(current.value) {
+            AppLogger.snapshot.error("Refused to overwrite persisted app state with a newer schema")
+            return
+        }
         if let current, shouldReject(state: state, existing: current.value) {
             AppLogger.snapshot.info("Ignored persisted app state revision \(current.revision) because it is older or non-real")
             return
@@ -99,11 +106,12 @@ struct SnapshotStore {
         do {
             let envelope = try PersistenceEnvelope(value: state, revision: nextRevision)
             let data = try encoder.encode(envelope)
-            let trustedData = currentData.flatMap { loadEnvelope(from: $0) != nil ? $0 : defaults.data(forKey: backupKey) }
-            if let currentData = currentData, loadEnvelope(from: currentData) != nil {
+            let trustedData = currentData.flatMap { isTrustedPersistenceData($0) ? $0 : nil }
+                ?? defaults.data(forKey: backupKey).flatMap { isTrustedPersistenceData($0) ? $0 : nil }
+            if let currentData, isTrustedPersistenceData(currentData) {
                 defaults.set(currentData, forKey: backupKey)
                 guard defaults.data(forKey: backupKey) == currentData,
-                      defaults.data(forKey: backupKey).flatMap({ loadEnvelope(from: $0) }) != nil else {
+                      defaults.data(forKey: backupKey).map(isTrustedPersistenceData) == true else {
                     AppLogger.snapshot.error("Backup verification failed; primary app state was not replaced")
                     return
                 }
@@ -130,6 +138,7 @@ struct SnapshotStore {
     private func decodeState(from data: Data?) -> PersistedAppState? {
         guard let data else { return nil }
         guard let envelope = loadEnvelope(from: data) else { return nil }
+        guard isSupported(envelope.value) else { return nil }
         return envelope.value
     }
 
@@ -139,6 +148,82 @@ struct SnapshotStore {
             return nil
         }
         return DecodedEnvelope(value: value, revision: envelope.revision)
+    }
+
+    private func decodeLegacyState(from data: Data) -> PersistedAppState? {
+        guard let legacy = decodeRawSnapshot(data),
+              (1...QuotaSnapshot.currentSchemaVersion).contains(legacy.schemaVersion) else {
+            return nil
+        }
+        let shouldMigrate = legacy.schemaVersion < QuotaSnapshot.currentSchemaVersion
+            && (legacy.dataSource == .real || hasSchemaVersion(in: data))
+        let snapshot = shouldMigrate ? migrate(legacy) : legacy
+        return PersistedAppState(
+            snapshot: snapshot,
+            status: snapshot.dataSource == .real ? .success : .demoMode,
+            lastSuccessAt: snapshot.dataSource == .real ? snapshot.refreshedAt : nil,
+            lastAttemptAt: nil,
+            failureCount: 0
+        )
+    }
+
+    private func recoverStateFromBackup(preservingPrimary: Bool) -> PersistedAppState? {
+        let backup = defaults.data(forKey: backupKey)
+        if preservingPrimary {
+            if let backup, let state = decodeState(from: backup) {
+                AppLogger.snapshot.error("Persisted app state uses a newer version; using backup without replacing primary")
+                return migratePersistedStateIfNeeded(state, persist: false)
+            }
+            if let backup, let state = decodeLegacyState(from: backup) {
+                AppLogger.snapshot.error("Persisted app state uses a newer version; using legacy backup without replacing primary")
+                return state
+            }
+            return nil
+        }
+
+        quarantinePrimary()
+
+        if let backup, let state = decodeState(from: backup) {
+            defaults.set(backup, forKey: key)
+            AppLogger.snapshot.error("Recovered persisted app state from backup after primary corruption")
+            return migratePersistedStateIfNeeded(state)
+        }
+
+        if let backup, let state = decodeLegacyState(from: backup) {
+            saveStateUnlocked(state)
+            AppLogger.snapshot.error("Recovered legacy snapshot from backup after primary corruption")
+            return state
+        }
+
+        return nil
+    }
+
+    private func isSupported(_ state: PersistedAppState) -> Bool {
+        (1...PersistedAppState.currentSchemaVersion).contains(state.schemaVersion)
+            && (1...QuotaSnapshot.currentSchemaVersion).contains(state.snapshot.schemaVersion)
+    }
+
+    private func containsNewerPersistenceVersion(_ data: Data) -> Bool {
+        if let envelope = try? decoder.decode(PersistenceEnvelope.self, from: data) {
+            guard envelope.hasValidChecksum else { return false }
+            if envelope.formatVersion > PersistenceEnvelope.currentFormatVersion {
+                return true
+            }
+            if envelope.formatVersion == PersistenceEnvelope.currentFormatVersion,
+               let state = try? envelope.decode(PersistedAppState.self),
+               (state.schemaVersion > PersistedAppState.currentSchemaVersion
+                || state.snapshot.schemaVersion > QuotaSnapshot.currentSchemaVersion) {
+                return true
+            }
+        }
+        return (decodeRawSnapshot(data)?.schemaVersion ?? 0) > QuotaSnapshot.currentSchemaVersion
+    }
+
+    private func isTrustedPersistenceData(_ data: Data) -> Bool {
+        if let envelope = loadEnvelope(from: data) {
+            return isSupported(envelope.value)
+        }
+        return decodeLegacyState(from: data) != nil
     }
 
     private func decodeRawSnapshot(_ data: Data) -> QuotaSnapshot? {
@@ -178,6 +263,14 @@ struct SnapshotStore {
 
     private func saveStateUnlocked(_ state: PersistedAppState) {
         let currentData = defaults.data(forKey: key)
+        guard isSupported(state) else {
+            AppLogger.snapshot.error("Cannot migrate app state with an unsupported schema")
+            return
+        }
+        guard currentData.map(containsNewerPersistenceVersion) != true else {
+            AppLogger.snapshot.error("Cannot migrate over app state written by a newer persistence version")
+            return
+        }
         let currentRevision = loadEnvelope(from: currentData)?.revision ?? 0
         guard currentRevision < UInt64.max else {
             AppLogger.snapshot.error("Cannot migrate app state: revision reached UInt64.max")
@@ -186,11 +279,12 @@ struct SnapshotStore {
         let nextRevision = currentRevision + 1
         do {
             let data = try encoder.encode(PersistenceEnvelope(value: state, revision: nextRevision))
-            let trustedData = currentData.flatMap { loadEnvelope(from: $0) != nil ? $0 : defaults.data(forKey: backupKey) }
-            if let currentData = currentData, loadEnvelope(from: currentData) != nil {
+            let trustedData = currentData.flatMap { isTrustedPersistenceData($0) ? $0 : nil }
+                ?? defaults.data(forKey: backupKey).flatMap { isTrustedPersistenceData($0) ? $0 : nil }
+            if let currentData, isTrustedPersistenceData(currentData) {
                 defaults.set(currentData, forKey: backupKey)
                 guard defaults.data(forKey: backupKey) == currentData,
-                      defaults.data(forKey: backupKey).flatMap({ loadEnvelope(from: $0) }) != nil else {
+                      defaults.data(forKey: backupKey).map(isTrustedPersistenceData) == true else {
                     AppLogger.snapshot.error("Backup verification failed; migrated primary app state was not replaced")
                     return
                 }
@@ -212,9 +306,17 @@ struct SnapshotStore {
         return state.snapshot.refreshedAt < existing.snapshot.refreshedAt
     }
 
-    private func migratePersistedStateIfNeeded(_ state: PersistedAppState) -> PersistedAppState {
-        guard state.snapshot.schemaVersion < QuotaSnapshot.currentSchemaVersion else { return state }
-        let snapshot = migrate(state.snapshot)
+    private func migratePersistedStateIfNeeded(
+        _ state: PersistedAppState,
+        persist: Bool = true
+    ) -> PersistedAppState {
+        guard state.schemaVersion < PersistedAppState.currentSchemaVersion
+                || state.snapshot.schemaVersion < QuotaSnapshot.currentSchemaVersion else {
+            return state
+        }
+        let snapshot = state.snapshot.schemaVersion < QuotaSnapshot.currentSchemaVersion
+            ? migrate(state.snapshot)
+            : state.snapshot
         let migrated = PersistedAppState(
             snapshot: snapshot,
             status: state.status,
@@ -224,8 +326,10 @@ struct SnapshotStore {
             savedAt: state.savedAt,
             schemaVersion: PersistedAppState.currentSchemaVersion
         )
-        saveStateUnlocked(migrated)
-        AppLogger.snapshot.info("Migrated envelope snapshot schemaV\(state.snapshot.schemaVersion) to schemaV\(snapshot.schemaVersion)")
+        if persist {
+            saveStateUnlocked(migrated)
+            AppLogger.snapshot.info("Migrated envelope snapshot schemaV\(state.snapshot.schemaVersion) to schemaV\(snapshot.schemaVersion)")
+        }
         return migrated
     }
 

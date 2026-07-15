@@ -26,9 +26,13 @@ struct PersistenceEnvelope: Codable {
     }
 
     func decode<T: Decodable>(_ type: T.Type, decoder: JSONDecoder = PersistenceEnvelope.decoder) throws -> T {
+        guard hasValidChecksum else { throw PersistenceError.checksumMismatch }
         guard formatVersion == Self.currentFormatVersion else { throw PersistenceError.unsupportedFormat(formatVersion) }
-        guard Self.checksum(payload) == checksum else { throw PersistenceError.checksumMismatch }
         return try decoder.decode(type, from: payload)
+    }
+
+    var hasValidChecksum: Bool {
+        Self.checksum(payload) == checksum
     }
 
     private static let encoder: JSONEncoder = {
@@ -279,30 +283,66 @@ enum WidgetDisplayStateStore {
     private static let encoder = JSONEncoder()
     private static let decoder = JSONDecoder()
     private static let lock = NSLock()
+    private static let envelopeMetadataKeys: Set<String> = [
+        "formatVersion", "revision", "payload", "checksum", "writtenAt"
+    ]
 
     static func load(fileManager: FileManager = .default) -> WidgetDisplayState {
         lock.lock()
         defer { lock.unlock() }
         let url = stateURL(fileManager: fileManager)
+        let primaryData = try? Data(contentsOf: url)
+        let primaryWasWrittenByNewerVersion = primaryData.map(containsNewerPersistenceVersion) ?? false
 
-        if let data = try? Data(contentsOf: url) {
+        if let data = primaryData {
             if let state = decodeEnvelope(data) {
                 return state
             }
 
             // Read pre-envelope files once and immediately migrate them.
-            if let legacy = try? decoder.decode(WidgetDisplayState.self, from: data) {
+            if let legacy = decodeLegacyState(data) {
                 saveUnlocked(legacy, fileManager: fileManager)
                 return legacy
             }
         }
 
         let backupURL = url.appendingPathExtension("backup")
-        if let backupData = try? Data(contentsOf: backupURL), let backup = decodeEnvelope(backupData) {
-            quarantine(url: url, fileManager: fileManager)
-            try? backupData.write(to: url, options: .atomic)
-            PersistenceLog.logger.error("Recovered widget state from backup after primary corruption")
-            return backup
+        let backupData = try? Data(contentsOf: backupURL)
+        if primaryWasWrittenByNewerVersion {
+            if let backupData, let backup = decodeEnvelope(backupData) {
+                PersistenceLog.logger.error("Widget state uses a newer persistence version; displaying backup without replacing primary")
+                return backup
+            }
+            if let backupData, let legacyBackup = decodeLegacyState(backupData) {
+                PersistenceLog.logger.error("Widget state uses a newer persistence version; displaying legacy backup without replacing primary")
+                return legacyBackup
+            }
+            PersistenceLog.logger.error("Widget state uses a newer persistence version; preserving primary and using placeholder")
+            return .placeholder
+        }
+
+        if let backupData {
+            if let backup = decodeEnvelope(backupData) {
+                quarantine(url: url, fileManager: fileManager)
+                if restoreEnvelopeBackup(backupData, state: backup, to: url) {
+                    PersistenceLog.logger.error("Recovered widget state from backup after primary corruption")
+                } else {
+                    PersistenceLog.logger.error("Widget backup was readable but could not be restored to primary storage")
+                }
+                return backup
+            }
+
+            if let legacyBackup = decodeLegacyState(backupData) {
+                quarantine(url: url, fileManager: fileManager)
+                try? backupData.write(to: url, options: .atomic)
+                saveUnlocked(legacyBackup, fileManager: fileManager)
+                if let readback = try? Data(contentsOf: url), decodeEnvelope(readback) == legacyBackup {
+                    PersistenceLog.logger.error("Recovered and migrated legacy widget state from backup after primary corruption")
+                } else {
+                    PersistenceLog.logger.error("Legacy widget backup was readable but migration could not be persisted")
+                }
+                return legacyBackup
+            }
         }
 
         quarantine(url: url, fileManager: fileManager)
@@ -317,6 +357,11 @@ enum WidgetDisplayStateStore {
     }
 
     private static func saveUnlocked(_ state: WidgetDisplayState, fileManager: FileManager) {
+        guard isSupported(state) else {
+            PersistenceLog.logger.error("Cannot persist widget state from unsupported snapshot schemaV\(state.snapshot.schemaVersion)")
+            return
+        }
+
         let url = stateURL(fileManager: fileManager)
 
         do {
@@ -325,7 +370,12 @@ enum WidgetDisplayStateStore {
                 withIntermediateDirectories: true
             )
             let currentData = try? Data(contentsOf: url)
-            if let current = currentData, let currentState = decodeEnvelope(current) {
+            if let current = currentData, containsNewerPersistenceVersion(current) {
+                PersistenceLog.logger.error("Cannot overwrite widget state written by a newer persistence version")
+                return
+            }
+            if let current = currentData,
+               let currentState = decodeEnvelope(current) ?? decodeLegacyState(current) {
                 if (currentState.snapshot.dataSource == .real && state.snapshot.dataSource != .real) ||
                     state.savedAt < currentState.savedAt ||
                     (state.snapshot.dataSource == .real && currentState.snapshot.dataSource == .real && state.snapshot.refreshedAt < currentState.snapshot.refreshedAt) {
@@ -342,8 +392,14 @@ enum WidgetDisplayStateStore {
             let revision = currentRevision + 1
             let envelope = try PersistenceEnvelope(value: state, revision: revision)
             let data = try encodedEnvelopeData(envelope, preservingLegacyPayload: state)
-            if let current = currentData, decodeEnvelope(current) != nil {
-                try? current.write(to: url.appendingPathExtension("backup"), options: .atomic)
+            if let current = currentData,
+               decodeEnvelope(current) != nil || decodeLegacyState(current) != nil {
+                let backupURL = url.appendingPathExtension("backup")
+                try current.write(to: backupURL, options: .atomic)
+                guard let backupReadback = try? Data(contentsOf: backupURL), backupReadback == current else {
+                    PersistenceLog.logger.error("Widget state backup verification failed; primary was not replaced")
+                    return
+                }
             }
             let temporaryURL = url.appendingPathExtension("tmp-\(UUID().uuidString)")
             try data.write(to: temporaryURL, options: .atomic)
@@ -364,7 +420,68 @@ enum WidgetDisplayStateStore {
 
     private static func decodeEnvelope(_ data: Data) -> WidgetDisplayState? {
         guard let envelope = try? decoder.decode(PersistenceEnvelope.self, from: data) else { return nil }
-        return try? envelope.decode(WidgetDisplayState.self)
+        guard let state = try? envelope.decode(WidgetDisplayState.self), isSupported(state) else { return nil }
+        return state
+    }
+
+    private static func decodeLegacyState(_ data: Data) -> WidgetDisplayState? {
+        guard !containsEnvelopeMetadata(data),
+              let state = try? decoder.decode(WidgetDisplayState.self, from: data),
+              isSupported(state) else {
+            return nil
+        }
+        return state
+    }
+
+    private static func containsEnvelopeMetadata(_ data: Data) -> Bool {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return false
+        }
+        return object.keys.contains { envelopeMetadataKeys.contains($0) }
+    }
+
+    private static func containsNewerPersistenceVersion(_ data: Data) -> Bool {
+        if let envelope = try? decoder.decode(PersistenceEnvelope.self, from: data) {
+            guard envelope.hasValidChecksum else { return false }
+            if envelope.formatVersion > PersistenceEnvelope.currentFormatVersion {
+                return true
+            }
+            guard envelope.formatVersion == PersistenceEnvelope.currentFormatVersion,
+                  let state = try? envelope.decode(WidgetDisplayState.self) else {
+                return false
+            }
+            return state.snapshot.schemaVersion > QuotaSnapshot.currentSchemaVersion
+        }
+
+        guard !containsEnvelopeMetadata(data),
+              let state = try? decoder.decode(WidgetDisplayState.self, from: data) else {
+            return false
+        }
+        return state.snapshot.schemaVersion > QuotaSnapshot.currentSchemaVersion
+    }
+
+    private static func isSupported(_ state: WidgetDisplayState) -> Bool {
+        (1...QuotaSnapshot.currentSchemaVersion).contains(state.snapshot.schemaVersion)
+    }
+
+    private static func restoreEnvelopeBackup(
+        _ data: Data,
+        state: WidgetDisplayState,
+        to url: URL
+    ) -> Bool {
+        do {
+            try data.write(to: url, options: .atomic)
+            guard let readback = try? Data(contentsOf: url),
+                  readback == data,
+                  decodeEnvelope(readback) == state else {
+                PersistenceLog.logger.error("Widget state backup restore verification failed")
+                return false
+            }
+            return true
+        } catch {
+            PersistenceLog.logger.error("Failed to restore widget state backup: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
     }
 
     private static func encodedEnvelopeData(

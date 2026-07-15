@@ -750,6 +750,176 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(loaded?.resetBanks.count, 2)
     }
 
+    func testCorruptPrimaryRecoversAndMigratesRawLegacyBackup() throws {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.rawBackupMigration.\(UUID().uuidString)")!
+        let legacy = QuotaSnapshot(
+            weeklyQuotaPercent: 80,
+            fiveHourQuotaPercent: 60,
+            fiveHourResetAt: Date(timeIntervalSince1970: 200),
+            refreshedAt: Date(timeIntervalSince1970: 100),
+            dataSource: .real,
+            schemaVersion: 3
+        )
+        defaults.set(Data("corrupt".utf8), forKey: "snapshot")
+        defaults.set(try JSONEncoder().encode(legacy), forKey: "snapshot.backup")
+
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let loaded = store.loadState()
+        let primary = try XCTUnwrap(defaults.data(forKey: "snapshot"))
+        let envelope = try JSONDecoder().decode(PersistenceEnvelope.self, from: primary)
+        let persisted = try envelope.decode(PersistedAppState.self)
+
+        XCTAssertEqual(loaded?.snapshot.schemaVersion, QuotaSnapshot.currentSchemaVersion)
+        XCTAssertEqual(persisted.schemaVersion, PersistedAppState.currentSchemaVersion)
+        XCTAssertEqual(persisted.snapshot.schemaVersion, QuotaSnapshot.currentSchemaVersion)
+        XCTAssertNotNil(defaults.data(forKey: "snapshot.corrupt"))
+    }
+
+    func testRawRealSnapshotWithoutSchemaVersionMigratesToCurrentSchema() throws {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.rawRealMissingSchema.\(UUID().uuidString)")!
+        let real = QuotaSnapshot(
+            weeklyQuotaPercent: 80,
+            fiveHourQuotaPercent: 60,
+            refreshedAt: Date(timeIntervalSince1970: 100),
+            dataSource: .real
+        )
+        var rawObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(real)) as? [String: Any]
+        )
+        rawObject.removeValue(forKey: "schemaVersion")
+        let rawData = try JSONSerialization.data(withJSONObject: rawObject)
+        defaults.set(rawData, forKey: "snapshot")
+
+        let loaded = SnapshotStore(defaults: defaults, key: "snapshot").loadState()
+
+        XCTAssertEqual(loaded?.snapshot.dataSource, .real)
+        XCTAssertEqual(loaded?.snapshot.schemaVersion, QuotaSnapshot.currentSchemaVersion)
+        XCTAssertEqual(loaded?.schemaVersion, PersistedAppState.currentSchemaVersion)
+        XCTAssertEqual(defaults.data(forKey: "snapshot.backup"), rawData)
+    }
+
+    func testFutureAppStateSchemaUsesCurrentBackupWithoutDowngradingPrimary() throws {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.futureAppStateSchema.\(UUID().uuidString)")!
+        let trusted = QuotaSnapshot(weeklyQuotaPercent: 70, fiveHourQuotaPercent: 60, refreshedAt: Date(timeIntervalSince1970: 100), dataSource: .real)
+        let future = QuotaSnapshot(weeklyQuotaPercent: 10, fiveHourQuotaPercent: 20, refreshedAt: Date(timeIntervalSince1970: 200), dataSource: .real)
+        let backup = try JSONEncoder().encode(PersistenceEnvelope(
+            value: PersistedAppState(snapshot: trusted, status: .success, lastSuccessAt: trusted.refreshedAt, lastAttemptAt: nil, failureCount: 0),
+            revision: 1
+        ))
+        let primary = try JSONEncoder().encode(PersistenceEnvelope(
+            value: PersistedAppState(snapshot: future, status: .success, lastSuccessAt: future.refreshedAt, lastAttemptAt: nil, failureCount: 0, schemaVersion: PersistedAppState.currentSchemaVersion + 1),
+            revision: 2
+        ))
+        defaults.set(primary, forKey: "snapshot")
+        defaults.set(backup, forKey: "snapshot.backup")
+
+        let loaded = SnapshotStore(defaults: defaults, key: "snapshot").loadSnapshot()
+
+        XCTAssertEqual(loaded, trusted)
+        XCTAssertEqual(defaults.data(forKey: "snapshot"), primary)
+        XCTAssertNil(defaults.data(forKey: "snapshot.corrupt"))
+    }
+
+    func testFutureSnapshotSchemaUsesCurrentBackupWithoutDowngradingPrimary() throws {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.futureSnapshotSchema.\(UUID().uuidString)")!
+        let trusted = QuotaSnapshot(weeklyQuotaPercent: 70, fiveHourQuotaPercent: 60, refreshedAt: Date(timeIntervalSince1970: 100), dataSource: .real)
+        let future = QuotaSnapshot(weeklyQuotaPercent: 10, fiveHourQuotaPercent: 20, refreshedAt: Date(timeIntervalSince1970: 200), dataSource: .real, schemaVersion: QuotaSnapshot.currentSchemaVersion + 1)
+        let backup = try JSONEncoder().encode(PersistenceEnvelope(
+            value: PersistedAppState(snapshot: trusted, status: .success, lastSuccessAt: trusted.refreshedAt, lastAttemptAt: nil, failureCount: 0),
+            revision: 1
+        ))
+        let primary = try JSONEncoder().encode(PersistenceEnvelope(
+            value: PersistedAppState(snapshot: future, status: .success, lastSuccessAt: future.refreshedAt, lastAttemptAt: nil, failureCount: 0),
+            revision: 2
+        ))
+        defaults.set(primary, forKey: "snapshot")
+        defaults.set(backup, forKey: "snapshot.backup")
+
+        let loaded = SnapshotStore(defaults: defaults, key: "snapshot").loadSnapshot()
+
+        XCTAssertEqual(loaded, trusted)
+        XCTAssertEqual(defaults.data(forKey: "snapshot"), primary)
+        XCTAssertNil(defaults.data(forKey: "snapshot.corrupt"))
+    }
+
+    func testRawFutureSnapshotUsesBackupWithoutDowngradingPrimary() throws {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.rawFutureSnapshot.\(UUID().uuidString)")!
+        let trusted = QuotaSnapshot(weeklyQuotaPercent: 70, fiveHourQuotaPercent: 60, refreshedAt: Date(timeIntervalSince1970: 100), dataSource: .real)
+        let future = QuotaSnapshot(weeklyQuotaPercent: 90, fiveHourQuotaPercent: 80, refreshedAt: Date(timeIntervalSince1970: 300), dataSource: .real, schemaVersion: QuotaSnapshot.currentSchemaVersion + 1)
+        let primary = try JSONEncoder().encode(future)
+        let backup = try JSONEncoder().encode(PersistenceEnvelope(
+            value: PersistedAppState(snapshot: trusted, status: .success, lastSuccessAt: trusted.refreshedAt, lastAttemptAt: nil, failureCount: 0),
+            revision: 1
+        ))
+        defaults.set(primary, forKey: "snapshot")
+        defaults.set(backup, forKey: "snapshot.backup")
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+
+        store.saveSnapshot(trusted)
+        XCTAssertEqual(defaults.data(forKey: "snapshot"), primary)
+        XCTAssertEqual(store.loadSnapshot(), trusted)
+        XCTAssertEqual(defaults.data(forKey: "snapshot"), primary)
+        XCTAssertNil(defaults.data(forKey: "snapshot.corrupt"))
+    }
+
+    func testSavePreservesStructurallyDecodedFutureSchemaEnvelope() throws {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.futureSchemaSave.\(UUID().uuidString)")!
+        let future = QuotaSnapshot(weeklyQuotaPercent: 70, fiveHourQuotaPercent: 60, refreshedAt: Date(timeIntervalSince1970: 100), dataSource: .real)
+        let primary = try JSONEncoder().encode(PersistenceEnvelope(
+            value: PersistedAppState(snapshot: future, status: .success, lastSuccessAt: future.refreshedAt, lastAttemptAt: nil, failureCount: 0, schemaVersion: PersistedAppState.currentSchemaVersion + 1),
+            revision: 1
+        ))
+        defaults.set(primary, forKey: "snapshot")
+
+        SnapshotStore(defaults: defaults, key: "snapshot").saveSnapshot(
+            QuotaSnapshot(weeklyQuotaPercent: 10, fiveHourQuotaPercent: 20, refreshedAt: Date(timeIntervalSince1970: 200), dataSource: .real)
+        )
+
+        XCTAssertEqual(defaults.data(forKey: "snapshot"), primary)
+    }
+
+    func testSavePreservesFutureEnvelopeFormat() throws {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.futureEnvelopeSave.\(UUID().uuidString)")!
+        let snapshot = QuotaSnapshot(weeklyQuotaPercent: 70, fiveHourQuotaPercent: 60, refreshedAt: Date(timeIntervalSince1970: 100), dataSource: .real)
+        let envelope = try PersistenceEnvelope(
+            value: PersistedAppState(snapshot: snapshot, status: .success, lastSuccessAt: snapshot.refreshedAt, lastAttemptAt: nil, failureCount: 0),
+            revision: 1
+        )
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(envelope)) as? [String: Any]
+        )
+        object["formatVersion"] = PersistenceEnvelope.currentFormatVersion + 1
+        let primary = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        defaults.set(primary, forKey: "snapshot")
+
+        SnapshotStore(defaults: defaults, key: "snapshot").saveSnapshot(
+            QuotaSnapshot(weeklyQuotaPercent: 10, fiveHourQuotaPercent: 20, refreshedAt: Date(timeIntervalSince1970: 200), dataSource: .real)
+        )
+
+        XCTAssertEqual(defaults.data(forKey: "snapshot"), primary)
+    }
+
+    func testCorruptFutureEnvelopeFormatRecoversCurrentBackup() throws {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.corruptFutureEnvelope.\(UUID().uuidString)")!
+        let trusted = QuotaSnapshot(weeklyQuotaPercent: 70, fiveHourQuotaPercent: 60, refreshedAt: Date(timeIntervalSince1970: 100), dataSource: .real)
+        let state = PersistedAppState(snapshot: trusted, status: .success, lastSuccessAt: trusted.refreshedAt, lastAttemptAt: nil, failureCount: 0)
+        let backup = try JSONEncoder().encode(PersistenceEnvelope(value: state, revision: 1))
+        var corruptObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(PersistenceEnvelope(value: state, revision: 2))
+            ) as? [String: Any]
+        )
+        corruptObject["formatVersion"] = PersistenceEnvelope.currentFormatVersion + 1
+        corruptObject["checksum"] = "invalid"
+        let primary = try JSONSerialization.data(withJSONObject: corruptObject, options: [.sortedKeys])
+        defaults.set(primary, forKey: "snapshot")
+        defaults.set(backup, forKey: "snapshot.backup")
+
+        XCTAssertEqual(SnapshotStore(defaults: defaults, key: "snapshot").loadSnapshot(), trusted)
+        XCTAssertEqual(defaults.data(forKey: "snapshot"), backup)
+        XCTAssertEqual(defaults.data(forKey: "snapshot.corrupt"), primary)
+    }
+
     func testMaxRevisionDoesNotTrapOrOverwriteTrustedState() throws {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.maxRevision.\(UUID().uuidString)")!
         let trusted = QuotaSnapshot(weeklyQuotaPercent: 70, fiveHourQuotaPercent: 60, refreshedAt: Date(timeIntervalSince1970: 100), dataSource: .real)
