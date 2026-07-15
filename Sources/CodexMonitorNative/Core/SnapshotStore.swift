@@ -379,8 +379,7 @@ struct SnapshotStore {
                     displayName: "5小时额度",
                     remainingPercent: snapshot.fiveHourQuotaPercent,
                     resetAt: snapshot.fiveHourResetAt,
-                    resetTimeStatus: snapshot.fiveHourResetAt == nil ? .unexposed : .actual,
-                    rawResetFields: []
+                    resetTimeStatus: snapshot.fiveHourResetAt == nil ? .unexposed : .actual
                 )
             )
         }
@@ -392,8 +391,7 @@ struct SnapshotStore {
                     displayName: "周额度",
                     remainingPercent: snapshot.weeklyQuotaPercent,
                     resetAt: nil,
-                    resetTimeStatus: .unexposed,
-                    rawResetFields: []
+                    resetTimeStatus: .unexposed
                 )
             )
         }

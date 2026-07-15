@@ -2,11 +2,28 @@ import XCTest
 @testable import CodexMonitorNative
 
 final class RealQuotaProviderTests: XCTestCase {
+    func testProcessTransportClearsHandlersAfterLaunchFailure() throws {
+        let process = ControlledProcessHandle(
+            terminateExits: false,
+            killExits: false,
+            runError: .startFailed
+        )
+        let transport = ProcessRPCTransport(process: process, shutdownGraceSeconds: 0)
+
+        XCTAssertThrowsError(
+            try transport.start(stdout: { _ in }, stdoutEOF: {}, stderr: { _ in }, termination: { _ in })
+        ) { error in
+            XCTAssertEqual(error as? ControlledRPCTransportError, .startFailed)
+        }
+        XCTAssertNoThrow(try transport.shutdownAndWait())
+        XCTAssertTrue(process.handlersCleared)
+    }
+
     func testProcessTransportEscalatesAndReclaimsChildAfterKill() throws {
         let process = ControlledProcessHandle(terminateExits: false, killExits: true)
         let transport = ProcessRPCTransport(process: process, shutdownGraceSeconds: 0)
 
-        try transport.start(stdout: { _ in }, stderr: { _ in }, termination: { _ in })
+        try transport.start(stdout: { _ in }, stdoutEOF: {}, stderr: { _ in }, termination: { _ in })
         try transport.shutdownAndWait()
 
         XCTAssertEqual(process.terminateCount, 1)
@@ -17,7 +34,7 @@ final class RealQuotaProviderTests: XCTestCase {
     func testProcessTransportThrowsCleanupFailureWhenChildSurvivesKill() throws {
         let process = ControlledProcessHandle(terminateExits: false, killExits: false)
         let transport = ProcessRPCTransport(process: process, shutdownGraceSeconds: 0)
-        try transport.start(stdout: { _ in }, stderr: { _ in }, termination: { _ in })
+        try transport.start(stdout: { _ in }, stdoutEOF: {}, stderr: { _ in }, termination: { _ in })
 
         XCTAssertThrowsError(try transport.shutdownAndWait()) { error in
             XCTAssertEqual(error as? ProcessCleanupError, .processDidNotExit)
@@ -30,7 +47,7 @@ final class RealQuotaProviderTests: XCTestCase {
     func testProcessTransportPropagatesForceKillFailureAndCleansUpOnce() throws {
         let process = ControlledProcessHandle(terminateExits: false, killExits: false, killSucceeds: false)
         let transport = ProcessRPCTransport(process: process, shutdownGraceSeconds: 0)
-        try transport.start(stdout: { _ in }, stderr: { _ in }, termination: { _ in })
+        try transport.start(stdout: { _ in }, stdoutEOF: {}, stderr: { _ in }, termination: { _ in })
 
         XCTAssertThrowsError(try transport.shutdownAndWait()) { error in
             XCTAssertEqual(error as? ProcessCleanupError, .forceKillFailed)
@@ -40,6 +57,38 @@ final class RealQuotaProviderTests: XCTestCase {
         XCTAssertTrue(process.handlersCleared)
     }
 
+    func testProcessTransportDeliversNaturalExitTailsBeforeTermination() async throws {
+        let process = ControlledProcessHandle(terminateExits: true, killExits: true)
+        let transport = ProcessRPCTransport(process: process, shutdownGraceSeconds: 0)
+        let recorder = RPCTransportEventRecorder()
+        let terminated = XCTestExpectation(description: "termination delivered")
+
+        try transport.start(
+            stdout: { recorder.recordStdout($0) },
+            stdoutEOF: { recorder.record("stdoutEOF") },
+            stderr: { recorder.recordStderr($0) },
+            termination: { status in
+                recorder.record("termination:\(status)")
+                terminated.fulfill()
+            }
+        )
+        process.emitNaturalExit(
+            status: 7,
+            stdout: Data("final-response".utf8),
+            stderr: Data("final-diagnostic".utf8)
+        )
+
+        await fulfillment(of: [terminated], timeout: 1)
+        try transport.shutdownAndWait()
+        let events = recorder.snapshot()
+        XCTAssertEqual(String(data: events.stdout, encoding: .utf8), "final-response")
+        XCTAssertEqual(String(data: events.stderr, encoding: .utf8), "final-diagnostic")
+        let terminationIndex = try XCTUnwrap(events.order.firstIndex(of: "termination:7"))
+        XCTAssertLessThan(try XCTUnwrap(events.order.firstIndex(of: "stdout")), terminationIndex)
+        XCTAssertLessThan(try XCTUnwrap(events.order.firstIndex(of: "stderr")), terminationIndex)
+        XCTAssertEqual(events.order.last, "termination:7")
+    }
+
     func testRPCClientCompletesOnceWithForceKillFailure() async {
         let transport = ControlledRPCTransport(cleanupError: .forceKillFailed)
         let timeoutScheduler = ControlledTimeoutScheduler()
@@ -47,15 +96,15 @@ final class RealQuotaProviderTests: XCTestCase {
         let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
 
         await fulfillment(of: [transport.startedExpectation, transport.initializeRequestExpectation], timeout: 1)
-        transport.emitStdout(Data("{\"result\":{\"protocolVersion\":1}}\n".utf8))
+        transport.emitStdout(Self.initializeResponse)
         await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
         transport.emitStdout(Self.rateLimitResponse)
 
         do {
             _ = try await task.value
             XCTFail("Expected cleanup failure")
-        } catch let error as ProcessCleanupError {
-            XCTAssertEqual(error, .forceKillFailed)
+        } catch let error as RealQuotaError {
+            XCTAssertEqual(error, .processCleanupFailed)
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
@@ -117,6 +166,23 @@ final class RealQuotaProviderTests: XCTestCase {
         XCTAssertTrue(transport.handlersCleared)
     }
 
+    func testRPCClientProcessesAlreadyQueuedResponseBeforeLaterTimeout() async throws {
+        let transport = ControlledRPCTransport()
+        let timeoutScheduler = ControlledTimeoutScheduler()
+        let client = CodexRPCClient(transport: transport, timeoutScheduler: timeoutScheduler)
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.initializeResponse)
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.rateLimitResponse)
+        timeoutScheduler.fire()
+
+        let snapshot = try await task.value
+        XCTAssertEqual(snapshot.fiveHourQuotaPercent, 50)
+        XCTAssertEqual(transport.shutdownCount, 1)
+    }
+
     func testRPCClientRPCErrorReclaimsTransportExactlyOnce() async {
         let transport = ControlledRPCTransport()
         let timeoutScheduler = ControlledTimeoutScheduler()
@@ -124,13 +190,13 @@ final class RealQuotaProviderTests: XCTestCase {
         let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
 
         await fulfillment(of: [transport.startedExpectation], timeout: 1)
-        transport.emitStdout(Data("{\"error\":{\"message\":\"rejected\"}}\n".utf8))
+        transport.emitStdout(Data("{\"id\":1,\"error\":{\"code\":-32000,\"message\":\"rejected\"}}\n".utf8))
 
         do {
             _ = try await task.value
             XCTFail("Expected RPC error")
         } catch let error as RealQuotaError {
-            guard case .rpcError("rejected") = error else { return XCTFail("Unexpected error: \(error)") }
+            XCTAssertEqual(error, .rpcRejected(code: -32_000))
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
@@ -151,7 +217,7 @@ final class RealQuotaProviderTests: XCTestCase {
             _ = try await task.value
             XCTFail("Expected process exit error")
         } catch let error as RealQuotaError {
-            guard case .processExited(9, _) = error else { return XCTFail("Unexpected error: \(error)") }
+            XCTAssertEqual(error, .processExited(9))
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
@@ -167,7 +233,7 @@ final class RealQuotaProviderTests: XCTestCase {
 
         await fulfillment(of: [transport.startedExpectation], timeout: 1)
         await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
-        transport.emitStdout(Data("{\"result\":{\"protocolVersion\":1}}\n".utf8))
+        transport.emitStdout(Self.initializeResponse)
         await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
         transport.emitStdout(Self.rateLimitResponse)
 
@@ -175,6 +241,24 @@ final class RealQuotaProviderTests: XCTestCase {
         XCTAssertEqual(snapshot.fiveHourQuotaPercent, 50)
         XCTAssertEqual(transport.shutdownCount, 1)
         XCTAssertEqual(timeoutScheduler.cancelCount, 1)
+        XCTAssertEqual(
+            transport.writtenMessages,
+            [
+                .request(
+                    id: .integer(1),
+                    method: "initialize",
+                    params: .object([
+                        "clientInfo": .object([
+                            "name": .string("codex-monitor-native"),
+                            "title": .string("Codex Monitor Native"),
+                            "version": .string("0.2.0")
+                        ])
+                    ])
+                ),
+                .notification(method: "initialized", params: nil),
+                .request(id: .integer(2), method: "account/rateLimits/read", params: nil)
+            ]
+        )
     }
 
     func testRPCClientUnusableResponseReclaimsTransportExactlyOnce() async {
@@ -184,9 +268,9 @@ final class RealQuotaProviderTests: XCTestCase {
         let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
 
         await fulfillment(of: [transport.startedExpectation, transport.initializeRequestExpectation], timeout: 1)
-        transport.emitStdout(Data("{\"result\":{\"protocolVersion\":1}}\n".utf8))
+        transport.emitStdout(Self.initializeResponse)
         await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
-        transport.emitStdout(Data("{\"result\":{}}\n".utf8))
+        transport.emitStdout(Data("{\"id\":2,\"result\":{\"rateLimits\":{},\"rateLimitsByLimitId\":{}}}\n".utf8))
 
         do {
             _ = try await task.value
@@ -200,7 +284,322 @@ final class RealQuotaProviderTests: XCTestCase {
         XCTAssertEqual(timeoutScheduler.cancelCount, 1)
     }
 
-    private static let rateLimitResponse = Data("{\"result\":{\"rateLimitsByLimitId\":{\"codex\":{\"primary\":{\"windowDurationMins\":300,\"usedPercent\":50}}}}}\n".utf8)
+    func testRPCClientRejectsMismatchedResponseID() async {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.startedExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":99,\"result\":{}}\n".utf8))
+
+        await assertFailure(.responseInvalid, from: task)
+        XCTAssertEqual(transport.shutdownCount, 1)
+    }
+
+    func testRPCClientRejectsMalformedFrameWithoutWaitingForTimeout() async {
+        let transport = ControlledRPCTransport()
+        let timeoutScheduler = ControlledTimeoutScheduler()
+        let client = CodexRPCClient(transport: transport, timeoutScheduler: timeoutScheduler)
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.startedExpectation], timeout: 1)
+        transport.emitStdout(Data("not-json\n".utf8))
+
+        await assertFailure(.responseInvalid, from: task)
+        XCTAssertEqual(timeoutScheduler.cancelCount, 1)
+    }
+
+    func testRPCClientRejectsInvalidInitializePayloadAsHandshakeFailure() async {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":1,\"result\":{\"protocolVersion\":1}}\n".utf8))
+
+        await assertFailure(.handshakeFailed, from: task)
+        XCTAssertEqual(transport.shutdownCount, 1)
+    }
+
+    func testRPCClientIgnoresNotificationsWhileAwaitingMatchingResponse() async throws {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        let blankLines = Data("\n \t\r\n".utf8)
+        let notification = Data("{\"method\":\"account/rateLimits/updated\",\"params\":{}}\n".utf8)
+        transport.emitStdout(blankLines + notification + Self.initializeResponse)
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.rateLimitResponse)
+
+        let snapshot = try await task.value
+        XCTAssertEqual(snapshot.fiveHourQuotaPercent, 50)
+    }
+
+    func testRPCClientPreservesChunkOrderAndConsumesFinalFrameAtEOF() async throws {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        let initializeSplit = Self.initializeResponse.count / 2
+        transport.emitStdout(Self.initializeResponse.subdata(in: 0..<initializeSplit))
+        transport.emitStdout(Self.initializeResponse.subdata(in: initializeSplit..<Self.initializeResponse.count))
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+
+        let responseWithoutNewline = Data(Self.rateLimitResponse.dropLast())
+        let rateLimitSplit = responseWithoutNewline.count / 2
+        transport.emitStdout(responseWithoutNewline.subdata(in: 0..<rateLimitSplit))
+        transport.emitStdout(responseWithoutNewline.subdata(in: rateLimitSplit..<responseWithoutNewline.count))
+        transport.emitStdoutEOF()
+
+        let snapshot = try await task.value
+        XCTAssertEqual(snapshot.fiveHourQuotaPercent, 50)
+        XCTAssertEqual(transport.shutdownCount, 1)
+    }
+
+    func testRPCClientNormalizesRemoteErrorWithoutExposingRemoteMessage() async {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":1,\"error\":{\"code\":-32000,\"message\":\"Authentication token secret-value expired\"}}\n".utf8))
+
+        let expected = RealQuotaError.rpcRejected(code: -32_000)
+        await assertFailure(expected, from: task)
+        XCTAssertFalse(expected.localizedDescription.contains("secret-value"))
+    }
+
+    func testRPCClientDoesNotInferAuthenticationStateFromRemoteMessage() async {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":1,\"error\":{\"code\":-32077,\"message\":\"Authorization denied; sign in again\"}}\n".utf8))
+
+        await assertFailure(.rpcRejected(code: -32_077), from: task)
+    }
+
+    func testRPCClientRejectsUnsupportedServerRequestAndRepliesMethodNotFound() async {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":\"server-1\",\"method\":\"attestation/generate\",\"params\":{}}\n".utf8))
+
+        await assertFailure(.unsupportedServerRequest, from: task)
+        XCTAssertEqual(
+            transport.writtenMessages.last,
+            .error(
+                id: .string("server-1"),
+                error: CodexAppServerRemoteError(code: -32_601, message: "Method not found")
+            )
+        )
+    }
+
+    func testRPCClientRejectsFrameThatExceedsConfiguredLimit() async {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler(),
+            maxFrameBytes: 32
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.startedExpectation], timeout: 1)
+        transport.emitStdout(Data(repeating: 0x41, count: 33))
+
+        await assertFailure(.responseInvalid, from: task)
+    }
+
+    func testRPCClientTreatsWriteFailureAsTransportFailure() async {
+        let transport = ControlledRPCTransport(writeError: .writeFailed)
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await assertFailure(.transportFailed, from: task)
+        XCTAssertEqual(transport.shutdownCount, 1)
+    }
+
+    func testRPCClientNormalizesStartFailure() async {
+        let transport = ControlledRPCTransport(startError: .startFailed)
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await assertFailure(.spawnFailed, from: task)
+        XCTAssertEqual(transport.shutdownCount, 1)
+    }
+
+    func testRPCClientBoundsStderrAndClassifiesCleanEarlyExitConsistently() async {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler(),
+            maxStderrBytes: 8
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.startedExpectation], timeout: 1)
+        transport.emitStderr(Data("private-diagnostic-value".utf8))
+        transport.emitTermination(status: 0)
+
+        await assertFailure(.processExited(0), from: task)
+        XCTAssertFalse(RealQuotaError.processExited(0).localizedDescription.contains("private-diagnostic-value"))
+    }
+
+    func testRPCClientPreservesRemoteFailureWhenCleanupAlsoFails() async {
+        let transport = ControlledRPCTransport(cleanupError: .forceKillFailed)
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":1,\"error\":{\"code\":-32042,\"message\":\"rejected\"}}\n".utf8))
+
+        await assertFailure(.rpcRejected(code: -32_042), from: task)
+        XCTAssertEqual(transport.shutdownCount, 1)
+    }
+
+    func testRPCClientRequiresSchemaRateLimitsFieldBeforeMappingDynamicBuckets() async {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.initializeResponse)
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":2,\"result\":{\"rateLimitsByLimitId\":{\"codex\":{\"primary\":{\"usedPercent\":50}}}}}\n".utf8))
+
+        await assertFailure(.responseInvalid, from: task)
+    }
+
+    func testRPCClientMapsRequiredLegacyRateLimitsWhenDynamicBucketsAreNull() async throws {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.initializeResponse)
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":2,\"result\":{\"rateLimits\":{\"primary\":{\"windowDurationMins\":300,\"usedPercent\":40},\"secondary\":{\"windowDurationMins\":10080,\"usedPercent\":20}},\"rateLimitsByLimitId\":null}}\n".utf8))
+
+        let snapshot = try await task.value
+        XCTAssertEqual(snapshot.fiveHourQuotaPercent, 60)
+        XCTAssertEqual(snapshot.weeklyQuotaPercent, 80)
+    }
+
+    private static let initializeResponse = Data("{\"id\":1,\"result\":{\"codexHome\":\"/tmp/codex\",\"platformFamily\":\"unix\",\"platformOs\":\"macos\",\"userAgent\":\"codex-test\"}}\n".utf8)
+    private static let rateLimitResponse = Data("{\"id\":2,\"result\":{\"rateLimits\":{},\"rateLimitsByLimitId\":{\"codex\":{\"primary\":{\"windowDurationMins\":300,\"usedPercent\":50}}}}}\n".utf8)
+
+    private func assertFailure(
+        _ expected: RealQuotaError,
+        from task: Task<QuotaSnapshot, Error>,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        do {
+            _ = try await task.value
+            XCTFail("Expected \(expected)", file: file, line: line)
+        } catch let error as RealQuotaError {
+            XCTAssertEqual(error, expected, file: file, line: line)
+        } catch {
+            XCTFail("Expected \(expected), got \(error)", file: file, line: line)
+        }
+    }
+
+    func testParseRateLimitsUsesLegacySnapshotWhenDynamicBucketsAreAbsent() throws {
+        let response: [String: Any] = [
+            "rateLimits": [
+                "primary": [
+                    "windowDurationMins": 300,
+                    "usedPercent": 40
+                ],
+                "secondary": [
+                    "windowDurationMins": 10_080,
+                    "usedPercent": 20
+                ]
+            ]
+        ]
+
+        let snapshot = try XCTUnwrap(RealQuotaProvider.parseRateLimits(response: response))
+
+        XCTAssertEqual(snapshot.fiveHourQuotaPercent, 60)
+        XCTAssertEqual(snapshot.weeklyQuotaPercent, 80)
+        XCTAssertEqual(snapshot.quotaWindows.map(\.id), ["codex.primary", "codex.secondary"])
+    }
+
+    func testParseRateLimitsNeverCoercesJSONBooleansIntoNumericFields() throws {
+        let response: [String: Any] = [
+            "rateLimitResetCredits": [
+                "availableCount": true
+            ],
+            "rateLimitsByLimitId": [
+                "codex": [
+                    "primary": [
+                        "windowDurationMins": 300,
+                        "usedPercent": true,
+                        "resetAt": true
+                    ]
+                ],
+                "bonus": [
+                    "primary": [
+                        "windowDurationMins": 60,
+                        "usedPercent": 10,
+                        "resetAt": true
+                    ]
+                ]
+            ]
+        ]
+
+        let snapshot = try XCTUnwrap(RealQuotaProvider.parseRateLimits(response: response))
+
+        XCTAssertEqual(snapshot.fiveHourQuotaState, .invalid)
+        XCTAssertEqual(snapshot.fiveHourQuotaPercent, 0)
+        XCTAssertNil(snapshot.resetAvailableCount)
+        XCTAssertNil(snapshot.fiveHourResetAt)
+        XCTAssertEqual(snapshot.resetBanks.first?.resetTimeStatus, .parseFailed)
+    }
     func testParseRateLimitsPrefersCanonicalWeeklyBankAndKeepsFastestEntries() {
         let response: [String: Any] = [
             "rateLimitResetCredits": [
@@ -270,7 +669,8 @@ final class RealQuotaProviderTests: XCTestCase {
         XCTAssertEqual(snapshot?.resetCreditDetailsState, .appServerCountOnly)
         XCTAssertTrue(snapshot?.resetCreditDetails.isEmpty ?? false)
         XCTAssertTrue(snapshot?.resetCreditTimeEntries.isEmpty ?? false)
-        XCTAssertEqual(snapshot?.resetBanks.first?.resolvedResetFieldName, "resetAt")
+        XCTAssertEqual(snapshot?.resetBanks.first?.resetTimeStatus, .actual)
+        XCTAssertNotNil(snapshot?.resetBanks.first?.resetAt)
     }
 
     func testParseRateLimitsDoesNotUseAppServerResetCreditDates() {
@@ -457,7 +857,7 @@ final class RealQuotaProviderTests: XCTestCase {
         XCTAssertEqual(merged.fiveHourQuotaState, .live)
     }
 
-    func testParseRateLimitsKeepsUnknownResetBankRawFields() {
+    func testParseRateLimitsMapsUnknownResetMetadataToSemanticStatuses() {
         let response: [String: Any] = [
             "rateLimitsByLimitId": [
                 "codex": [
@@ -475,12 +875,11 @@ final class RealQuotaProviderTests: XCTestCase {
         let snapshot = RealQuotaProvider.parseRateLimits(response: response)
 
         XCTAssertEqual(snapshot?.resetBanks.count, 2)
-        XCTAssertNil(snapshot?.resetBanks.first?.resetAt)
-        XCTAssertEqual(snapshot?.resetBanks.first?.rawResetFields, [])
-        XCTAssertEqual(
-            snapshot?.resetBanks.last?.rawResetFields,
-            [ResetBankRawField(name: "nextResetAt", value: "<null>")]
+        let statuses = Dictionary(
+            uniqueKeysWithValues: (snapshot?.resetBanks ?? []).map { ($0.windowId, $0.resetTimeStatus) }
         )
+        XCTAssertEqual(statuses["primary"], .unexposed)
+        XCTAssertEqual(statuses["secondary"], .parseFailed)
     }
 
     func testParseRateLimitsClassifiesNewDurationWindowsAndPreservesUnknown() {
@@ -623,6 +1022,20 @@ final class RealQuotaProviderTests: XCTestCase {
 
         XCTAssertEqual(decoded.quotaWindows, snapshot.quotaWindows)
     }
+
+    func testResetBankDecodesLegacyRawFieldsIntoSemanticStatusWithoutReencodingThem() throws {
+        let legacyPayload = Data("{\"limitId\":\"codex\",\"windowId\":\"primary\",\"displayName\":\"5小时额度\",\"remainingPercent\":70,\"resolvedResetFieldName\":\"nextResetAt\",\"rawResetFields\":[{\"name\":\"nextResetAt\",\"value\":\"private-server-value\"}]}".utf8)
+
+        let bank = try JSONDecoder().decode(ResetBankSnapshot.self, from: legacyPayload)
+
+        XCTAssertEqual(bank.resetTimeStatus, .parseFailed)
+        let encoded = try JSONEncoder().encode(bank)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        XCTAssertEqual(object["resetTimeStatus"] as? String, "parseFailed")
+        XCTAssertNil(object["resolvedResetFieldName"])
+        XCTAssertNil(object["rawResetFields"])
+        XCTAssertFalse(String(data: encoded, encoding: .utf8)?.contains("private-server-value") ?? true)
+    }
 }
 
 private final class ControlledProcessHandle: ProcessRPCProcess, @unchecked Sendable {
@@ -636,15 +1049,29 @@ private final class ControlledProcessHandle: ProcessRPCProcess, @unchecked Senda
     var handlersCleared: Bool { terminationHandler == nil }
 
     let killSucceeds: Bool
+    private let runError: ControlledRPCTransportError?
+    private var stdoutPipe: Pipe?
+    private var stderrPipe: Pipe?
 
-    init(terminateExits: Bool, killExits: Bool, killSucceeds: Bool = true) {
+    init(
+        terminateExits: Bool,
+        killExits: Bool,
+        killSucceeds: Bool = true,
+        runError: ControlledRPCTransportError? = nil
+    ) {
         self.terminateExits = terminateExits
         self.killExits = killExits
         self.killSucceeds = killSucceeds
+        self.runError = runError
     }
 
-    func configure(codexPath _: String, stdin _: Pipe, stdout _: Pipe, stderr _: Pipe) {}
-    func run() throws {}
+    func configure(codexPath _: String, stdin _: Pipe, stdout: Pipe, stderr: Pipe) {
+        stdoutPipe = stdout
+        stderrPipe = stderr
+    }
+    func run() throws {
+        if let runError { throw runError }
+    }
 
     func terminate() {
         terminateCount += 1
@@ -657,9 +1084,58 @@ private final class ControlledProcessHandle: ProcessRPCProcess, @unchecked Senda
         return killSucceeds
     }
 
+    func emitNaturalExit(status: Int32, stdout: Data, stderr: Data) {
+        terminationStatus = status
+        try? stdoutPipe?.fileHandleForWriting.write(contentsOf: stdout)
+        try? stderrPipe?.fileHandleForWriting.write(contentsOf: stderr)
+        exit()
+    }
+
     private func exit() {
+        guard isRunning else { return }
         isRunning = false
+        stdoutPipe?.fileHandleForWriting.closeFile()
+        stderrPipe?.fileHandleForWriting.closeFile()
         terminationHandler?(self)
+    }
+}
+
+private final class RPCTransportEventRecorder: @unchecked Sendable {
+    struct Snapshot {
+        let order: [String]
+        let stdout: Data
+        let stderr: Data
+    }
+
+    private let lock = NSLock()
+    private var order: [String] = []
+    private var stdout = Data()
+    private var stderr = Data()
+
+    func record(_ event: String) {
+        lock.lock()
+        order.append(event)
+        lock.unlock()
+    }
+
+    func recordStdout(_ data: Data) {
+        lock.lock()
+        order.append("stdout")
+        stdout.append(data)
+        lock.unlock()
+    }
+
+    func recordStderr(_ data: Data) {
+        lock.lock()
+        order.append("stderr")
+        stderr.append(data)
+        lock.unlock()
+    }
+
+    func snapshot() -> Snapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return Snapshot(order: order, stdout: stdout, stderr: stderr)
     }
 }
 
@@ -669,39 +1145,57 @@ private final class ControlledRPCTransport: CodexRPCTransport, @unchecked Sendab
     let rateLimitRequestExpectation = XCTestExpectation(description: "rate limits request written")
     private(set) var shutdownCount = 0
     private(set) var handlersCleared = false
+    private(set) var writtenMessages: [CodexAppServerMessage] = []
     private var stdout: (@Sendable (Data) -> Void)?
+    private var stdoutEOF: (@Sendable () -> Void)?
     private var stderr: (@Sendable (Data) -> Void)?
     private var termination: (@Sendable (Int32) -> Void)?
     private let cleanupError: ProcessCleanupError?
+    private let startError: ControlledRPCTransportError?
+    private let writeError: ControlledRPCTransportError?
 
-    init(cleanupError: ProcessCleanupError? = nil) {
+    init(
+        cleanupError: ProcessCleanupError? = nil,
+        startError: ControlledRPCTransportError? = nil,
+        writeError: ControlledRPCTransportError? = nil
+    ) {
         self.cleanupError = cleanupError
+        self.startError = startError
+        self.writeError = writeError
     }
 
     func start(
         stdout: @escaping @Sendable (Data) -> Void,
+        stdoutEOF: @escaping @Sendable () -> Void,
         stderr: @escaping @Sendable (Data) -> Void,
         termination: @escaping @Sendable (Int32) -> Void
     ) throws {
         self.stdout = stdout
+        self.stdoutEOF = stdoutEOF
         self.stderr = stderr
         self.termination = termination
         startedExpectation.fulfill()
+        if let startError { throw startError }
     }
 
-    func write(_ data: Data) {
-        guard let line = String(data: data, encoding: .utf8) else { return }
-        if line.contains("\"method\":\"initialize\"") {
-            initializeRequestExpectation.fulfill()
-        }
-        if line.contains("rateLimits") {
-            rateLimitRequestExpectation.fulfill()
+    func write(_ data: Data) throws {
+        if let writeError { throw writeError }
+        let line = Data(data.dropLast(data.last == 0x0A ? 1 : 0))
+        if let message = try? CodexAppServerCodec.decodeLine(line) {
+            writtenMessages.append(message)
+            if case .request(_, "initialize", _) = message {
+                initializeRequestExpectation.fulfill()
+            }
+            if case .request(_, "account/rateLimits/read", _) = message {
+                rateLimitRequestExpectation.fulfill()
+            }
         }
     }
 
     func shutdownAndWait() throws {
         shutdownCount += 1
         stdout = nil
+        stdoutEOF = nil
         stderr = nil
         termination = nil
         handlersCleared = true
@@ -712,9 +1206,22 @@ private final class ControlledRPCTransport: CodexRPCTransport, @unchecked Sendab
         stdout?(data)
     }
 
+    func emitStdoutEOF() {
+        stdoutEOF?()
+    }
+
+    func emitStderr(_ data: Data) {
+        stderr?(data)
+    }
+
     func emitTermination(status: Int32) {
         termination?(status)
     }
+}
+
+private enum ControlledRPCTransportError: Error, Equatable {
+    case startFailed
+    case writeFailed
 }
 
 private final class ControlledTimeoutScheduler: CodexRPCTimeoutScheduling, @unchecked Sendable {

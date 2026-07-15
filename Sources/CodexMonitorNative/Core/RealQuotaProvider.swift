@@ -1,37 +1,50 @@
 import Foundation
+import CoreFoundation
 
 protocol RealQuotaRefreshing: Sendable {
     func fetchQuota() async throws -> QuotaSnapshot
 }
 
-enum RealQuotaError: LocalizedError {
+enum RealQuotaError: LocalizedError, Equatable {
     case codexNotFound
-    case spawnFailed(String)
-    case handshakeFailed(String)
+    case spawnFailed
+    case handshakeFailed
     case requestTimedOut
-    case rpcError(String)
-    case parseFailed(String)
+    case authenticationRequired
+    case rpcRejected(code: Int64)
+    case responseInvalid
     case noUsableRateLimits
-    case processExited(Int32, String)
+    case processExited(Int32)
+    case transportFailed
+    case unsupportedServerRequest
+    case processCleanupFailed
 
     var errorDescription: String? {
         switch self {
         case .codexNotFound:
             return "Codex executable not found"
-        case .spawnFailed(let reason):
-            return "Failed to launch codex: \(reason)"
-        case .handshakeFailed(let reason):
-            return "Codex app-server handshake failed: \(reason)"
+        case .spawnFailed:
+            return "Failed to launch Codex"
+        case .handshakeFailed:
+            return "Codex app-server handshake failed"
         case .requestTimedOut:
             return "Codex app-server request timed out"
-        case .rpcError(let message):
-            return "Codex RPC error: \(message)"
-        case .parseFailed(let detail):
-            return "Failed to parse response: \(detail)"
+        case .authenticationRequired:
+            return "Codex authentication is required"
+        case .rpcRejected(let code):
+            return "Codex RPC request rejected (code \(code))"
+        case .responseInvalid:
+            return "Codex app-server response is invalid"
         case .noUsableRateLimits:
             return "No usable rate limits in response"
-        case .processExited(let code, _):
+        case .processExited(let code):
             return "Codex process exited (code \(code))"
+        case .transportFailed:
+            return "Codex app-server transport failed"
+        case .unsupportedServerRequest:
+            return "Codex app-server sent an unsupported request"
+        case .processCleanupFailed:
+            return "Failed to clean up Codex process"
         }
     }
 
@@ -40,15 +53,14 @@ enum RealQuotaError: LocalizedError {
         switch self {
         case .codexNotFound:
             return .noSnapshot
-        case .spawnFailed, .handshakeFailed, .requestTimedOut, .processExited:
+        case .spawnFailed, .handshakeFailed, .requestTimedOut, .processExited, .transportFailed,
+             .unsupportedServerRequest, .processCleanupFailed:
             return .networkFailed
-        case .rpcError(let message):
-            let lower = message.lowercased()
-            if lower.contains("auth") || lower.contains("unauthorized") || lower.contains("login") {
-                return .authRequired
-            }
+        case .authenticationRequired:
+            return .authRequired
+        case .rpcRejected:
             return .networkFailed
-        case .parseFailed, .noUsableRateLimits:
+        case .responseInvalid, .noUsableRateLimits:
             return .parseFailed
         }
     }
@@ -57,17 +69,16 @@ enum RealQuotaError: LocalizedError {
         switch self {
         case .codexNotFound:
             return .executableMissing
-        case .spawnFailed, .handshakeFailed, .processExited:
+        case .spawnFailed, .handshakeFailed, .processExited, .transportFailed,
+             .unsupportedServerRequest, .processCleanupFailed:
             return .codexUnavailable
         case .requestTimedOut:
             return .requestTimedOut
-        case .rpcError(let message):
-            let lower = message.lowercased()
-            if lower.contains("auth") || lower.contains("unauthorized") || lower.contains("login") {
-                return .loginRequired
-            }
+        case .authenticationRequired:
+            return .loginRequired
+        case .rpcRejected:
             return .rpcRejected
-        case .parseFailed, .noUsableRateLimits:
+        case .responseInvalid, .noUsableRateLimits:
             return .responseInvalid
         }
     }
@@ -84,10 +95,11 @@ protocol CodexRPCTimeoutScheduling: Sendable {
 protocol CodexRPCTransport: Sendable {
     func start(
         stdout: @escaping @Sendable (Data) -> Void,
+        stdoutEOF: @escaping @Sendable () -> Void,
         stderr: @escaping @Sendable (Data) -> Void,
         termination: @escaping @Sendable (Int32) -> Void
     ) throws
-    func write(_ data: Data)
+    func write(_ data: Data) throws
     func shutdownAndWait() throws
 }
 
@@ -162,12 +174,30 @@ private final class DispatchTimeoutToken: CodexRPCCancellable, @unchecked Sendab
     }
 }
 
+private final class CodexRPCEventQueue: @unchecked Sendable {
+    private let lock = NSLock()
+    private var tail: Task<Void, Never>?
+
+    func enqueue(_ operation: @escaping @Sendable () async -> Void) {
+        lock.lock()
+        let previous = tail
+        tail = Task {
+            await previous?.value
+            await operation()
+        }
+        lock.unlock()
+    }
+}
+
 final class ProcessRPCTransport: CodexRPCTransport, @unchecked Sendable {
     private let process: any ProcessRPCProcess
     private let stdinPipe = Pipe()
     private let stdoutPipe = Pipe()
     private let stderrPipe = Pipe()
+    private let streamLock = NSLock()
     private var hasStarted = false
+    private var isShuttingDown = false
+    private var hasTerminated = false
     private let shutdownGraceSeconds: TimeInterval
 
     init(codexPath: String, shutdownGraceSeconds: TimeInterval = 1) {
@@ -179,38 +209,89 @@ final class ProcessRPCTransport: CodexRPCTransport, @unchecked Sendable {
     init(process: any ProcessRPCProcess, shutdownGraceSeconds: TimeInterval = 1) {
         self.process = process
         self.shutdownGraceSeconds = shutdownGraceSeconds
+        process.configure(codexPath: "", stdin: stdinPipe, stdout: stdoutPipe, stderr: stderrPipe)
     }
 
     func start(
         stdout: @escaping @Sendable (Data) -> Void,
+        stdoutEOF: @escaping @Sendable () -> Void,
         stderr: @escaping @Sendable (Data) -> Void,
         termination: @escaping @Sendable (Int32) -> Void
     ) throws {
-        stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+        stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            guard let self else { return }
+            self.streamLock.lock()
+            defer { self.streamLock.unlock() }
+            guard !self.isShuttingDown, !self.hasTerminated else { return }
             let chunk = handle.availableData
-            if !chunk.isEmpty { stdout(chunk) }
+            if chunk.isEmpty {
+                handle.readabilityHandler = nil
+                stdoutEOF()
+            } else {
+                stdout(chunk)
+            }
         }
-        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+        stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            guard let self else { return }
+            self.streamLock.lock()
+            defer { self.streamLock.unlock() }
+            guard !self.isShuttingDown, !self.hasTerminated else { return }
             let chunk = handle.availableData
-            if !chunk.isEmpty { stderr(chunk) }
+            if chunk.isEmpty {
+                handle.readabilityHandler = nil
+            } else {
+                stderr(chunk)
+            }
         }
-        process.terminationHandler = { proc in termination(proc.terminationStatus) }
+        process.terminationHandler = { [weak self] proc in
+            guard let self else {
+                termination(proc.terminationStatus)
+                return
+            }
+
+            self.streamLock.lock()
+            if self.isShuttingDown {
+                self.streamLock.unlock()
+                termination(proc.terminationStatus)
+                return
+            }
+            guard !self.hasTerminated else {
+                self.streamLock.unlock()
+                return
+            }
+            self.hasTerminated = true
+
+            self.stdoutPipe.fileHandleForReading.readabilityHandler = nil
+            self.stderrPipe.fileHandleForReading.readabilityHandler = nil
+            let stdoutTail = self.stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            let stderrTail = self.stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            if !stdoutTail.isEmpty { stdout(stdoutTail) }
+            if !stderrTail.isEmpty { stderr(stderrTail) }
+            termination(proc.terminationStatus)
+            self.streamLock.unlock()
+        }
         try process.run()
         hasStarted = true
     }
 
-    func write(_ data: Data) {
-        stdinPipe.fileHandleForWriting.write(data)
+    func write(_ data: Data) throws {
+        try stdinPipe.fileHandleForWriting.write(contentsOf: data)
     }
 
     func shutdownAndWait() throws {
+        streamLock.lock()
+        isShuttingDown = true
         stdoutPipe.fileHandleForReading.readabilityHandler = nil
         stderrPipe.fileHandleForReading.readabilityHandler = nil
         stdinPipe.fileHandleForWriting.closeFile()
         stdoutPipe.fileHandleForReading.closeFile()
         stderrPipe.fileHandleForReading.closeFile()
+        streamLock.unlock()
 
-        guard hasStarted else { return }
+        guard hasStarted else {
+            process.terminationHandler = nil
+            return
+        }
         if process.isRunning {
             process.terminate()
             waitForExit()
@@ -237,30 +318,48 @@ final class ProcessRPCTransport: CodexRPCTransport, @unchecked Sendable {
 }
 
 actor CodexRPCClient {
-    private enum PendingResponse {
+    private enum Operation: String, Sendable {
         case initialize
-        case rateLimits
+        case rateLimitsRead
+    }
+
+    private struct PendingResponse: Sendable {
+        let id: CodexAppServerRequestID
+        let operation: Operation
     }
 
     private let transport: any CodexRPCTransport
     private let timeoutScheduler: any CodexRPCTimeoutScheduling
+    private let eventQueue = CodexRPCEventQueue()
+    private let maxFrameBytes: Int
+    private let maxStderrBytes: Int
 
     private var stdoutBuffer = Data()
     private var stderrData = Data()
-    private var nextId = 1
+    private var nextId: Int64 = 1
     private var hasResumed = false
+    private var hasObservedStdoutEOF = false
     private var pendingResponse: PendingResponse?
     private var completion: ((Result<QuotaSnapshot, Error>) -> Void)?
     private var timeoutWork: (any CodexRPCCancellable)?
 
-    init(codexPath: String) throws {
+    init(codexPath: String) {
         transport = ProcessRPCTransport(codexPath: codexPath)
         timeoutScheduler = DispatchTimeoutScheduler()
+        maxFrameBytes = 512 * 1_024
+        maxStderrBytes = 16 * 1_024
     }
 
-    init(transport: any CodexRPCTransport, timeoutScheduler: any CodexRPCTimeoutScheduling) {
+    init(
+        transport: any CodexRPCTransport,
+        timeoutScheduler: any CodexRPCTimeoutScheduling,
+        maxFrameBytes: Int = 512 * 1_024,
+        maxStderrBytes: Int = 16 * 1_024
+    ) {
         self.transport = transport
         self.timeoutScheduler = timeoutScheduler
+        self.maxFrameBytes = max(1, maxFrameBytes)
+        self.maxStderrBytes = max(1, maxStderrBytes)
     }
 
     func fetchQuota(timeoutSeconds: Double) async throws -> QuotaSnapshot {
@@ -285,52 +384,77 @@ actor CodexRPCClient {
 
     private func setupAndRun(timeoutSeconds: Double) {
         do {
+            let eventQueue = eventQueue
             try transport.start(
-                stdout: { [weak self] chunk in Task { await self?.handleStdoutChunk(chunk) } },
-                stderr: { [weak self] chunk in Task { await self?.handleStderrChunk(chunk) } },
-                termination: { [weak self] status in Task { await self?.handleTermination(status: status) } }
+                stdout: { [weak self] chunk in
+                    eventQueue.enqueue { [weak self] in await self?.handleStdoutChunk(chunk) }
+                },
+                stdoutEOF: { [weak self] in
+                    eventQueue.enqueue { [weak self] in await self?.handleStdoutEOF() }
+                },
+                stderr: { [weak self] chunk in
+                    eventQueue.enqueue { [weak self] in await self?.handleStderrChunk(chunk) }
+                },
+                termination: { [weak self] status in
+                    eventQueue.enqueue { [weak self] in await self?.handleTermination(status: status) }
+                }
             )
         } catch {
-            complete(.failure(RealQuotaError.spawnFailed(error.localizedDescription)))
+            AppLogger.codexRPC.error("Failed to start Codex app-server: \(String(describing: error), privacy: .private)")
+            complete(.failure(RealQuotaError.spawnFailed))
             return
         }
 
         // Set up timeout
+        let eventQueue = eventQueue
         timeoutWork = timeoutScheduler.schedule(after: timeoutSeconds) { [weak self] in
-            Task { await self?.handleTimeout() }
+            eventQueue.enqueue { [weak self] in await self?.handleTimeout() }
         }
 
-        // Step 1: Install the response handler before sending initialize so a
-        // fast app-server response cannot arrive in the gap.
-        pendingResponse = .initialize
-        sendRequest(method: "initialize", params: [
-            "clientInfo": [
-                "name": "codex-monitor-native",
-                "title": "Codex Monitor Native",
-                "version": "0.2.0"
-            ]
-        ])
+        sendRequest(
+            operation: .initialize,
+            method: "initialize",
+            params: .object([
+                "clientInfo": .object([
+                    "name": .string("codex-monitor-native"),
+                    "title": .string("Codex Monitor Native"),
+                    "version": .string("0.2.0")
+                ])
+            ])
+        )
     }
 
-    private func handleInitialized() {
-        let notif: [String: Any] = ["method": "initialized"]
-        if let notifData = try? JSONSerialization.data(withJSONObject: notif, options: []),
-           let notifLine = String(data: notifData, encoding: .utf8) {
-            writeLine(notifLine)
-        }
-
-        pendingResponse = .rateLimits
-        sendRequest(method: "account/rateLimits/read")
-    }
-
-    private func handleRateLimitsResponse(_ responseData: Data) {
-        guard let message = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
-              let result = message["result"] as? [String: Any] else {
-            complete(.failure(RealQuotaError.parseFailed("Invalid JSON response")))
+    private func handleInitializeResponse(_ result: CodexAppServerJSONValue) {
+        guard case .object(let object) = result,
+              case .string = object["codexHome"],
+              case .string = object["platformFamily"],
+              case .string = object["platformOs"],
+              case .string = object["userAgent"] else {
+            complete(.failure(RealQuotaError.handshakeFailed))
             return
         }
 
-        guard let snapshot = RealQuotaProvider.parseRateLimits(response: result) else {
+        do {
+            try writeFrame(CodexAppServerCodec.encodeNotification(method: "initialized"))
+        } catch {
+            AppLogger.codexRPC.error("Failed to acknowledge Codex initialization: \(String(describing: error), privacy: .private)")
+            complete(.failure(RealQuotaError.transportFailed))
+            return
+        }
+
+        sendRequest(operation: .rateLimitsRead, method: "account/rateLimits/read")
+    }
+
+    private func handleRateLimitsResponse(_ result: CodexAppServerJSONValue) {
+        guard case .object(let object) = result,
+              let legacyRateLimits = object["rateLimits"],
+              case .object = legacyRateLimits,
+              let response = result.foundationObject() else {
+            complete(.failure(RealQuotaError.responseInvalid))
+            return
+        }
+
+        guard let snapshot = RealQuotaProvider.parseRateLimits(response: response) else {
             complete(.failure(RealQuotaError.noUsableRateLimits))
             return
         }
@@ -339,26 +463,64 @@ actor CodexRPCClient {
     }
 
     private func handleStdoutChunk(_ chunk: Data) {
+        guard !hasResumed else { return }
         stdoutBuffer.append(chunk)
 
         while let newlineRange = stdoutBuffer.range(of: Data("\n".utf8)) {
+            if newlineRange.lowerBound > maxFrameBytes {
+                complete(.failure(RealQuotaError.responseInvalid))
+                return
+            }
             let lineData = stdoutBuffer.subdata(in: 0..<newlineRange.lowerBound)
             stdoutBuffer.removeSubrange(0...newlineRange.lowerBound)
             handleLine(lineData)
+            if hasResumed { return }
+        }
+
+        if stdoutBuffer.count > maxFrameBytes {
+            complete(.failure(RealQuotaError.responseInvalid))
         }
     }
 
+    private func handleStdoutEOF() {
+        guard !hasResumed, !hasObservedStdoutEOF else { return }
+        hasObservedStdoutEOF = true
+        guard !stdoutBuffer.isEmpty else { return }
+
+        let trailingLine = stdoutBuffer
+        stdoutBuffer.removeAll(keepingCapacity: false)
+        guard trailingLine.count <= maxFrameBytes else {
+            complete(.failure(RealQuotaError.responseInvalid))
+            return
+        }
+        handleLine(trailingLine)
+    }
+
     private func handleStderrChunk(_ chunk: Data) {
+        guard !hasResumed else { return }
+        if chunk.count >= maxStderrBytes {
+            stderrData = Data(chunk.suffix(maxStderrBytes))
+            return
+        }
+
         stderrData.append(chunk)
+        if stderrData.count > maxStderrBytes {
+            stderrData.removeSubrange(0..<(stderrData.count - maxStderrBytes))
+        }
     }
 
     private func handleTermination(status: Int32) {
         guard !hasResumed else { return }
-        if status != 0 {
-            complete(.failure(RealQuotaError.processExited(status, "")))
-        } else {
-            complete(.failure(RealQuotaError.spawnFailed("Codex process exited unexpectedly")))
+        if !hasObservedStdoutEOF, !stdoutBuffer.isEmpty {
+            handleStdoutEOF()
+            if hasResumed { return }
         }
+        if let stderr = String(data: stderrData, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !stderr.isEmpty {
+            AppLogger.codexRPC.error("Codex app-server exited code=\(status, privacy: .public) stderr=\(stderr, privacy: .private)")
+        }
+        complete(.failure(RealQuotaError.processExited(status)))
     }
 
     private func handleTimeout() {
@@ -367,64 +529,86 @@ actor CodexRPCClient {
     }
 
     private func handleLine(_ lineData: Data) {
-        guard let line = String(data: lineData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !line.isEmpty,
-              let messageData = line.data(using: .utf8) else {
+        guard !hasResumed else { return }
+        if lineData.allSatisfy({ $0 == 0x20 || $0 == 0x09 || $0 == 0x0D }) {
             return
         }
 
-        let message: [String: Any]
+        let message: CodexAppServerMessage
         do {
-            guard let json = try JSONSerialization.jsonObject(with: messageData) as? [String: Any] else {
+            message = try CodexAppServerCodec.decodeLine(lineData)
+        } catch {
+            AppLogger.codexRPC.error("Codex app-server emitted an invalid protocol frame")
+            complete(.failure(RealQuotaError.responseInvalid))
+            return
+        }
+
+        switch message {
+        case .response(let id, let result):
+            guard let pendingResponse, pendingResponse.id == id else {
+                AppLogger.codexRPC.error("Codex app-server response id did not match the pending request")
+                complete(.failure(RealQuotaError.responseInvalid))
                 return
             }
-            message = json
-        } catch {
-            return
-        }
-
-        if let error = message["error"] as? [String: Any] {
-            let errorMsg = error["message"] as? String ?? "unknown RPC error"
-            complete(.failure(RealQuotaError.rpcError(errorMsg)))
-            return
-        }
-
-        if message["result"] != nil {
-            let response = pendingResponse
-            pendingResponse = nil
-            switch response {
+            self.pendingResponse = nil
+            switch pendingResponse.operation {
             case .initialize:
-                handleInitialized()
-            case .rateLimits:
-                handleRateLimitsResponse(messageData)
-            case nil:
-                break
+                handleInitializeResponse(result)
+            case .rateLimitsRead:
+                handleRateLimitsResponse(result)
             }
+        case .error(let id, let remoteError):
+            guard let pendingResponse, pendingResponse.id == id else {
+                AppLogger.codexRPC.error("Codex app-server error id did not match the pending request")
+                complete(.failure(RealQuotaError.responseInvalid))
+                return
+            }
+            self.pendingResponse = nil
+            AppLogger.codexRPC.error("Codex RPC \(pendingResponse.operation.rawValue, privacy: .public) rejected code=\(remoteError.code, privacy: .public) message=\(remoteError.message, privacy: .private)")
+            complete(.failure(RealQuotaError.rpcRejected(code: remoteError.code)))
+        case .notification:
+            break
+        case .request(let id, let method, _):
+            AppLogger.codexRPC.error("Codex app-server sent unsupported server request: \(method, privacy: .private)")
+            let response = try? CodexAppServerCodec.encodeErrorResponse(
+                id: id,
+                error: CodexAppServerRemoteError(code: -32_601, message: "Method not found")
+            )
+            if let response {
+                try? writeFrame(response)
+            }
+            complete(.failure(RealQuotaError.unsupportedServerRequest))
         }
     }
 
-    private func sendRequest(method: String, params: [String: Any]? = nil) {
-        var dict: [String: Any] = [
-            "id": nextId,
-            "method": method
-        ]
-        if let params {
-            dict["params"] = params
-        }
-        nextId += 1
-
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: dict, options: []),
-              let jsonString = String(data: jsonData, encoding: .utf8) else {
-            complete(.failure(RealQuotaError.spawnFailed("Failed to encode JSON-RPC request")))
+    private func sendRequest(
+        operation: Operation,
+        method: String,
+        params: CodexAppServerJSONValue? = nil
+    ) {
+        guard pendingResponse == nil else {
+            complete(.failure(RealQuotaError.responseInvalid))
             return
         }
 
-        writeLine(jsonString)
+        let id = CodexAppServerRequestID.integer(nextId)
+        nextId += 1
+        pendingResponse = PendingResponse(id: id, operation: operation)
+
+        do {
+            let data = try CodexAppServerCodec.encodeRequest(id: id, method: method, params: params)
+            try writeFrame(data)
+        } catch {
+            pendingResponse = nil
+            AppLogger.codexRPC.error("Failed to write Codex RPC request: \(String(describing: error), privacy: .private)")
+            complete(.failure(RealQuotaError.transportFailed))
+        }
     }
 
-    private func writeLine(_ line: String) {
-        guard let lineData = (line + "\n").data(using: .utf8) else { return }
-        transport.write(lineData)
+    private func writeFrame(_ data: Data) throws {
+        var framedData = data
+        framedData.append(0x0A)
+        try transport.write(framedData)
     }
 
     private func cancel() {
@@ -437,25 +621,26 @@ actor CodexRPCClient {
         pendingResponse = nil
         timeoutWork?.cancel()
         timeoutWork = nil
-        let finalResult: Result<QuotaSnapshot, Error>
+        var finalResult = result
         do {
             try transport.shutdownAndWait()
-            finalResult = result
         } catch {
-            finalResult = .failure(error)
+            AppLogger.codexRPC.error("Failed to clean up Codex app-server: \(String(describing: error), privacy: .private)")
+            if case .success = result {
+                finalResult = .failure(RealQuotaError.processCleanupFailed)
+            }
         }
         let completion = completion
         self.completion = nil
         completion?(finalResult)
     }
+
 }
 
 struct RealQuotaProvider: RealQuotaRefreshing {
     private struct ParsedResetMetadata {
         let resetAt: Date?
-        let resolvedFieldName: String?
         let status: ResetBankResetTimeStatus
-        let rawFields: [ResetBankRawField]
     }
 
     private struct ParsedResetCredits {
@@ -476,7 +661,7 @@ struct RealQuotaProvider: RealQuotaRefreshing {
         let resetAt: Date?
     }
 
-    private let codexPath: String
+    private let codexPath: String?
     private let timeoutSeconds: Double
 
     init(codexPath: String? = nil, timeoutSeconds: Double = 10) {
@@ -485,14 +670,26 @@ struct RealQuotaProvider: RealQuotaRefreshing {
     }
 
     func fetchQuota() async throws -> QuotaSnapshot {
-        let client = try CodexRPCClient(codexPath: codexPath)
+        guard let codexPath else {
+            throw RealQuotaError.codexNotFound
+        }
+        let client = CodexRPCClient(codexPath: codexPath)
         return try await client.fetchQuota(timeoutSeconds: timeoutSeconds)
     }
 
     // MARK: - Response Parsing (with field-level validation)
 
     static func parseRateLimits(response: [String: Any]) -> QuotaSnapshot? {
-        let rateLimitsByLimitId = response["rateLimitsByLimitId"] as? [String: Any] ?? [:]
+        var rateLimitsByLimitId = response["rateLimitsByLimitId"] as? [String: Any] ?? [:]
+        if let legacyRateLimits = response["rateLimits"] as? [String: Any] {
+            var canonicalBucket = legacyRateLimits
+            if let dynamicCanonicalBucket = rateLimitsByLimitId["codex"] as? [String: Any] {
+                for (key, value) in dynamicCanonicalBucket {
+                    canonicalBucket[key] = value
+                }
+            }
+            rateLimitsByLimitId["codex"] = canonicalBucket
+        }
 
         let codexBucket = rateLimitsByLimitId["codex"] as? [String: Any] ?? [:]
         let primary = codexBucket["primary"] as? [String: Any]
@@ -637,6 +834,7 @@ struct RealQuotaProvider: RealQuotaRefreshing {
 
     private static func parseWindowDuration(_ window: [String: Any]) -> Int? {
         let rawValue = window["windowDurationMins"] ?? window["windowDurationMinutes"] ?? window["durationMinutes"]
+        guard !isBooleanJSONValue(rawValue) else { return nil }
         if let value = rawValue as? NSNumber {
             return value.intValue
         }
@@ -680,6 +878,7 @@ struct RealQuotaProvider: RealQuotaRefreshing {
     }
 
     private static func parsePercentage(_ rawValue: Any) -> Double? {
+        guard !isBooleanJSONValue(rawValue) else { return nil }
         if let number = rawValue as? NSNumber {
             return number.doubleValue
         }
@@ -741,9 +940,7 @@ struct RealQuotaProvider: RealQuotaRefreshing {
                         displayName: resetBankDisplayName(limitId: limitId, windowId: windowId, kind: kind),
                         remainingPercent: remainingPercent,
                         resetAt: reset.resetAt,
-                        resolvedResetFieldName: reset.resolvedFieldName,
                         resetTimeStatus: reset.status,
-                        rawResetFields: reset.rawFields,
                         windowKind: kind,
                         durationMinutes: durationMinutes
                     )
@@ -805,28 +1002,24 @@ struct RealQuotaProvider: RealQuotaRefreshing {
     }
 
     private static func parseResetMetadata(from window: [String: Any]) -> ParsedResetMetadata {
-        var rawFields: [ResetBankRawField] = []
+        var hasCandidateField = false
         var parsedDate: Date?
-        var resolvedFieldName: String?
 
         for key in ["resetAt", "resetsAt", "nextResetAt", "windowResetAt"] {
             guard let rawValue = window[key] else {
                 continue
             }
 
-            rawFields.append(ResetBankRawField(name: key, value: stringify(rawValue)))
+            hasCandidateField = true
             if parsedDate == nil {
                 parsedDate = parseDate(rawValue)
-                if parsedDate != nil {
-                    resolvedFieldName = key
-                }
             }
         }
 
         let status: ResetBankResetTimeStatus
         if parsedDate != nil {
             status = .actual
-        } else if rawFields.isEmpty {
+        } else if !hasCandidateField {
             status = .unexposed
         } else {
             status = .parseFailed
@@ -834,9 +1027,7 @@ struct RealQuotaProvider: RealQuotaRefreshing {
 
         return ParsedResetMetadata(
             resetAt: parsedDate,
-            resolvedFieldName: resolvedFieldName,
-            status: status,
-            rawFields: rawFields
+            status: status
         )
     }
 
@@ -848,7 +1039,9 @@ struct RealQuotaProvider: RealQuotaRefreshing {
         var availableCount: Int?
 
         let rawAvailableCount = container["availableCount"] ?? container["available_count"]
-        if let count = rawAvailableCount as? Int {
+        if isBooleanJSONValue(rawAvailableCount) {
+            availableCount = nil
+        } else if let count = rawAvailableCount as? Int {
             availableCount = count
         } else if let number = rawAvailableCount as? NSNumber {
             availableCount = number.intValue
@@ -859,25 +1052,8 @@ struct RealQuotaProvider: RealQuotaRefreshing {
         return ParsedResetCredits(availableCount: availableCount)
     }
 
-    private static func stringify(_ rawValue: Any) -> String {
-        if let string = rawValue as? String {
-            return string
-        }
-
-        if let number = rawValue as? NSNumber {
-            return number.stringValue
-        }
-
-        if JSONSerialization.isValidJSONObject(rawValue),
-           let data = try? JSONSerialization.data(withJSONObject: rawValue, options: [.sortedKeys]),
-           let string = String(data: data, encoding: .utf8) {
-            return string
-        }
-
-        return String(describing: rawValue)
-    }
-
     private static func parseDate(_ rawValue: Any) -> Date? {
+        guard !isBooleanJSONValue(rawValue) else { return nil }
         if let date = rawValue as? Date {
             return date
         }
@@ -908,6 +1084,11 @@ struct RealQuotaProvider: RealQuotaRefreshing {
         return nil
     }
 
+    private static func isBooleanJSONValue(_ rawValue: Any?) -> Bool {
+        guard let number = rawValue as? NSNumber else { return false }
+        return CFGetTypeID(number) == CFBooleanGetTypeID()
+    }
+
     private static func dateFromTimestamp(_ rawValue: Double) -> Date? {
         guard rawValue.isFinite, rawValue > 0 else {
             return nil
@@ -919,7 +1100,7 @@ struct RealQuotaProvider: RealQuotaRefreshing {
 
     // MARK: - Codex Path Resolution
 
-    static func resolveCodexPath() -> String {
+    static func resolveCodexPath() -> String? {
         if let envPath = ProcessInfo.processInfo.environment["CODEX_BIN"]
             ?? ProcessInfo.processInfo.environment["CODEX_EXECUTABLE"],
            isExecutable(envPath) {
@@ -938,7 +1119,7 @@ struct RealQuotaProvider: RealQuotaRefreshing {
         }
 
         AppLogger.codexRPC.error("Codex executable not found in any search path")
-        return "codex"
+        return nil
     }
 
     private static func searchPaths() -> [String] {

@@ -538,14 +538,18 @@ final class AppState: ObservableObject {
             return "请求超时"
         case .processExited:
             return "Codex 提前退出"
-        case .rpcError(let message):
-            let lower = message.lowercased()
-            if lower.contains("auth") || lower.contains("unauthorized") || lower.contains("login") {
-                return "需要重新登录 Codex"
-            }
+        case .transportFailed:
+            return "Codex 通信失败"
+        case .authenticationRequired:
+            return "需要重新登录 Codex"
+        case .rpcRejected:
             return "RPC 请求失败"
-        case .parseFailed, .noUsableRateLimits:
+        case .responseInvalid, .noUsableRateLimits:
             return "响应不可解析"
+        case .unsupportedServerRequest:
+            return "Codex 协议不兼容"
+        case .processCleanupFailed:
+            return "Codex 进程清理失败"
         }
     }
 

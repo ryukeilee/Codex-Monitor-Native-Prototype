@@ -624,7 +624,7 @@ enum StatusPopoverFormatting {
                 id: bank.id,
                 resetText: details.resetText,
                 remainingText: details.remainingText,
-                sourceText: bankSourceText(for: bank),
+                sourceText: nil,
                 detailText: bankDetailText(for: bank)
             )
         }
@@ -1045,14 +1045,6 @@ enum StatusPopoverFormatting {
         return lhs.id < rhs.id
     }
 
-    private static func bankSourceText(for bank: ResetBankSnapshot) -> String? {
-        guard let fieldName = bank.resolvedResetFieldName else {
-            return nil
-        }
-
-        return "来源：rateLimitsByLimitId.\(bank.limitId).\(bank.windowId).\(fieldName)"
-    }
-
     private static func bankDetailText(for bank: ResetBankSnapshot) -> String? {
         switch bank.resetTimeStatus {
         case .actual:
@@ -1060,13 +1052,7 @@ enum StatusPopoverFormatting {
         case .unexposed:
             return "诊断：重置时间未知/未暴露"
         case .parseFailed:
-            let rawFieldText = bank.rawResetFields
-                .map { "rateLimitsByLimitId.\(bank.limitId).\(bank.windowId).\($0.name)=\($0.value)" }
-                .joined(separator: " · ")
-            if rawFieldText.isEmpty {
-                return "诊断：解析失败"
-            }
-            return "诊断：解析失败 · 原始字段：\(rawFieldText)"
+            return "诊断：重置时间格式不受支持"
         }
     }
 
@@ -1075,15 +1061,15 @@ enum StatusPopoverFormatting {
 
         switch snapshot.resetCreditDetailsState {
         case .detailed:
-            details.append("详情来源：wham reset credits endpoint")
+            details.append("已加载重置次数详情")
         case .unavailable:
             if let diagnostic = snapshot.resetCreditDiagnostic?.summary {
                 details.append("详情失败：\(diagnostic)")
             } else {
-                details.append("详情来源暂不可用，当前仅显示 app-server 次数")
+                details.append("详情暂不可用，当前仅显示 Codex 提供的次数")
             }
         case .appServerCountOnly:
-            details.append("当前仅显示 app-server 次数")
+            details.append("当前仅显示 Codex 提供的次数")
         }
 
         let hiddenStatuses = snapshot.resetCreditStatusSummary

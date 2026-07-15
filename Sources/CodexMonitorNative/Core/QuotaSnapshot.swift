@@ -1,10 +1,5 @@
 import Foundation
 
-struct ResetBankRawField: Codable, Equatable {
-    let name: String
-    let value: String
-}
-
 struct ResetCreditRawField: Codable, Equatable {
     let path: String
     let value: String
@@ -190,9 +185,7 @@ struct ResetBankSnapshot: Codable, Equatable, Identifiable {
     let displayName: String
     let remainingPercent: Int
     let resetAt: Date?
-    let resolvedResetFieldName: String?
     let resetTimeStatus: ResetBankResetTimeStatus
-    let rawResetFields: [ResetBankRawField]
     let windowKind: QuotaWindowKind
     let durationMinutes: Int?
 
@@ -202,9 +195,7 @@ struct ResetBankSnapshot: Codable, Equatable, Identifiable {
         displayName: String,
         remainingPercent: Int,
         resetAt: Date?,
-        resolvedResetFieldName: String? = nil,
         resetTimeStatus: ResetBankResetTimeStatus? = nil,
-        rawResetFields: [ResetBankRawField],
         windowKind: QuotaWindowKind? = nil,
         durationMinutes: Int? = nil
     ) {
@@ -213,14 +204,7 @@ struct ResetBankSnapshot: Codable, Equatable, Identifiable {
         self.displayName = displayName
         self.remainingPercent = remainingPercent
         self.resetAt = resetAt
-        self.resolvedResetFieldName = resolvedResetFieldName
-        self.resetTimeStatus = resetTimeStatus ?? {
-            if resetAt != nil {
-                return .actual
-            }
-            return rawResetFields.isEmpty ? .unexposed : .parseFailed
-        }()
-        self.rawResetFields = rawResetFields
+        self.resetTimeStatus = resetTimeStatus ?? (resetAt == nil ? .unexposed : .actual)
         self.windowKind = windowKind ?? Self.legacyWindowKind(limitId: limitId, windowId: windowId)
         self.durationMinutes = durationMinutes
     }
@@ -249,9 +233,9 @@ struct ResetBankSnapshot: Codable, Equatable, Identifiable {
         let displayName = try container.decode(String.self, forKey: .displayName)
         let remainingPercent = try container.decode(Int.self, forKey: .remainingPercent)
         let resetAt = try container.decodeIfPresent(Date.self, forKey: .resetAt)
-        let resolvedResetFieldName = try container.decodeIfPresent(String.self, forKey: .resolvedResetFieldName)
-        let rawResetFields = try container.decodeIfPresent([ResetBankRawField].self, forKey: .rawResetFields) ?? []
+        let legacyRawFields = try container.decodeIfPresent([LegacyRawField].self, forKey: .rawResetFields) ?? []
         let resetTimeStatus = try container.decodeIfPresent(ResetBankResetTimeStatus.self, forKey: .resetTimeStatus)
+            ?? (resetAt != nil ? .actual : (legacyRawFields.isEmpty ? .unexposed : .parseFailed))
         let durationMinutes = try container.decodeIfPresent(Int.self, forKey: .durationMinutes)
         let windowKindRaw = try container.decodeIfPresent(String.self, forKey: .windowKind)
         let windowKind = windowKindRaw.flatMap(QuotaWindowKind.init(rawValue:))
@@ -262,13 +246,25 @@ struct ResetBankSnapshot: Codable, Equatable, Identifiable {
             displayName: displayName,
             remainingPercent: remainingPercent,
             resetAt: resetAt,
-            resolvedResetFieldName: resolvedResetFieldName,
             resetTimeStatus: resetTimeStatus,
-            rawResetFields: rawResetFields,
             windowKind: windowKind,
             durationMinutes: durationMinutes
         )
     }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(limitId, forKey: .limitId)
+        try container.encode(windowId, forKey: .windowId)
+        try container.encode(displayName, forKey: .displayName)
+        try container.encode(remainingPercent, forKey: .remainingPercent)
+        try container.encodeIfPresent(resetAt, forKey: .resetAt)
+        try container.encode(resetTimeStatus, forKey: .resetTimeStatus)
+        try container.encode(windowKind, forKey: .windowKind)
+        try container.encodeIfPresent(durationMinutes, forKey: .durationMinutes)
+    }
+
+    private struct LegacyRawField: Decodable {}
 
     private static func legacyWindowKind(limitId: String, windowId: String) -> QuotaWindowKind {
         switch (limitId, windowId) {

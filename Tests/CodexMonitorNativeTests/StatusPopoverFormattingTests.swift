@@ -816,7 +816,7 @@ final class StatusPopoverFormattingTests: XCTestCase {
 
         XCTAssertEqual(summary?.countLine, "重置次数未知")
         XCTAssertEqual(summary?.timingLine, "到期时间暂不可用")
-        XCTAssertEqual(summary?.detailLines, ["详情来源暂不可用，当前仅显示 app-server 次数"])
+        XCTAssertEqual(summary?.detailLines, ["详情暂不可用，当前仅显示 Codex 提供的次数"])
     }
 
     func testResetCreditsSummaryShowsSanitizedFailureReasonWithoutSecrets() {
@@ -853,9 +853,7 @@ final class StatusPopoverFormattingTests: XCTestCase {
                     windowId: "primary",
                     displayName: "5小时额度",
                     remainingPercent: 37,
-                    resetAt: makeDate("2026-06-19T14:10:00Z"),
-                    resolvedResetFieldName: "resetAt",
-                    rawResetFields: [ResetBankRawField(name: "resetAt", value: "2026-06-19T14:10:00Z")]
+                    resetAt: makeDate("2026-06-19T14:10:00Z")
                 )
             ],
             refreshedAt: .now,
@@ -918,7 +916,7 @@ final class StatusPopoverFormattingTests: XCTestCase {
         XCTAssertEqual(summary?.additionalCreditItems.map(\.expiryText), ["今天 15:10"])
         XCTAssertEqual(summary?.additionalCreditItems.map(\.remainingText), ["剩余 2小时30分"])
         XCTAssertEqual(summary?.additionalCreditItems.map(\.grantedText), ["今天 11:10"])
-        XCTAssertEqual(summary?.detailLines, ["详情来源：wham reset credits endpoint"])
+        XCTAssertEqual(summary?.detailLines, ["已加载重置次数详情"])
     }
 
     func testResetCreditsSummaryKeepsAllCreditsInLowPrioritySectionSortedByExpiry() {
@@ -1007,8 +1005,7 @@ final class StatusPopoverFormattingTests: XCTestCase {
                     windowId: "primary",
                     displayName: "5小时额度",
                     remainingPercent: 70,
-                    resetAt: makeDate("2026-06-19T16:10:00Z"),
-                    rawResetFields: []
+                    resetAt: makeDate("2026-06-19T16:10:00Z")
                 )
             ],
             refreshedAt: .now,
@@ -1038,8 +1035,7 @@ final class StatusPopoverFormattingTests: XCTestCase {
                     windowId: "primary",
                     displayName: "5小时额度",
                     remainingPercent: 70,
-                    resetAt: makeDate("2026-06-19T16:10:00Z"),
-                    rawResetFields: []
+                    resetAt: makeDate("2026-06-19T16:10:00Z")
                 )
             ],
             refreshedAt: .now,
@@ -1052,6 +1048,34 @@ final class StatusPopoverFormattingTests: XCTestCase {
         )
 
         XCTAssertNil(items.first?.detailText)
+    }
+
+    func testResetBankDisplayItemsUseSemanticDiagnosticsWithoutProtocolPaths() {
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 80,
+            fiveHourQuotaPercent: 70,
+            resetBanks: [
+                ResetBankSnapshot(
+                    limitId: "codex",
+                    windowId: "primary",
+                    displayName: "5小时额度",
+                    remainingPercent: 70,
+                    resetAt: nil,
+                    resetTimeStatus: .parseFailed
+                )
+            ],
+            refreshedAt: .now,
+            dataSource: .real
+        )
+
+        let item = StatusPopoverFormatting.resetBankDisplayItems(
+            snapshot: snapshot,
+            status: .success
+        ).first
+
+        XCTAssertNil(item?.sourceText)
+        XCTAssertEqual(item?.detailText, "诊断：重置时间格式不受支持")
+        XCTAssertFalse(item?.detailText?.contains("rateLimitsByLimitId") ?? true)
     }
 
     func testResetCreditsSummaryHidesNonAvailableStatesInDiagnostics() {
@@ -1086,7 +1110,7 @@ final class StatusPopoverFormattingTests: XCTestCase {
         XCTAssertEqual(
             summary?.detailLines,
             [
-                "详情来源：wham reset credits endpoint",
+                "已加载重置次数详情",
                 "已隐藏非 available 状态：redeemed 2 条 · expired 1 条"
             ]
         )
@@ -1105,9 +1129,7 @@ final class StatusPopoverFormattingTests: XCTestCase {
             windowId: parts[1],
             displayName: id,
             remainingPercent: percent,
-            resetAt: makeDate(resetAt),
-            resolvedResetFieldName: "resetAt",
-            rawResetFields: []
+            resetAt: makeDate(resetAt)
         )
     }
 }

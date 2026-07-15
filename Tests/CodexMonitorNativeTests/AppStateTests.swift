@@ -457,7 +457,7 @@ final class AppStateTests: XCTestCase {
 
         let appState = AppState(
             snapshotStore: store,
-            refreshService: MockRefreshService(error: RealQuotaError.rpcError("Unauthorized: please login"))
+            refreshService: MockRefreshService(error: RealQuotaError.authenticationRequired)
         )
 
         await appState.refreshNow(trigger: .manual)
@@ -479,7 +479,7 @@ final class AppStateTests: XCTestCase {
 
         let appState = AppState(
             snapshotStore: store,
-            refreshService: MockRefreshService(error: RealQuotaError.parseFailed("missing rateLimitsByLimitId"))
+            refreshService: MockRefreshService(error: RealQuotaError.responseInvalid)
         )
 
         await appState.refreshNow(trigger: .manual)
