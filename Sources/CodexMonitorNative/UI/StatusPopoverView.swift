@@ -60,6 +60,13 @@ struct StatusPopoverView: View {
         }
         .frame(maxWidth: .infinity)
         .onChange(of: showsDiagnostics) { _, _ in onLayoutChange() }
+        .onChange(of: diagnosticsLayoutSignal) { _, signal in
+            if showsDiagnostics && !signal.hasDisclosureContent {
+                showsDiagnostics = false
+            } else {
+                onLayoutChange()
+            }
+        }
         .onChange(of: quotaLayoutSignal) { _, _ in onLayoutChange() }
     }
 
@@ -67,6 +74,7 @@ struct StatusPopoverView: View {
         StatusPopoverInteractionPolicy.requiresScrollableViewport(
             isQuotaExpanded: isQuotaExpanded,
             isDiagnosticsExpanded: showsDiagnostics,
+            hasDiagnosticsContent: hasDiagnosticsContent,
             quotaLayoutSignal: quotaLayoutSignal
         )
     }
@@ -364,6 +372,14 @@ struct StatusPopoverView: View {
     }
 
     private var hasDiagnosticsContent: Bool {
-        supportLine != nil || launchAtLoginManager.lastErrorSummary != nil
+        diagnosticsLayoutSignal.hasDisclosureContent
+    }
+
+    private var diagnosticsLayoutSignal: StatusPopoverInteractionPolicy.DiagnosticsLayoutSignal {
+        StatusPopoverInteractionPolicy.DiagnosticsLayoutSignal(
+            refreshSummaryLine: refreshSummaryLine,
+            supportLine: supportLine,
+            launchAtLoginErrorSummary: launchAtLoginManager.lastErrorSummary
+        )
     }
 }

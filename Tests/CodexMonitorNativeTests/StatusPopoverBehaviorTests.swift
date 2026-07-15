@@ -71,6 +71,7 @@ final class StatusPopoverBehaviorTests: XCTestCase {
             StatusPopoverInteractionPolicy.requiresScrollableViewport(
                 isQuotaExpanded: false,
                 isDiagnosticsExpanded: false,
+                hasDiagnosticsContent: false,
                 quotaLayoutSignal: compact
             )
         )
@@ -78,6 +79,7 @@ final class StatusPopoverBehaviorTests: XCTestCase {
             StatusPopoverInteractionPolicy.requiresScrollableViewport(
                 isQuotaExpanded: true,
                 isDiagnosticsExpanded: false,
+                hasDiagnosticsContent: false,
                 quotaLayoutSignal: compact
             )
         )
@@ -85,6 +87,15 @@ final class StatusPopoverBehaviorTests: XCTestCase {
             StatusPopoverInteractionPolicy.requiresScrollableViewport(
                 isQuotaExpanded: false,
                 isDiagnosticsExpanded: true,
+                hasDiagnosticsContent: true,
+                quotaLayoutSignal: compact
+            )
+        )
+        XCTAssertFalse(
+            StatusPopoverInteractionPolicy.requiresScrollableViewport(
+                isQuotaExpanded: false,
+                isDiagnosticsExpanded: true,
+                hasDiagnosticsContent: false,
                 quotaLayoutSignal: compact
             )
         )
@@ -92,10 +103,28 @@ final class StatusPopoverBehaviorTests: XCTestCase {
             StatusPopoverInteractionPolicy.requiresScrollableViewport(
                 isQuotaExpanded: false,
                 isDiagnosticsExpanded: false,
+                hasDiagnosticsContent: false,
                 quotaLayoutSignal: overflowing
             )
         )
         XCTAssertEqual(StatusPopoverInteractionPolicy.expandedViewportHeight, 520)
+    }
+
+    func testDiagnosticsLayoutSignalTracksAppearanceAndRemoval() {
+        let hidden = StatusPopoverInteractionPolicy.DiagnosticsLayoutSignal(
+            refreshSummaryLine: nil,
+            supportLine: nil,
+            launchAtLoginErrorSummary: nil
+        )
+        let refreshing = StatusPopoverInteractionPolicy.DiagnosticsLayoutSignal(
+            refreshSummaryLine: "读取中",
+            supportLine: "正在刷新，先显示当前快照",
+            launchAtLoginErrorSummary: nil
+        )
+
+        XCTAssertFalse(hidden.hasDisclosureContent)
+        XCTAssertTrue(refreshing.hasDisclosureContent)
+        XCTAssertNotEqual(hidden, refreshing)
     }
 
     func testQuotaDisclosureLayoutPolicyPropagatesNestedExpansionOnlyWhenNeeded() {

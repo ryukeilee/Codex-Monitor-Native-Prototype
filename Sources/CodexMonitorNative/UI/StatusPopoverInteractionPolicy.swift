@@ -3,12 +3,25 @@ import Foundation
 enum StatusPopoverInteractionPolicy {
     static let expandedViewportHeight: CGFloat = 520
 
+    struct DiagnosticsLayoutSignal: Equatable {
+        let refreshSummaryLine: String?
+        let supportLine: String?
+        let launchAtLoginErrorSummary: String?
+
+        var hasDisclosureContent: Bool {
+            supportLine != nil || launchAtLoginErrorSummary != nil
+        }
+    }
+
     static func requiresScrollableViewport(
         isQuotaExpanded: Bool,
         isDiagnosticsExpanded: Bool,
+        hasDiagnosticsContent: Bool,
         quotaLayoutSignal: StatusPopoverFormatting.QuotaWindowLayoutSignal
     ) -> Bool {
-        isQuotaExpanded || isDiagnosticsExpanded || quotaLayoutSignal.requiresScrolling
+        isQuotaExpanded ||
+            (isDiagnosticsExpanded && hasDiagnosticsContent) ||
+            quotaLayoutSignal.requiresScrolling
     }
 
     static func shouldNotifyQuotaLayoutChange(current: Bool, next: Bool) -> Bool {
