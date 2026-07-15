@@ -3,7 +3,7 @@ import XCTest
 
 @MainActor
 final class WidgetTimelineBridgeTests: XCTestCase {
-    func testShutdownUsesSettledFreshCacheStateForWidget() async {
+    func testAppStateShutdownPublishesRefreshingThenSettledFreshCacheStateForWidget() async {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.widgetShutdownCache.\(UUID().uuidString)")!
         let snapshot = QuotaSnapshot(weeklyQuotaPercent: 70, fiveHourQuotaPercent: 60, refreshedAt: .now, dataSource: .real)
         let store = SnapshotStore(defaults: defaults, key: "snapshot")
@@ -19,14 +19,16 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         appState.refresh(trigger: .manual)
         await service.waitForStart()
         appState.shutdown()
-        bridge.shutdown()
 
+        XCTAssertEqual(savedStates.map(\.status), [.refreshing, .success])
+        XCTAssertEqual(savedStates.map(\.snapshot), [snapshot, snapshot])
         XCTAssertEqual(savedStates.last?.snapshot, snapshot)
         XCTAssertEqual(savedStates.last?.status, .success)
         XCTAssertEqual(reloadCount, 1)
+        _ = bridge
     }
 
-    func testShutdownUsesSettledNoSnapshotStateForWidgetWithoutCache() async {
+    func testAppStateShutdownPublishesRefreshingThenSettledNoSnapshotStateForWidgetWithoutCache() async {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.widgetShutdownNoCache.\(UUID().uuidString)")!
         let service = WidgetBridgeBlockingRefreshService(snapshot: .notConnected)
         let appState = AppState(snapshotStore: SnapshotStore(defaults: defaults, key: "snapshot"), refreshService: service)
@@ -39,14 +41,17 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         appState.refresh(trigger: .manual)
         await service.waitForStart()
         appState.shutdown()
-        bridge.shutdown()
 
+        XCTAssertEqual(savedStates.map(\.status), [.refreshing, .noSnapshot])
+        XCTAssertEqual(savedStates.map(\.snapshot), [.notConnected, .notConnected])
         XCTAssertEqual(savedStates.last?.snapshot, .notConnected)
         XCTAssertEqual(savedStates.last?.status, appState.displayStatus)
         XCTAssertNotEqual(savedStates.last?.status, .refreshing)
         XCTAssertEqual(reloadCount, 1)
+        _ = bridge
     }
-    func testBridgeShutdownReplacesPersistedRefreshingStateAndReloadsWidget() async {
+
+    func testAppStateShutdownReplacesPersistedRefreshingStateAndIsIdempotentForWidget() async {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.widgetBridgeDeinit.\(UUID().uuidString)")!
         let initial = QuotaSnapshot(weeklyQuotaPercent: 70, fiveHourQuotaPercent: 60, refreshedAt: .now, dataSource: .real)
         let store = SnapshotStore(defaults: defaults, key: "snapshot")
@@ -55,12 +60,11 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         let appState = AppState(snapshotStore: store, refreshService: service)
         var savedStates: [WidgetDisplayState] = []
         var reloadCount = 0
-        var bridge: WidgetTimelineBridge? = WidgetTimelineBridge(
+        let bridge = WidgetTimelineBridge(
             appState: appState,
             saveState: { savedStates.append($0) },
             reloadTimelines: { reloadCount += 1 }
         )
-        XCTAssertNotNil(bridge)
         savedStates.removeAll()
         reloadCount = 0
 
@@ -70,12 +74,16 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         XCTAssertEqual(savedStates.last?.status, .refreshing)
 
         appState.shutdown()
-        bridge?.shutdown()
-        bridge = nil
 
+        XCTAssertEqual(savedStates.map(\.status), [.refreshing, .success])
         XCTAssertNotEqual(savedStates.last?.status, .refreshing)
         XCTAssertEqual(reloadCount, 1)
+
+        let savedCountAfterFirstShutdown = savedStates.count
         appState.shutdown()
+        XCTAssertEqual(savedStates.count, savedCountAfterFirstShutdown)
+        XCTAssertEqual(reloadCount, 1)
+        _ = bridge
     }
     func testWidgetQuotaTextMatchesPopoverQuotaFormatting() {
         let now = Date()

@@ -15,10 +15,10 @@ final class StatusBarController {
         statusItem.isVisible = true
         configureButton()
 
-        appState.$presentationSnapshot
+        appState.$stateEvent
             .receive(on: RunLoop.main)
-            .sink { [weak self] presentationSnapshot in
-                self?.updateTitle(with: presentationSnapshot)
+            .sink { [weak self] stateEvent in
+                self?.updateTitle(with: stateEvent.presentationSnapshot)
             }
             .store(in: &cancellables)
     }

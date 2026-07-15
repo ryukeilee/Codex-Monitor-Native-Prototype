@@ -14,7 +14,7 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(actual, expected, file: file, line: line)
     }
 
-    func testPresentationSnapshotPublishesOneCoherentValuePerRefreshPhase() async {
+    func testStateEventPublishesOneCoherentValuePerRefreshPhase() async {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.presentationSnapshot.\(UUID().uuidString)")!
         let store = SnapshotStore(defaults: defaults, key: "snapshot")
         let initial = QuotaSnapshot(
@@ -34,21 +34,30 @@ final class AppStateTests: XCTestCase {
             snapshotStore: store,
             refreshService: MockRefreshService(snapshot: refreshed)
         )
-        var emittedSnapshots: [QuotaPresentationSnapshot] = []
-        let cancellable = appState.$presentationSnapshot
+        var emittedEvents: [AppStateEvent] = []
+        let cancellable = appState.$stateEvent
             .dropFirst()
-            .sink { emittedSnapshots.append($0) }
+            .sink { event in
+                XCTAssertEqual(store.loadState(), event.persistedState)
+                XCTAssertEqual(event.persistedState.snapshot, event.presentationSnapshot.snapshot)
+                XCTAssertEqual(event.persistedState.status, event.presentationSnapshot.status)
+                XCTAssertEqual(event.persistedState.lastSuccessAt, event.presentationSnapshot.lastSuccessAt)
+                XCTAssertEqual(event.persistedState.lastAttemptAt, event.presentationSnapshot.lastAttemptAt)
+                XCTAssertEqual(event.persistedState.savedAt, event.presentationSnapshot.savedAt)
+                emittedEvents.append(event)
+            }
 
         await appState.refreshNow(trigger: .manual)
 
-        XCTAssertEqual(emittedSnapshots.count, 2)
-        XCTAssertEqual(emittedSnapshots[0].snapshot, initial)
-        XCTAssertEqual(emittedSnapshots[0].status, .refreshing)
-        XCTAssertNotNil(emittedSnapshots[0].lastAttemptAt)
-        XCTAssertEqual(emittedSnapshots[1].snapshot, refreshed)
-        XCTAssertEqual(emittedSnapshots[1].status, .success)
-        XCTAssertEqual(emittedSnapshots[1].lastSuccessAt, refreshed.refreshedAt)
-        XCTAssertTrue(emittedSnapshots[1].isEquivalent(to: appState.presentationSnapshot))
+        XCTAssertEqual(emittedEvents.count, 2)
+        XCTAssertEqual(emittedEvents[0].persistedState.snapshot, initial)
+        XCTAssertEqual(emittedEvents[0].persistedState.status, .refreshing)
+        XCTAssertNotNil(emittedEvents[0].persistedState.lastAttemptAt)
+        XCTAssertEqual(emittedEvents[1].persistedState.snapshot, refreshed)
+        XCTAssertEqual(emittedEvents[1].persistedState.status, .success)
+        XCTAssertEqual(emittedEvents[1].persistedState.lastSuccessAt, refreshed.refreshedAt)
+        XCTAssertEqual(emittedEvents[1], appState.stateEvent)
+        XCTAssertTrue(emittedEvents[1].presentationSnapshot.isEquivalent(to: appState.presentationSnapshot))
         _ = cancellable
     }
 
@@ -348,6 +357,7 @@ final class AppStateTests: XCTestCase {
 
         XCTAssertEqual(appState.status, .stale)
         XCTAssertTrue(appState.isDataStale)
+        XCTAssertEqual(store.loadState()?.status, .stale)
     }
 
     func testFailedRefreshKeepsLastSuccessfulSnapshot() async {
@@ -385,6 +395,25 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(appState.status, .networkFailed)
         XCTAssertFalse(appState.isUsingCachedSnapshot)
         XCTAssertEqual(appState.realQuotaHealth, RealQuotaHealthDiagnostic(kind: .rpcRejected, isUsingCachedSnapshot: false))
+    }
+
+    func testFailedRefreshWithoutCachedSnapshotRestoresPersistedNetworkFailure() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.failure.noCache.restore.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let failed = AppState(snapshotStore: store, refreshService: MockRefreshService(snapshot: nil))
+
+        await failed.refreshNow(trigger: .manual)
+
+        XCTAssertEqual(store.loadState()?.snapshot, .notConnected)
+        XCTAssertEqual(store.loadState()?.status, .networkFailed)
+
+        let restored = AppState(
+            snapshotStore: SnapshotStore(defaults: defaults, key: "snapshot"),
+            refreshService: MockRefreshService(snapshot: nil)
+        )
+
+        XCTAssertEqual(restored.snapshot, .notConnected)
+        XCTAssertEqual(restored.status, .networkFailed)
     }
 
     func testRefreshInProgressKeepsCachedQuotaAndRecoveryTimeVisible() async {
@@ -653,11 +682,31 @@ final class AppStateTests: XCTestCase {
         store.saveSnapshot(real)
 
         let appState = AppState(snapshotStore: store, refreshService: MockRefreshService(snapshot: mock))
+        var widgetStates: [WidgetDisplayState] = []
+        var reloadCount = 0
+        let bridge = WidgetTimelineBridge(
+            appState: appState,
+            saveState: { widgetStates.append($0) },
+            reloadTimelines: { reloadCount += 1 }
+        )
+        widgetStates.removeAll()
+        reloadCount = 0
+
         await appState.refreshNow(trigger: .manual)
+
+        XCTAssertEqual(appState.snapshot, real)
+        XCTAssertEqual(appState.dataSource, .real)
+        XCTAssertEqual(store.loadState(), appState.stateEvent.persistedState)
+        XCTAssertEqual(appState.presentationSnapshot.snapshot, real)
+        XCTAssertFalse(widgetStates.contains { $0.snapshot == mock })
+        XCTAssertEqual(widgetStates.last?.snapshot, real)
+        XCTAssertEqual(widgetStates.last?.status, appState.displayStatus)
+        XCTAssertEqual(reloadCount, 1)
 
         let restored = AppState(snapshotStore: SnapshotStore(defaults: defaults, key: "snapshot"), refreshService: MockRefreshService(snapshot: real))
         XCTAssertEqual(restored.snapshot, real)
         XCTAssertEqual(restored.dataSource, .real)
+        _ = bridge
     }
 
     func testOutOfOrderRealRefreshDoesNotReplaceNewerCachedSnapshot() async {

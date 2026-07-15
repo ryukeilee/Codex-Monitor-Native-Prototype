@@ -69,7 +69,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         refreshScheduler?.stop()
         sleepWakeObserver?.stop()
         appState?.shutdown()
-        widgetTimelineBridge?.shutdown()
     }
 
     @objc

@@ -1,5 +1,47 @@
 import Foundation
 
+struct AppStateEvent: Equatable {
+    let persistedState: PersistedAppState
+    let presentationSnapshot: QuotaPresentationSnapshot
+
+    init(
+        snapshot: QuotaSnapshot,
+        status: QuotaRefreshStatus,
+        lastSuccessAt: Date?,
+        lastAttemptAt: Date?,
+        failureCount: Int,
+        effectiveFiveHourResetAt: Date?,
+        savedAt: Date = .now
+    ) {
+        let persistedState = PersistedAppState(
+            snapshot: snapshot,
+            status: status,
+            lastSuccessAt: lastSuccessAt,
+            lastAttemptAt: lastAttemptAt,
+            failureCount: failureCount,
+            savedAt: savedAt
+        )
+        self.persistedState = persistedState
+        self.presentationSnapshot = QuotaPresentationSnapshot.make(
+            snapshot: snapshot,
+            status: status,
+            lastSuccessAt: lastSuccessAt,
+            lastAttemptAt: lastAttemptAt,
+            effectiveFiveHourResetAt: effectiveFiveHourResetAt,
+            savedAt: savedAt
+        )
+    }
+
+    static let placeholder = AppStateEvent(
+        snapshot: .notConnected,
+        status: .noSnapshot,
+        lastSuccessAt: nil,
+        lastAttemptAt: nil,
+        failureCount: 0,
+        effectiveFiveHourResetAt: nil
+    )
+}
+
 @MainActor
 final class AppState: ObservableObject {
     enum RefreshTrigger {
@@ -10,9 +52,10 @@ final class AppState: ObservableObject {
 
     // MARK: - Published state
 
-    @Published private(set) var presentationSnapshot: QuotaPresentationSnapshot = .placeholder
-    private(set) var snapshot: QuotaSnapshot
+    @Published private(set) var stateEvent: AppStateEvent = .placeholder
+    private(set) var snapshot: QuotaSnapshot = .notConnected
     private(set) var status: QuotaRefreshStatus = .noSnapshot
+    var presentationSnapshot: QuotaPresentationSnapshot { stateEvent.presentationSnapshot }
 
     // MARK: - Diagnostics
 
@@ -45,6 +88,7 @@ final class AppState: ObservableObject {
     private let taskResources = AppStateTaskResources()
     private var activeRefresh: ActiveRefresh?
     private var pendingRefresh: PendingRefresh?
+    private var lastSettledStatus: QuotaRefreshStatus = .noSnapshot
 
     var isRefreshing: Bool { status == .refreshing }
     var isUsingCachedSnapshot: Bool { realQuotaHealth.isUsingCachedSnapshot }
@@ -66,31 +110,30 @@ final class AppState: ObservableObject {
         }
 
         let persistedState = snapshotStore.loadState()
-        let stored = persistedState?.snapshot ?? snapshotStore.loadSnapshot()
-        if let stored {
+        if let persistedState {
+            let stored = persistedState.snapshot
+            snapshot = stored
+            lastSuccessAt = persistedState.lastSuccessAt ?? (stored.dataSource == .real ? stored.refreshedAt : nil)
+            lastAttemptAt = persistedState.lastAttemptAt
+            failureCount = persistedState.failureCount
+            consecutiveFailures = failureCount
+
             if stored.dataSource == .real {
                 latestRealSnapshot = stored
-                snapshot = stored
-                let freshnessStatus: QuotaRefreshStatus = stored.isFresh(referenceDate: .now, staleAfterInterval: staleAfterInterval) ? .success : .stale
-                let restoredStatus = persistedState?.status
-                status = restoredStatus.map { $0 == .refreshing || $0 == .noSnapshot || $0 == .demoMode ? freshnessStatus : $0 } ?? freshnessStatus
-                lastSuccessAt = persistedState?.lastSuccessAt ?? stored.refreshedAt
-                lastAttemptAt = persistedState?.lastAttemptAt
-                failureCount = persistedState?.failureCount ?? 0
-                consecutiveFailures = failureCount
+                status = normalizedRestoredStatus(
+                    persistedStatus: persistedState.status,
+                    snapshot: stored
+                )
                 realQuotaHealth = RealQuotaHealthDiagnostic(
                     kind: .waitingForFirstRequest,
                     isUsingCachedSnapshot: true
                 )
                 AppLogger.snapshot.info("Restored real snapshot: weekly=\(stored.weeklyQuotaPercent)% fiveHour=\(stored.fiveHourQuotaPercent)%")
-                scheduleFreshnessCheck()
             } else {
-                snapshot = stored
-                status = .demoMode
-                lastSuccessAt = persistedState?.lastSuccessAt
-                lastAttemptAt = persistedState?.lastAttemptAt
-                failureCount = persistedState?.failureCount ?? 0
-                consecutiveFailures = failureCount
+                status = normalizedRestoredStatus(
+                    persistedStatus: persistedState.status,
+                    snapshot: stored
+                )
                 realQuotaHealth = RealQuotaHealthDiagnostic(
                     kind: .waitingForFirstRequest,
                     isUsingCachedSnapshot: false
@@ -107,7 +150,10 @@ final class AppState: ObservableObject {
             AppLogger.snapshot.info("No persisted snapshot; starting in not-connected state")
         }
 
-        synchronizePresentationSnapshot()
+        commitState()
+        if status == .success {
+            scheduleFreshnessCheck()
+        }
     }
 
     deinit {
@@ -122,11 +168,7 @@ final class AppState: ObservableObject {
     }
 
     var displayStatus: QuotaRefreshStatus {
-        if status == .success, isDataStale {
-            return .stale
-        }
-
-        return status
+        resolvedDisplayStatus(for: status)
     }
 
     var formattedLastAttempt: String? {
@@ -247,38 +289,24 @@ final class AppState: ObservableObject {
 
         if let real = latestRealSnapshot {
             snapshot = real
-            status = real.isFresh(referenceDate: .now, staleAfterInterval: staleAfterInterval) ? .success : .stale
-            realQuotaHealth = RealQuotaHealthDiagnostic(kind: .waitingForFirstRequest, isUsingCachedSnapshot: true)
-        } else {
-            status = snapshot.dataSource == .mock ? .demoMode : .noSnapshot
-            realQuotaHealth = RealQuotaHealthDiagnostic(kind: .waitingForFirstRequest, isUsingCachedSnapshot: false)
         }
+        status = resolvedDisplayStatus(for: lastSettledStatus)
+        realQuotaHealth = RealQuotaHealthDiagnostic(
+            kind: .waitingForFirstRequest,
+            isUsingCachedSnapshot: latestRealSnapshot != nil
+        )
         lastErrorSummary = nil
         commitState()
     }
 
     private func markQueuedRefresh() {
-        status = .refreshing
-        taskResources.freshnessTask?.cancel()
-        realQuotaHealth = RealQuotaHealthDiagnostic(
-            kind: .requestInProgress,
-            isUsingCachedSnapshot: latestRealSnapshot != nil
-        )
-        commitState()
+        enterRefreshingState(attemptedAt: nil)
     }
 
     private func beginRefresh(trigger: RefreshTrigger) -> QuotaSnapshot {
         let triggerName = triggerName(for: trigger)
-        status = .refreshing
-        lastAttemptAt = .now
-        taskResources.freshnessTask?.cancel()
-        realQuotaHealth = RealQuotaHealthDiagnostic(
-            kind: .requestInProgress,
-            isUsingCachedSnapshot: latestRealSnapshot != nil
-        )
-
         let baselineSnapshot = latestRealSnapshot ?? snapshot
-        commitState()
+        enterRefreshingState(attemptedAt: .now)
         AppLogger.refresh.info("Starting \(triggerName, privacy: .public) refresh (baseline source=\(baselineSnapshot.dataSource.rawValue, privacy: .public))")
         return baselineSnapshot
     }
@@ -356,6 +384,18 @@ final class AppState: ObservableObject {
                 commitState()
                 scheduleFreshnessCheck()
                 AppLogger.refresh.info("Real refresh succeeded: weekly=\(refreshed.weeklyQuotaPercent)% fiveHour=\(refreshed.fiveHourQuotaPercent)%")
+            } else if let latestRealSnapshot {
+                snapshot = latestRealSnapshot
+                status = resolvedDisplayStatus(for: lastSettledStatus)
+                realQuotaHealth = RealQuotaHealthDiagnostic(
+                    kind: .waitingForFirstRequest,
+                    isUsingCachedSnapshot: true
+                )
+                commitState()
+                if status == .success {
+                    scheduleFreshnessCheck()
+                }
+                AppLogger.refresh.info("Ignored mock refresh because a real snapshot is already cached")
             } else {
                 snapshot = refreshed
                 status = .demoMode
@@ -522,7 +562,7 @@ final class AppState: ObservableObject {
         if remaining <= 0 {
             if status == .success {
                 status = .stale
-                synchronizePresentationSnapshot()
+                commitState()
             }
             return
         }
@@ -541,31 +581,74 @@ final class AppState: ObservableObject {
 
                 self.status = .stale
                 self.lastErrorSummary = nil
-                self.synchronizePresentationSnapshot()
+                self.commitState()
                 AppLogger.refresh.info("Marked data stale after \(self.staleAfterInterval, format: .fixed(precision: 0)) seconds without a successful refresh")
             }
         }
     }
 
     private func commitState() {
-        synchronizePresentationSnapshot()
-        snapshotStore.saveState(PersistedAppState(
+        let resolvedStatus = resolvedDisplayStatus(for: status)
+        if resolvedStatus != status {
+            status = resolvedStatus
+        }
+        if resolvedStatus != .refreshing {
+            lastSettledStatus = resolvedStatus
+        }
+        let event = AppStateEvent(
             snapshot: snapshot,
-            status: status,
+            status: resolvedStatus,
             lastSuccessAt: lastSuccessAt,
             lastAttemptAt: lastAttemptAt,
-            failureCount: failureCount
-        ))
-    }
-
-    private func synchronizePresentationSnapshot() {
-        presentationSnapshot = QuotaPresentationSnapshot.make(
-            snapshot: snapshot,
-            status: displayStatus,
-            lastSuccessAt: lastSuccessAt,
-            lastAttemptAt: lastAttemptAt,
+            failureCount: failureCount,
             effectiveFiveHourResetAt: effectiveFiveHourResetAt
         )
+        snapshotStore.saveState(event.persistedState)
+        stateEvent = event
+    }
+
+    private func enterRefreshingState(attemptedAt: Date?) {
+        status = .refreshing
+        if let attemptedAt {
+            lastAttemptAt = attemptedAt
+        }
+        taskResources.freshnessTask?.cancel()
+        realQuotaHealth = RealQuotaHealthDiagnostic(
+            kind: .requestInProgress,
+            isUsingCachedSnapshot: latestRealSnapshot != nil
+        )
+        commitState()
+    }
+
+    private func resolvedDisplayStatus(for status: QuotaRefreshStatus) -> QuotaRefreshStatus {
+        if status == .success, isDataStale {
+            return .stale
+        }
+
+        return status
+    }
+
+    private func normalizedRestoredStatus(
+        persistedStatus: QuotaRefreshStatus,
+        snapshot: QuotaSnapshot
+    ) -> QuotaRefreshStatus {
+        if snapshot.dataSource == .real {
+            switch persistedStatus {
+            case .networkFailed, .authRequired, .parseFailed:
+                return persistedStatus
+            case .idle, .refreshing, .success, .stale, .noSnapshot, .demoMode:
+                return snapshot.isFresh(referenceDate: .now, staleAfterInterval: staleAfterInterval) ? .success : .stale
+            }
+        }
+
+        switch persistedStatus {
+        case .networkFailed, .authRequired, .parseFailed, .noSnapshot:
+            return persistedStatus
+        case .refreshing, .idle:
+            return .noSnapshot
+        case .success, .stale, .demoMode:
+            return .demoMode
+        }
     }
 
     private func triggerName(for trigger: RefreshTrigger) -> String {
