@@ -38,6 +38,7 @@ swift test
 - Popover 的圆形开机启动控件由系统 `Toggle` 承载，重置额度、自检、诊断和字段详情由系统 `DisclosureGroup` 承载；视觉样式不再依赖普通按钮模拟开关或披露语义。
 - Popover 保持系统原生的 Tab 阅读顺序，不用底部操作抢占焦点或改变初始滚动位置；同时支持 `Command-R` 刷新、`Command-Q` 退出和 `Escape` 关闭，交互控件暴露稳定的辅助功能标识及动态开关、展开和刷新状态。
 - 进程内键盘测试把真实 `StatusPopoverView` 挂到隐藏 `NSWindow`，发送 `Command-R` / `Command-Q` 键等价事件，直接证明动作路由有效，并证明刷新状态发布到 SwiftUI 后禁用按钮会拦截重复 `Command-R`。
+- UI 门禁以可执行行为契约为准：Popover 的纯交互契约覆盖滚动视口、嵌套披露、辅助功能状态和 Escape 关闭条件；Widget 的纯呈现输入覆盖容量、primary/overflow、中心数值、进度与 footer 文案。不再以源码字符串或“PNG 文件已写出”作为通过条件；Popover 的真实辅助功能树和 Widget extension 的实际渲染仍列入人工门禁。
 - 纯装饰能量核心不进入辅助功能导航；顶部合并元素读出状态与更新时间，额度卡片同时读出恢复时间和剩余时间。
 - Widget 小尺寸容量为 1、中尺寸容量为 3；only-monthly 会成为真实 primary，unknown-only 不生成额度项。
 - 真实刷新失败时会保留上次成功的真实快照，不会立即清空菜单栏数字。
@@ -59,9 +60,9 @@ swift test
 - scheduler tick
 - sleep / wake notification wiring
 - 动态投影稳定排序、known-kind 去重、legacy fallback 边界、未知/缓存/无效字段过滤与 reset 一致性
-- Popover only-weekly、only-unknown、5 小时 + 周 + 月、多窗口行数与滚动信号
+- Popover only-weekly、only-unknown、5 小时 + 周 + 月、多窗口行数，以及滚动视口与嵌套披露的纯交互信号
 - Popover `Command-R` / `Command-Q` 的真实 `NSWindow` 键盘路由，以及刷新中禁用态对重复快捷键的拦截
-- Widget only-monthly、only-unknown、primary 选择和 overflow 计数
+- Widget 纯呈现层的 only-monthly、only-unknown、primary 选择、overflow、中心数值、进度与 footer 文案
 - 旧 Widget persisted payload 解码与 envelope 向后兼容
 
 ## Manual Verification Still Required
@@ -143,13 +144,15 @@ CODEX_MONITOR_FORCE_REFRESH_FAILURE=1 ./script/build_and_run.sh
 1. 分别准备 only-weekly、only-monthly、only-unknown、5 小时 + 周 + 月、重复 known-kind 的快照或真实响应。
 2. 打开 Popover，检查窗口顺序、未知窗口隐藏、重复来源去重、缓存/无效窗口隐藏和 reset 文案。
 3. 保持 Popover 打开并触发刷新，确认窗口数量变化后面板重新测量，不出现不可滚动的裁切。
-4. 在小尺寸与中尺寸 Widget 中检查相同快照；重点观察 only-monthly、only-unknown 和超过容量时的 `+N`。
+4. 使用固定的 3 个可信额度窗口，在小尺寸与中尺寸 Widget 中检查相同快照；核对中心额度数字、小尺寸的 `+2`、footer 去除“最早重置”前缀后贴底，以及背景填满整个容器。
+5. 分别检查有 footer 与无 footer 两种状态，确认主仪表的纵向位置不变，底部没有漏底或额外空行。
 
 预期结果：
 
 - 没有的 5 小时或周窗口不会出现固定占位；只有实时 legacy 同语义字段才允许补位。
 - 月窗口保持真实语义；未知、缓存、无效或演示字段不生成额度卡片，重复的已知语义只显示 canonical 来源。
 - Widget compact primary 可预测，中尺寸最多展示三个已知窗口。
+- Widget 的 overflow、中心数值和 footer 与纯呈现层输出一致；footer 使用底部 overlay，不会挤动主仪表。
 - 无可信周窗口时，菜单栏始终为 `--%`，不会取用月或未知窗口。
 
 ### 6. Popover Keyboard and Accessibility
@@ -160,13 +163,15 @@ CODEX_MONITOR_FORCE_REFRESH_FAILURE=1 ./script/build_and_run.sh
 2. 打开 Popover，不点击内容，确认内容仍位于顶部且没有因底部控件获取焦点而滚动。
 3. 使用 `Tab` / `Shift-Tab` 遍历所有当前可见控件，确认首次 Tab 按阅读顺序进入控件、焦点环可见，且顺序与面板从上到下的阅读顺序一致。
 4. 聚焦开机启动与各披露控件，使用空格及系统披露键盘操作切换状态；再用 `Command-R` 刷新、`Escape` 关闭面板。
-5. 开启 VoiceOver 重复上述路径，检查控件角色、名称、值、禁用状态与展开状态；确认纯装饰能量核心不进入导航。
-6. 展开重置额度详情，确认额度卡片读出百分比、状态、恢复时间与“还需”时间。
+5. 开启 VoiceOver，并用 Accessibility Inspector 核对启动开关、刷新、退出、自检、诊断和重置详情控件的 identifier、角色、名称、值、禁用状态与展开状态；确认纯装饰能量核心不进入导航。
+6. 展开自检或重置详情，确认出现 identifier 为 `quota-scroll-viewport` 的纵向滚动区域；折叠全部内容后确认该滚动区域消失，Popover 会重新测量且内容不被裁切。
+7. 展开重置额度详情，确认额度卡片读出百分比、状态、恢复时间与“还需”时间。
 
 预期结果：
 
 - 开机启动以开关类控件呈现并读出“已开启 / 已关闭 / 正在更新”，不会被误报为无状态普通按钮。
 - 所有披露控件的键盘操作和 VoiceOver 状态保持一致，展开或折叠后立即更新读出值。
+- 条件滚动视口与披露状态一致，展开或折叠后面板尺寸及时更新且内容可访问。
 - 刷新、退出、关闭均有稳定键盘路径；刷新期间不可重复触发，关闭后没有残留焦点。
 - 辅助功能导航顺序只包含有意义的状态与控件，不停留在装饰图形上。
 

@@ -27,8 +27,6 @@ struct StatusPopoverView: View {
     @State private var showsAllResetCredits = false
     @State private var showsResetCreditFields = false
 
-    private static let expandedViewportHeight: CGFloat = 520
-
     init(
         appState: AppState,
         launchAtLoginManager: LaunchAtLoginManager,
@@ -55,8 +53,8 @@ struct StatusPopoverView: View {
                     panelContent
                 }
                 .frame(maxWidth: .infinity)
-                .frame(height: Self.expandedViewportHeight, alignment: .top)
-                .accessibilityIdentifier("quota-scroll-viewport")
+                .frame(height: StatusPopoverInteractionPolicy.expandedViewportHeight, alignment: .top)
+                .accessibilityIdentifier(StatusPopoverAccessibilityContract.scrollViewportIdentifier)
             } else {
                 panelContent
             }
@@ -68,7 +66,12 @@ struct StatusPopoverView: View {
     }
 
     private var hasExpandedContent: Bool {
-        isQuotaExpanded || showsSelfCheck || showsDiagnostics || quotaLayoutSignal.requiresScrolling
+        StatusPopoverInteractionPolicy.requiresScrollableViewport(
+            isQuotaExpanded: isQuotaExpanded,
+            isSelfCheckExpanded: showsSelfCheck,
+            isDiagnosticsExpanded: showsDiagnostics,
+            quotaLayoutSignal: quotaLayoutSignal
+        )
     }
 
     private var quotaLayoutSignal: StatusPopoverFormatting.QuotaWindowLayoutSignal {
@@ -88,7 +91,10 @@ struct StatusPopoverView: View {
                 showsAllResetCredits: $showsAllResetCredits,
                 showsResetCreditFields: $showsResetCreditFields,
                 onLayoutChange: { expanded in
-                    guard isQuotaExpanded != expanded else { return }
+                    guard StatusPopoverInteractionPolicy.shouldNotifyQuotaLayoutChange(
+                        current: isQuotaExpanded,
+                        next: expanded
+                    ) else { return }
                     isQuotaExpanded = expanded
                     onLayoutChange()
                 }
@@ -239,9 +245,14 @@ struct StatusPopoverView: View {
             .buttonStyle(.plain)
             .disabled(launchAtLoginManager.isUpdating)
             .accessibilityLabel("开机启动")
-            .accessibilityValue(launchAtLoginAccessibilityValue)
+            .accessibilityValue(
+                StatusPopoverAccessibilityContract.launchAtLoginValue(
+                    isUpdating: launchAtLoginManager.isUpdating,
+                    isEnabled: launchAtLoginManager.shouldLaunchAtLogin
+                )
+            )
             .accessibilityHint("开启或关闭登录时自动启动")
-            .accessibilityIdentifier("launch-at-login-toggle")
+            .accessibilityIdentifier(StatusPopoverAccessibilityContract.launchAtLoginToggleIdentifier)
             .help("开机启动")
     }
 
@@ -256,9 +267,9 @@ struct StatusPopoverView: View {
             .disabled(presentationSnapshot.status == .refreshing)
             .keyboardShortcut("r", modifiers: .command)
             .accessibilityLabel("刷新额度")
-            .accessibilityValue(presentationSnapshot.status == .refreshing ? "正在刷新" : "可刷新")
+            .accessibilityValue(StatusPopoverAccessibilityContract.refreshValue(for: presentationSnapshot.status))
             .accessibilityHint("立即更新额度数据")
-            .accessibilityIdentifier("refresh-button")
+            .accessibilityIdentifier(StatusPopoverAccessibilityContract.refreshButtonIdentifier)
 
             Spacer()
 
@@ -271,7 +282,7 @@ struct StatusPopoverView: View {
             .keyboardShortcut("q", modifiers: .command)
             .accessibilityLabel("退出 Codex Monitor")
             .accessibilityHint("退出应用")
-            .accessibilityIdentifier("quit-button")
+            .accessibilityIdentifier(StatusPopoverAccessibilityContract.quitButtonIdentifier)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 2)
@@ -291,9 +302,9 @@ struct StatusPopoverView: View {
         }
         .font(.caption)
         .tint(MetallicPalette.muted)
-        .accessibilityValue(showsSelfCheck ? "已展开" : "已折叠")
+        .accessibilityValue(StatusPopoverAccessibilityContract.disclosureValue(isExpanded: showsSelfCheck))
         .accessibilityHint("显示或隐藏自检信息")
-        .accessibilityIdentifier("self-check-disclosure")
+        .accessibilityIdentifier(StatusPopoverAccessibilityContract.selfCheckDisclosureIdentifier)
 
         if hasDiagnosticsContent {
             DisclosureGroup("诊断", isExpanded: $showsDiagnostics) {
@@ -307,17 +318,10 @@ struct StatusPopoverView: View {
             }
             .font(.caption)
             .tint(MetallicPalette.muted)
-            .accessibilityValue(showsDiagnostics ? "已展开" : "已折叠")
+            .accessibilityValue(StatusPopoverAccessibilityContract.disclosureValue(isExpanded: showsDiagnostics))
             .accessibilityHint("显示或隐藏诊断信息")
-            .accessibilityIdentifier("diagnostics-disclosure")
+            .accessibilityIdentifier(StatusPopoverAccessibilityContract.diagnosticsDisclosureIdentifier)
         }
-    }
-
-    private var launchAtLoginAccessibilityValue: String {
-        if launchAtLoginManager.isUpdating {
-            return "正在更新"
-        }
-        return launchAtLoginManager.shouldLaunchAtLogin ? "已开启" : "已关闭"
     }
 
     private var environmentInfoLine: String? {

@@ -42,10 +42,20 @@ struct QuotaSummaryView: View {
             }
         }
         .onChange(of: showsAllResetCredits) { _, _ in
-            onLayoutChange(showsAllResetCredits || showsResetCreditFields)
+            onLayoutChange(
+                QuotaDisclosureLayoutPolicy.requiresParentViewport(
+                    showsAllResetCredits: showsAllResetCredits,
+                    showsResetCreditFields: showsResetCreditFields
+                )
+            )
         }
         .onChange(of: showsResetCreditFields) { _, _ in
-            onLayoutChange(showsAllResetCredits || showsResetCreditFields)
+            onLayoutChange(
+                QuotaDisclosureLayoutPolicy.requiresParentViewport(
+                    showsAllResetCredits: showsAllResetCredits,
+                    showsResetCreditFields: showsResetCreditFields
+                )
+            )
         }
     }
 
@@ -136,9 +146,15 @@ struct QuotaSummaryView: View {
                             }
                             .font(.caption)
                             .tint(MetallicPalette.muted)
-                            .accessibilityValue(showsResetCreditFields ? "已展开" : "已折叠")
+                            .accessibilityValue(
+                                StatusPopoverAccessibilityContract.disclosureValue(
+                                    isExpanded: showsResetCreditFields
+                                )
+                            )
                             .accessibilityHint("显示或隐藏重置额度字段")
-                            .accessibilityIdentifier("reset-credit-fields-disclosure")
+                            .accessibilityIdentifier(
+                                StatusPopoverAccessibilityContract.resetCreditFieldsDisclosureIdentifier
+                            )
                         }
                     }
                     .padding(.top, 8)
@@ -153,9 +169,13 @@ struct QuotaSummaryView: View {
                 }
                 .tint(MetallicPalette.redBright)
                 .accessibilityLabel("重置额度详情，\(disclosureTitle)")
-                .accessibilityValue(showsAllResetCredits ? "已展开" : "已折叠")
+                .accessibilityValue(
+                    StatusPopoverAccessibilityContract.disclosureValue(
+                        isExpanded: showsAllResetCredits
+                    )
+                )
                 .accessibilityHint("显示或隐藏重置额度详情")
-                .accessibilityIdentifier("reset-credits-disclosure")
+                .accessibilityIdentifier(StatusPopoverAccessibilityContract.resetCreditsDisclosureIdentifier)
             }
         }
         .padding(.horizontal, 10)

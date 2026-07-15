@@ -15,6 +15,7 @@
 		100000000000000000000025 /* RealQuotaHealthDiagnostic.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000015 /* RealQuotaHealthDiagnostic.swift */; };
 		100000000000000000000026 /* StatusPopoverFormatting.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000016 /* StatusPopoverFormatting.swift */; };
 		100000000000000000000027 /* MechanicalEnergyCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000019 /* MechanicalEnergyCore.swift */; };
+		100000000000000000000028 /* WidgetPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000029 /* WidgetPresentation.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -29,6 +30,7 @@
 		100000000000000000000017 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Sources/CodexMonitorWidgetExtension/Info.plist; sourceTree = "<group>"; };
 		100000000000000000000018 /* CodexMonitorWidgetExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Assets/CodexMonitorWidgetExtension.entitlements; sourceTree = "<group>"; };
 		100000000000000000000019 /* MechanicalEnergyCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/CodexMonitorNative/UI/MechanicalEnergyCore.swift; sourceTree = "<group>"; };
+		100000000000000000000029 /* WidgetPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/CodexMonitorNative/Shared/WidgetPresentation.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -55,6 +57,7 @@
 				100000000000000000000017 /* Info.plist */,
 				100000000000000000000018 /* CodexMonitorWidgetExtension.entitlements */,
 				100000000000000000000019 /* MechanicalEnergyCore.swift */,
+				100000000000000000000029 /* WidgetPresentation.swift */,
 				100000000000000000000041 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -132,6 +135,7 @@
 				100000000000000000000025 /* RealQuotaHealthDiagnostic.swift in Sources */,
 				100000000000000000000026 /* StatusPopoverFormatting.swift in Sources */,
 				100000000000000000000027 /* MechanicalEnergyCore.swift in Sources */,
+				100000000000000000000028 /* WidgetPresentation.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

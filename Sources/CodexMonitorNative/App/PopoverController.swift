@@ -185,8 +185,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
 
         keyboardEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
-            guard popover.isShown else { return event }
-            guard event.keyCode == 53 else { return event }
+            guard Self.shouldCloseForKeyEvent(keyCode: event.keyCode, isShown: popover.isShown) else { return event }
             AppLogger.popover.info("Closing popover because of Escape")
             closePopover()
             return nil
@@ -208,6 +207,10 @@ final class PopoverController: NSObject, NSPopoverDelegate {
             NSEvent.removeMonitor(keyboardEventMonitor)
             self.keyboardEventMonitor = nil
         }
+    }
+
+    static func shouldCloseForKeyEvent(keyCode: UInt16, isShown: Bool) -> Bool {
+        isShown && keyCode == 53
     }
 
     private func shouldClose(for event: NSEvent) -> Bool {

@@ -52,20 +52,12 @@ struct CodexMonitorWidgetView: View {
         activeFamily == .systemSmall
     }
 
-    private var quotaCapacity: Int {
-        isSmall ? 1 : 3
-    }
-
-    private var quotaSelection: StatusPopoverFormatting.QuotaWindowSelection {
-        entry.state.quotaSelection(capacity: quotaCapacity, now: entry.date)
-    }
-
-    private var primaryQuota: StatusPopoverFormatting.QuotaWindowDisplayItem? {
-        quotaSelection.primaryItem
-    }
-
-    private var supplementaryQuotas: [StatusPopoverFormatting.QuotaWindowDisplayItem] {
-        Array(quotaSelection.visibleItems.dropFirst())
+    private var presentation: WidgetPresentation {
+        WidgetPresentation(
+            state: entry.state,
+            family: isSmall ? .small : .medium,
+            now: entry.date
+        )
     }
 
     var body: some View {
@@ -128,7 +120,7 @@ struct CodexMonitorWidgetView: View {
 
             Spacer(minLength: 4)
 
-            if quotaSelection.overflowCount > 0 {
+            if presentation.overflowCount > 0 {
                 quotaOverflowBadge
             }
 
@@ -144,15 +136,11 @@ struct CodexMonitorWidgetView: View {
 
     private var quotaSideColumn: some View {
         VStack(alignment: .trailing, spacing: isSmall ? 12 : 14) {
-            if let primaryQuota, isSmall || supplementaryQuotas.isEmpty {
-                quotaMetricCell(primaryQuota, alignment: .trailing)
-            } else {
-                ForEach(supplementaryQuotas) { item in
-                    quotaMetricCell(item, alignment: .trailing)
-                }
+            ForEach(presentation.quotaSideItems) { item in
+                quotaMetricCell(item, alignment: .trailing)
             }
 
-            if let primaryQuota, isSmall || supplementaryQuotas.count < 2 {
+            if let primaryQuota = presentation.primaryQuota, presentation.showsRecovery {
                 metricCell(
                     label: "恢复时间",
                     value: condensedTimeText(from: primaryQuota.resetText),
@@ -168,19 +156,19 @@ struct CodexMonitorWidgetView: View {
     }
 
     private func quotaMetricCell(
-        _ item: StatusPopoverFormatting.QuotaWindowDisplayItem,
+        _ item: WidgetPresentation.Quota,
         alignment: HorizontalAlignment
     ) -> some View {
         metricCell(
             label: item.label,
             value: item.percentText,
-            caption: item.historyCaption ?? item.stateText,
+            caption: item.caption,
             alignment: alignment
         )
     }
 
     private var quotaOverflowBadge: some View {
-        Text("+\(quotaSelection.overflowCount)")
+        Text("+\(presentation.overflowCount)")
             .font(.system(size: isSmall ? 8 : 9, weight: .bold, design: .rounded))
             .foregroundStyle(.white.opacity(0.9))
             .padding(.horizontal, isSmall ? 5 : 6)
@@ -193,7 +181,7 @@ struct CodexMonitorWidgetView: View {
                             .stroke(Color.white.opacity(0.15), lineWidth: 0.7)
                     }
             )
-            .accessibilityLabel("另有 \(quotaSelection.overflowCount) 个额度窗口")
+            .accessibilityLabel("另有 \(presentation.overflowCount) 个额度窗口")
     }
 
     private func metricColumn(
@@ -431,7 +419,7 @@ struct CodexMonitorWidgetView: View {
                 .minimumScaleFactor(0.62)
                 .allowsTightening(true)
                 .shadow(color: Color(red: 0.52, green: 0.90, blue: 1.0).opacity(0.30), radius: 2)
-                .accessibilityLabel(primaryQuota.map { "\($0.label) \($0.percentText)" } ?? "额度不可用")
+                .accessibilityLabel(presentation.primaryQuota.map { "\($0.label) \($0.percentText)" } ?? "额度不可用")
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background {
@@ -448,7 +436,7 @@ struct CodexMonitorWidgetView: View {
         tone: MetricValueTone = .normal
     ) -> some View {
         VStack(alignment: alignment, spacing: 4) {
-            Text(shortMetricLabel(label))
+            Text(presentation.shortLabel(for: label))
                 .font(.system(size: isSmall ? 8 : 10, weight: .semibold, design: .rounded))
                 .foregroundStyle(Color(red: 0.94, green: 0.83, blue: 0.71).opacity(0.86))
                 .lineLimit(1)
@@ -529,15 +517,7 @@ struct CodexMonitorWidgetView: View {
     }
 
     private var resetCreditFooterText: String? {
-        guard let line = entry.state.resetCreditFooterText else {
-            return nil
-        }
-
-        if line.hasPrefix("最早重置 ") {
-            return String(line.dropFirst("最早重置 ".count))
-        }
-
-        return line
+        presentation.footerText
     }
 
     private var footerDockHeight: CGFloat {
@@ -573,35 +553,11 @@ struct CodexMonitorWidgetView: View {
     }
 
     private var centerQuotaNumberText: String {
-        guard let primaryQuota else {
-            return "--"
-        }
-
-        return primaryQuota.percentText.replacingOccurrences(of: "%", with: "")
-    }
-
-    private func shortMetricLabel(_ label: String) -> String {
-        switch label {
-        case "周额度":
-            return "周额度"
-        case "刷新状态":
-            return "状态"
-        case "恢复时间":
-            return "恢复"
-        case "更新时间":
-            return "更新"
-        default:
-            return label
-        }
+        presentation.centerQuotaNumberText
     }
 
     private var gaugeProgress: CGFloat {
-        guard let progress = primaryQuota?.progress else {
-            return 0.05
-        }
-
-        let clamped = min(max(progress, 0.05), 1.0)
-        return CGFloat(clamped)
+        CGFloat(presentation.gaugeProgress)
     }
 
     private var statusColor: Color {

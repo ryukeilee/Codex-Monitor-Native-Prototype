@@ -43,7 +43,8 @@ final class AppState: ObservableObject {
     private let defaultInterval: TimeInterval = 300
     private let staleAfterInterval: TimeInterval = 20 * 60
     private let taskResources = AppStateTaskResources()
-    private var activeRefreshID: UUID?
+    private var activeRefresh: ActiveRefresh?
+    private var pendingRefresh: PendingRefresh?
 
     var isRefreshing: Bool { status == .refreshing }
     var isUsingCachedSnapshot: Bool { realQuotaHealth.isUsingCachedSnapshot }
@@ -109,6 +110,11 @@ final class AppState: ObservableObject {
         synchronizePresentationSnapshot()
     }
 
+    deinit {
+        activeRefresh?.resumeWaiters()
+        pendingRefresh?.resumeWaiters()
+    }
+
     // MARK: - Formatters
 
     var formattedRefreshedAt: String {
@@ -156,18 +162,58 @@ final class AppState: ObservableObject {
     // MARK: - Refresh
 
     func refresh(trigger: RefreshTrigger) {
-        _ = startManagedRefresh(trigger: trigger)
+        enqueueRefresh(trigger: trigger)
     }
 
     func refreshNow(trigger: RefreshTrigger) async {
-        let refreshTask = startManagedRefresh(trigger: trigger)
-        await refreshTask.value
+        await withCheckedContinuation { continuation in
+            enqueueRefresh(trigger: trigger, waiter: continuation)
+        }
     }
 
-    private func startManagedRefresh(trigger: RefreshTrigger) -> Task<Void, Never> {
+    private func enqueueRefresh(
+        trigger: RefreshTrigger,
+        waiter: CheckedContinuation<Void, Never>? = nil
+    ) {
+        guard activeRefresh == nil else {
+            if pendingRefresh == nil {
+                pendingRefresh = PendingRefresh(trigger: trigger)
+            } else {
+                pendingRefresh?.trigger = trigger
+            }
+            if let waiter {
+                pendingRefresh?.waiters.append(waiter)
+            }
+
+            if status != .refreshing {
+                markQueuedRefresh()
+            }
+            AppLogger.refresh.info("Coalesced \(self.triggerName(for: trigger), privacy: .public) refresh behind the active request")
+            return
+        }
+
+        startManagedRefresh(
+            trigger: trigger,
+            waiters: waiter.map { [$0] } ?? []
+        )
+    }
+
+    private func startManagedRefresh(
+        trigger: RefreshTrigger,
+        waiters: [CheckedContinuation<Void, Never>]
+    ) {
         let refreshID = UUID()
-        activeRefreshID = refreshID
+        activeRefresh = ActiveRefresh(id: refreshID, waiters: waiters)
         let baselineSnapshot = beginRefresh(trigger: trigger)
+
+        // A synchronous observer of the refreshing presentation can shut the
+        // state down before the provider task is installed.
+        guard activeRefresh?.id == refreshID,
+              activeRefresh?.isInvalidated == false else {
+            finishInvalidatedRefreshBeforeStart(refreshID: refreshID)
+            return
+        }
+
         let refreshAction = refreshAction
         let refreshTask = Task { [weak self] in
             let result: Result<QuotaSnapshot, Error>
@@ -178,19 +224,25 @@ final class AppState: ObservableObject {
             }
             self?.finishManagedRefresh(result, refreshID: refreshID)
         }
-        taskResources.refreshTasks[refreshID] = refreshTask
-        return refreshTask
+        taskResources.refreshTask = refreshTask
     }
 
     /// Cancels the managed refresh and immediately leaves presentation state usable.
-    /// A provider that ignores cancellation may finish later, but cannot retain the
-    /// refresh slot or leave the app/widget in the refreshing state.
+    /// A provider that ignores cancellation keeps the physical single-flight slot
+    /// until it really returns. Any later trigger is coalesced behind that barrier.
     func shutdown() {
-        taskResources.refreshTasks.values.forEach { $0.cancel() }
-        taskResources.refreshTasks.removeAll()
+        taskResources.refreshTask?.cancel()
         taskResources.freshnessTask?.cancel()
         taskResources.freshnessTask = nil
-        activeRefreshID = nil
+
+        pendingRefresh?.resumeWaiters()
+        pendingRefresh = nil
+        if var activeRefresh {
+            activeRefresh.isInvalidated = true
+            activeRefresh.resumeWaiters()
+            self.activeRefresh = activeRefresh
+        }
+
         guard status == .refreshing else { return }
 
         if let real = latestRealSnapshot {
@@ -202,6 +254,16 @@ final class AppState: ObservableObject {
             realQuotaHealth = RealQuotaHealthDiagnostic(kind: .waitingForFirstRequest, isUsingCachedSnapshot: false)
         }
         lastErrorSummary = nil
+        commitState()
+    }
+
+    private func markQueuedRefresh() {
+        status = .refreshing
+        taskResources.freshnessTask?.cancel()
+        realQuotaHealth = RealQuotaHealthDiagnostic(
+            kind: .requestInProgress,
+            isUsingCachedSnapshot: latestRealSnapshot != nil
+        )
         commitState()
     }
 
@@ -222,10 +284,52 @@ final class AppState: ObservableObject {
     }
 
     private func finishManagedRefresh(_ result: Result<QuotaSnapshot, Error>, refreshID: UUID) {
-        taskResources.refreshTasks.removeValue(forKey: refreshID)
-        guard activeRefreshID == refreshID else { return }
+        guard var completedRefresh = activeRefresh,
+              completedRefresh.id == refreshID else {
+            return
+        }
+
+        taskResources.refreshTask = nil
+
+        if completedRefresh.isInvalidated {
+            activeRefresh = nil
+            AppLogger.refresh.info("Discarded the cancelled refresh result")
+            startPendingRefreshIfNeeded(carrying: [])
+            return
+        }
+
+        if pendingRefresh != nil {
+            activeRefresh = nil
+            AppLogger.refresh.info("Discarded a superseded refresh result; starting the coalesced trailing request")
+            startPendingRefreshIfNeeded(carrying: completedRefresh.waiters)
+            return
+        }
+
+        activeRefresh = nil
         applyRefreshResult(result)
-        activeRefreshID = nil
+        completedRefresh.resumeWaiters()
+    }
+
+    private func finishInvalidatedRefreshBeforeStart(refreshID: UUID) {
+        guard let activeRefresh, activeRefresh.id == refreshID else { return }
+        self.activeRefresh = nil
+        startPendingRefreshIfNeeded(carrying: [])
+    }
+
+    private func startPendingRefreshIfNeeded(
+        carrying waiters: [CheckedContinuation<Void, Never>]
+    ) {
+        guard var pendingRefresh else {
+            waiters.forEach { $0.resume() }
+            return
+        }
+
+        self.pendingRefresh = nil
+        pendingRefresh.waiters.insert(contentsOf: waiters, at: 0)
+        startManagedRefresh(
+            trigger: pendingRefresh.trigger,
+            waiters: pendingRefresh.waiters
+        )
     }
 
     private func applyRefreshResult(_ result: Result<QuotaSnapshot, Error>) {
@@ -476,11 +580,32 @@ final class AppState: ObservableObject {
 
 private final class AppStateTaskResources {
     var freshnessTask: Task<Void, Never>?
-    var refreshTasks: [UUID: Task<Void, Never>] = [:]
+    var refreshTask: Task<Void, Never>?
 
     deinit {
         freshnessTask?.cancel()
-        refreshTasks.values.forEach { $0.cancel() }
+        refreshTask?.cancel()
+    }
+}
+
+private struct ActiveRefresh {
+    let id: UUID
+    var waiters: [CheckedContinuation<Void, Never>]
+    var isInvalidated = false
+
+    mutating func resumeWaiters() {
+        waiters.forEach { $0.resume() }
+        waiters.removeAll()
+    }
+}
+
+private struct PendingRefresh {
+    var trigger: AppState.RefreshTrigger
+    var waiters: [CheckedContinuation<Void, Never>] = []
+
+    mutating func resumeWaiters() {
+        waiters.forEach { $0.resume() }
+        waiters.removeAll()
     }
 }
 
