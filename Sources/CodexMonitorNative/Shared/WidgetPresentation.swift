@@ -30,7 +30,7 @@ struct WidgetPresentation: Equatable {
             id = item.id
             label = item.label
             percentText = item.percentText
-            caption = item.historyCaption ?? item.stateText
+            caption = item.historyCaption ?? (item.stateText == "最新" ? nil : item.stateText)
             resetText = item.resetText
             resetRemainingText = item.resetRemainingText
             progress = item.progress

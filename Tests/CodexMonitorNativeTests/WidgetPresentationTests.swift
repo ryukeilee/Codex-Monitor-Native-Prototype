@@ -75,11 +75,44 @@ final class WidgetPresentationTests: XCTestCase {
         XCTAssertEqual(unavailable.gaugeProgress, 0.05)
     }
 
+    func testPresentationHidesLatestCaptionAndPreservesOtherQuotaContext() {
+        let latest = WidgetPresentation(
+            quotaItems: [quota(id: "latest", label: "周额度", percent: 99, progress: 0.99, stateText: "最新")],
+            family: .small,
+            resetCreditFooterText: nil
+        )
+        let stale = WidgetPresentation(
+            quotaItems: [quota(id: "stale", label: "周额度", percent: 99, progress: 0.99, stateText: "上次数据")],
+            family: .small,
+            resetCreditFooterText: nil
+        )
+        let cached = WidgetPresentation(
+            quotaItems: [
+                quota(
+                    id: "cached",
+                    label: "周额度",
+                    percent: 99,
+                    progress: 0.99,
+                    historyCaption: "（历史缓存）",
+                    stateText: "历史缓存"
+                )
+            ],
+            family: .small,
+            resetCreditFooterText: nil
+        )
+
+        XCTAssertNil(latest.primaryQuota?.caption)
+        XCTAssertEqual(stale.primaryQuota?.caption, "上次数据")
+        XCTAssertEqual(cached.primaryQuota?.caption, "（历史缓存）")
+    }
+
     private func quota(
         id: String,
         label: String,
         percent: Int?,
-        progress: Double?
+        progress: Double?,
+        historyCaption: String? = nil,
+        stateText: String = "当前"
     ) -> StatusPopoverFormatting.QuotaWindowDisplayItem {
         StatusPopoverFormatting.QuotaWindowDisplayItem(
             id: id,
@@ -87,11 +120,11 @@ final class WidgetPresentationTests: XCTestCase {
             kind: .unknown,
             label: label,
             percentText: percent.map { "\($0)%" } ?? "--",
-            historyCaption: nil,
+            historyCaption: historyCaption,
             trustedPercent: percent,
             progress: progress,
             fieldState: .live,
-            stateText: "当前",
+            stateText: stateText,
             resetAt: nil,
             resetText: "未暴露",
             resetRemainingText: "未暴露",

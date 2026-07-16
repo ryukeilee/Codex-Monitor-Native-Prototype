@@ -448,11 +448,14 @@ struct CodexMonitorWidgetView: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.72)
                 .allowsTightening(true)
-            if let caption {
-                Text(caption)
+            // Preserve paired row heights only when the quota column is present.
+            if caption != nil || presentation.primaryQuota != nil {
+                Text(caption ?? "\u{00A0}")
                     .font(.system(size: isSmall ? 7 : 8, weight: .medium, design: .rounded))
                     .foregroundStyle(Color(red: 0.97, green: 0.91, blue: 0.84).opacity(0.66))
                     .lineLimit(1)
+                    .opacity(caption == nil ? 0 : 1)
+                    .accessibilityHidden(caption == nil)
             }
         }
         .frame(maxWidth: .infinity, alignment: alignment == .leading ? .leading : .trailing)
