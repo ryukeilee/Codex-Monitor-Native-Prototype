@@ -437,12 +437,12 @@ struct CodexMonitorWidgetView: View {
     ) -> some View {
         VStack(alignment: alignment, spacing: 4) {
             Text(presentation.shortLabel(for: label))
-                .font(.system(size: isSmall ? 8 : 10, weight: .semibold, design: .rounded))
+                .font(metricLabelFont)
                 .foregroundStyle(Color(red: 0.94, green: 0.83, blue: 0.71).opacity(0.86))
                 .lineLimit(1)
 
             Text(value)
-                .font(metricValueFont(for: tone))
+                .font(metricValueFont)
                 .foregroundStyle(metricValueColor(for: tone))
                 .monospacedDigit()
                 .lineLimit(1)
@@ -451,7 +451,7 @@ struct CodexMonitorWidgetView: View {
             // Preserve paired row heights only when the quota column is present.
             if caption != nil || presentation.primaryQuota != nil {
                 Text(caption ?? "\u{00A0}")
-                    .font(.system(size: isSmall ? 7 : 8, weight: .medium, design: .rounded))
+                    .font(metricCaptionFont)
                     .foregroundStyle(Color(red: 0.97, green: 0.91, blue: 0.84).opacity(0.66))
                     .lineLimit(1)
                     .opacity(caption == nil ? 0 : 1)
@@ -461,13 +461,16 @@ struct CodexMonitorWidgetView: View {
         .frame(maxWidth: .infinity, alignment: alignment == .leading ? .leading : .trailing)
     }
 
-    private func metricValueFont(for tone: MetricValueTone) -> Font {
-        switch tone {
-        case .normal:
-            return .system(size: isSmall ? 12 : 15, weight: .bold, design: .rounded)
-        case .subdued:
-            return .system(size: isSmall ? 11 : 13, weight: .semibold, design: .rounded)
-        }
+    private var metricLabelFont: Font {
+        .system(size: isSmall ? 8 : 10, weight: .semibold, design: .rounded)
+    }
+
+    private var metricValueFont: Font {
+        .system(size: isSmall ? 12 : 15, weight: .bold, design: .rounded)
+    }
+
+    private var metricCaptionFont: Font {
+        .system(size: isSmall ? 7 : 8, weight: .medium, design: .rounded)
     }
 
     private func metricValueColor(for tone: MetricValueTone) -> Color {
