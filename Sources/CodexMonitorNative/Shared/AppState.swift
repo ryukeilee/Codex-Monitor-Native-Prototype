@@ -556,8 +556,12 @@ final class AppState: ObservableObject {
         switch error {
         case .codexNotFound:
             return "未找到 codex 可执行文件"
+        case .codexNotExecutable:
+            return "codex 文件不可执行"
         case .spawnFailed:
-            return "启动 codex 失败"
+            return "Codex app-server 启动失败"
+        case .codexIncompatible:
+            return "Codex 版本不兼容"
         case .handshakeFailed:
             return "Codex 握手失败"
         case .requestTimedOut:
@@ -568,6 +572,8 @@ final class AppState: ObservableObject {
             return "Codex 通信失败"
         case .authenticationRequired:
             return "需要重新登录 Codex"
+        case .chatGPTAccountRequired:
+            return "需要使用 ChatGPT 账号登录 Codex"
         case .rpcRejected:
             return "RPC 请求失败"
         case .responseInvalid, .noUsableRateLimits:

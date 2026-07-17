@@ -550,6 +550,31 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(appState.lastErrorSummary, "需要重新登录 Codex")
     }
 
+    func testNonChatGPTAccountShowsAccountSwitchRequiredAndPreservesCachedSnapshot() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.chatgptAccount.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let initial = QuotaSnapshot(
+            weeklyQuotaPercent: 72, fiveHourQuotaPercent: 69, refreshedAt: .distantPast,
+            dataSource: .real
+        )
+        store.saveSnapshot(initial)
+
+        let appState = AppState(
+            snapshotStore: store,
+            refreshService: MockRefreshService(error: RealQuotaError.chatGPTAccountRequired)
+        )
+
+        await appState.refreshNow(trigger: .manual)
+
+        XCTAssertEqual(appState.snapshot, initial)
+        XCTAssertEqual(appState.status, .authRequired)
+        XCTAssertEqual(
+            appState.realQuotaHealth,
+            RealQuotaHealthDiagnostic(kind: .loginRequired, isUsingCachedSnapshot: true)
+        )
+        XCTAssertEqual(appState.lastErrorSummary, "需要使用 ChatGPT 账号登录 Codex")
+    }
+
     func testParseFailureShowsResponseInvalidAndPreservesCachedSnapshot() async {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.parse.\(UUID().uuidString)")!
         let store = SnapshotStore(defaults: defaults, key: "snapshot")
@@ -592,6 +617,64 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(appState.status, .networkFailed)
         XCTAssertEqual(appState.realQuotaHealth, RealQuotaHealthDiagnostic(kind: .executableMissing, isUsingCachedSnapshot: true))
         XCTAssertEqual(appState.lastErrorSummary, "未找到 codex 可执行文件")
+    }
+
+    func testIncompatibleCodexKeepsCachedSnapshotVisibleWithPreciseDiagnostic() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.codexIncompatible.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let initial = QuotaSnapshot(
+            weeklyQuotaPercent: 72, fiveHourQuotaPercent: 69, refreshedAt: .distantPast,
+            dataSource: .real
+        )
+        store.saveSnapshot(initial)
+
+        let appState = AppState(
+            snapshotStore: store,
+            refreshService: MockRefreshService(error: RealQuotaError.codexIncompatible)
+        )
+
+        await appState.refreshNow(trigger: .manual)
+
+        XCTAssertEqual(appState.snapshot, initial)
+        XCTAssertEqual(appState.status, .networkFailed)
+        XCTAssertEqual(
+            appState.realQuotaHealth,
+            RealQuotaHealthDiagnostic(kind: .versionIncompatible, isUsingCachedSnapshot: true)
+        )
+        XCTAssertEqual(appState.lastErrorSummary, "Codex 版本不兼容")
+    }
+
+    func testExecutableAndStartupFailuresKeepCachedSnapshotWithDistinctDiagnostics() async {
+        let initial = QuotaSnapshot(
+            weeklyQuotaPercent: 72, fiveHourQuotaPercent: 69, refreshedAt: .distantPast,
+            dataSource: .real
+        )
+        let cases: [(RealQuotaError, RealQuotaHealthDiagnostic.Kind, String)] = [
+            (.codexNotExecutable, .executableNotRunnable, "codex 文件不可执行"),
+            (.spawnFailed, .appServerStartFailed, "Codex app-server 启动失败")
+        ]
+
+        for (error, expectedKind, expectedSummary) in cases {
+            let defaults = UserDefaults(
+                suiteName: "CodexMonitorNativeTests.codexLaunch.\(UUID().uuidString)"
+            )!
+            let store = SnapshotStore(defaults: defaults, key: "snapshot")
+            store.saveSnapshot(initial)
+            let appState = AppState(
+                snapshotStore: store,
+                refreshService: MockRefreshService(error: error)
+            )
+
+            await appState.refreshNow(trigger: .manual)
+
+            XCTAssertEqual(appState.snapshot, initial)
+            XCTAssertEqual(appState.status, .networkFailed)
+            XCTAssertEqual(
+                appState.realQuotaHealth,
+                RealQuotaHealthDiagnostic(kind: expectedKind, isUsingCachedSnapshot: true)
+            )
+            XCTAssertEqual(appState.lastErrorSummary, expectedSummary)
+        }
     }
 
     func testRestoredRealSnapshotWaitsForFirstRequestWhileShowingCachedData() {

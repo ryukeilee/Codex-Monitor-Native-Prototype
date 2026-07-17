@@ -28,12 +28,14 @@
 - macOS 14 或更高版本。
 - 本机可执行 `swift build` / `swift test`。
 - 本机可执行 `xcodebuild`，用于打包 widget extension。
-- 若要读取真实额度，需要本机可用的 `codex` 可执行文件，并支持 `codex app-server --stdio`。
+- 若要读取真实额度，需要本机可用的 `codex` 可执行文件，并支持 `codex app-server`。
 
 真实数据依赖说明：
 
-- App 通过 `codex app-server --stdio` 发起 `account/rateLimits/read` 请求。
-- 若设置了 `CODEX_BIN` 或 `CODEX_EXECUTABLE`，会优先使用该路径。
+- App 通过 `codex app-server` 的默认 stdio 传输发起 `account/rateLimits/read` 请求；不附加较新版本才支持的 `--stdio` 参数。
+- 每次真实刷新都会重新发现候选：依次检查自定义 `CODEX_BIN`、`CODEX_EXECUTABLE`、GUI 进程的绝对 `PATH`、Homebrew、常见 npm/pnpm/Volta/NVM/fnm 位置，以及 Codex/ChatGPT App bundle。
+- 候选必须是绝对路径、常规文件且可执行；符号链接会规范化并去重。某个自定义候选失效不会遮蔽后续可用候选，升级换址后无需重启 App。
+- App 会逐个验证候选的 app-server 初始化与 `account/rateLimits/read` 能力；只在启动失败或确定不兼容时尝试下一个候选。
 - 若真实请求失败，App 会根据错误类型标记为网络异常、需要登录或数据异常，并继续显示上次成功的真实快照。
 
 ## 菜单栏与 Popover

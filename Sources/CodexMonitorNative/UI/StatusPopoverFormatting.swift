@@ -284,6 +284,12 @@ enum StatusPopoverFormatting {
             return "真实链路：Codex 可用，请求成功"
         case .executableMissing:
             return "真实链路：未找到 codex 可执行文件\(suffix)"
+        case .executableNotRunnable:
+            return "真实链路：找到 codex，但文件不可执行\(suffix)"
+        case .versionIncompatible:
+            return "真实链路：Codex 版本不兼容\(suffix)"
+        case .appServerStartFailed:
+            return "真实链路：Codex app-server 启动失败\(suffix)"
         case .codexUnavailable:
             return "真实链路：Codex 不可用\(suffix)"
         case .requestTimedOut:
