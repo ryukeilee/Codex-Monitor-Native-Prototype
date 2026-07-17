@@ -60,6 +60,7 @@ final class AppState: ObservableObject {
         case networkChanged
         case temporalBoundary
         case systemClockChange
+        case accountBoundaryChanged
     }
 
     // MARK: - Published state
@@ -99,10 +100,13 @@ final class AppState: ObservableObject {
     private let staleAfterInterval: TimeInterval
     private let now: () -> Date
     private let sleep: @Sendable (UInt64) async throws -> Void
+    private let accountBoundaryProvider: () -> QuotaAccountBoundary?
+    private let allowsUnboundSnapshotsForTesting: Bool
     private let taskResources = AppStateTaskResources()
     private var activeRefresh: ActiveRefresh?
     private var pendingRefresh: PendingRefresh?
     private var lastSettledStatus: QuotaRefreshStatus = .noSnapshot
+    private var lastObservedAccountBoundary: QuotaAccountBoundary?
     private(set) var networkIsReachable: Bool?
 
     var isRefreshing: Bool { status == .refreshing }
@@ -125,40 +129,69 @@ final class AppState: ObservableObject {
         sleep: @escaping @Sendable (UInt64) async throws -> Void = { nanoseconds in
             try await Task.sleep(nanoseconds: nanoseconds)
         },
-        initialNetworkReachability: Bool? = true
+        initialNetworkReachability: Bool? = true,
+        accountBoundaryProvider: @escaping () -> QuotaAccountBoundary?,
+        allowsUnboundSnapshotsForTesting: Bool = false
     ) {
         self.snapshotStore = snapshotStore
         self.staleAfterInterval = staleAfterInterval
         self.now = now
         self.sleep = sleep
         self.networkIsReachable = initialNetworkReachability
+        self.accountBoundaryProvider = accountBoundaryProvider
+        self.allowsUnboundSnapshotsForTesting = allowsUnboundSnapshotsForTesting
         self.refreshAction = { snapshot in
             try await refreshService.refresh(basedOn: snapshot)
         }
 
+        let currentAccountBoundary = accountBoundaryProvider()
+        lastObservedAccountBoundary = currentAccountBoundary
+
         let persistedState = snapshotStore.loadState()
         if let persistedState {
             let stored = persistedState.snapshot
-            snapshot = stored
-            lastSuccessAt = persistedState.lastSuccessAt ?? (stored.dataSource == .real ? stored.refreshedAt : nil)
-            lastAttemptAt = persistedState.lastAttemptAt
-            failureCount = persistedState.failureCount
-            consecutiveFailures = failureCount
-
             if stored.dataSource == .real {
-                latestRealSnapshot = stored
-                status = normalizedRestoredStatus(
-                    persistedStatus: persistedState.status,
-                    snapshot: stored,
-                    lastSuccessAt: lastSuccessAt,
-                    referenceDate: now()
-                )
-                realQuotaHealth = RealQuotaHealthDiagnostic(
-                    kind: .waitingForFirstRequest,
-                    isUsingCachedSnapshot: true
-                )
-                AppLogger.snapshot.info("Restored real snapshot: weekly=\(stored.weeklyQuotaPercent)% fiveHour=\(stored.fiveHourQuotaPercent)%")
+                let canRestoreAccountBoundSnapshot = stored.accountBoundary?
+                    .matches(currentAccountBoundary) == true
+                let canRestoreUnboundTestSnapshot = allowsUnboundSnapshotsForTesting
+                    && stored.accountBoundary == nil
+                if canRestoreAccountBoundSnapshot || canRestoreUnboundTestSnapshot {
+                    snapshot = stored
+                    latestRealSnapshot = stored
+                    lastSuccessAt = persistedState.lastSuccessAt ?? stored.refreshedAt
+                    lastAttemptAt = persistedState.lastAttemptAt
+                    failureCount = persistedState.failureCount
+                    consecutiveFailures = failureCount
+                    status = normalizedRestoredStatus(
+                        persistedStatus: persistedState.status,
+                        snapshot: stored,
+                        lastSuccessAt: lastSuccessAt,
+                        referenceDate: now()
+                    )
+                    realQuotaHealth = RealQuotaHealthDiagnostic(
+                        kind: .waitingForFirstRequest,
+                        isUsingCachedSnapshot: true
+                    )
+                    AppLogger.snapshot.info("Restored account-bound real snapshot: weekly=\(stored.weeklyQuotaPercent)% fiveHour=\(stored.fiveHourQuotaPercent)%")
+                } else {
+                    snapshot = .notConnected
+                    status = .noSnapshot
+                    lastSuccessAt = nil
+                    lastAttemptAt = nil
+                    failureCount = 0
+                    consecutiveFailures = 0
+                    realQuotaHealth = RealQuotaHealthDiagnostic(
+                        kind: .waitingForFirstRequest,
+                        isUsingCachedSnapshot: false
+                    )
+                    AppLogger.snapshot.info("Discarded persisted real snapshot because its account session could not be verified")
+                }
             } else {
+                snapshot = stored
+                lastSuccessAt = persistedState.lastSuccessAt
+                lastAttemptAt = persistedState.lastAttemptAt
+                failureCount = persistedState.failureCount
+                consecutiveFailures = failureCount
                 status = normalizedRestoredStatus(
                     persistedStatus: persistedState.status,
                     snapshot: stored,
@@ -185,6 +218,30 @@ final class AppState: ObservableObject {
         commitState(at: referenceDate)
         scheduleTemporalCheck(referenceDate: referenceDate)
     }
+
+#if DEBUG
+    convenience init<T: QuotaRefreshing>(
+        snapshotStore: SnapshotStore,
+        refreshService: T,
+        staleAfterInterval: TimeInterval = QuotaTemporalSemantics.defaultStaleAfterInterval,
+        now: @escaping () -> Date = { .now },
+        sleep: @escaping @Sendable (UInt64) async throws -> Void = { nanoseconds in
+            try await Task.sleep(nanoseconds: nanoseconds)
+        },
+        initialNetworkReachability: Bool? = true
+    ) {
+        self.init(
+            snapshotStore: snapshotStore,
+            refreshService: refreshService,
+            staleAfterInterval: staleAfterInterval,
+            now: now,
+            sleep: sleep,
+            initialNetworkReachability: initialNetworkReachability,
+            accountBoundaryProvider: { nil },
+            allowsUnboundSnapshotsForTesting: true
+        )
+    }
+#endif
 
     deinit {
         activeRefresh?.resumeWaiters()
@@ -261,8 +318,15 @@ final class AppState: ObservableObject {
             self.activeRefresh = activeRefresh
         }
 
+        let currentBoundary = accountBoundaryProvider()
+        lastObservedAccountBoundary = currentBoundary
+        _ = discardCachedSnapshotIfAccountBoundaryIsUnverified(
+            currentBoundary: currentBoundary
+        )
         if let real = latestRealSnapshot {
             snapshot = real
+        } else {
+            snapshot = .notConnected
         }
         status = .networkFailed
         lastErrorSummary = "网络连接不可用"
@@ -274,6 +338,31 @@ final class AppState: ObservableObject {
         commitState(at: referenceDate)
         scheduleTemporalCheck(referenceDate: referenceDate)
         AppLogger.refresh.info("Network unavailable; paused real refresh requests")
+    }
+
+    func accountBoundaryDidChange() {
+        let currentBoundary = accountBoundaryProvider()
+        guard currentBoundary != lastObservedAccountBoundary else { return }
+        lastObservedAccountBoundary = currentBoundary
+
+        if discardCachedSnapshotIfAccountBoundaryIsUnverified(
+            currentBoundary: currentBoundary
+        ) {
+            status = .noSnapshot
+            lastErrorSummary = "Codex 账号或登录会话已变化"
+            realQuotaHealth = RealQuotaHealthDiagnostic(
+                kind: .waitingForFirstRequest,
+                isUsingCachedSnapshot: false
+            )
+            let referenceDate = now()
+            commitState(at: referenceDate)
+            scheduleTemporalCheck(referenceDate: referenceDate)
+            AppLogger.snapshot.info("Invalidated cached quota after the Codex account boundary changed")
+        }
+
+        if networkIsReachable == true {
+            refresh(trigger: .accountBoundaryChanged)
+        }
     }
 
     private func enqueueRefresh(
@@ -353,10 +442,28 @@ final class AppState: ObservableObject {
             self.activeRefresh = activeRefresh
         }
 
+        let currentBoundary = accountBoundaryProvider()
+        lastObservedAccountBoundary = currentBoundary
+        let invalidatedSnapshot = discardCachedSnapshotIfAccountBoundaryIsUnverified(
+            currentBoundary: currentBoundary
+        )
+        if invalidatedSnapshot {
+            status = .noSnapshot
+            lastErrorSummary = nil
+            realQuotaHealth = RealQuotaHealthDiagnostic(
+                kind: .waitingForFirstRequest,
+                isUsingCachedSnapshot: false
+            )
+            commitState(at: now())
+            return
+        }
+
         guard status == .refreshing else { return }
 
         if let real = latestRealSnapshot {
             snapshot = real
+        } else {
+            snapshot = .notConnected
         }
         let referenceDate = now()
         status = resolvedDisplayStatus(for: lastSettledStatus, at: referenceDate)
@@ -374,10 +481,44 @@ final class AppState: ObservableObject {
 
     private func beginRefresh(trigger: RefreshTrigger) -> QuotaSnapshot {
         let triggerName = triggerName(for: trigger)
+        let currentBoundary = accountBoundaryProvider()
+        lastObservedAccountBoundary = currentBoundary
+        _ = discardCachedSnapshotIfAccountBoundaryIsUnverified(
+            currentBoundary: currentBoundary
+        )
         let baselineSnapshot = latestRealSnapshot ?? snapshot
         enterRefreshingState(attemptedAt: now())
         AppLogger.refresh.info("Starting \(triggerName, privacy: .public) refresh (baseline source=\(baselineSnapshot.dataSource.rawValue, privacy: .public))")
         return baselineSnapshot
+    }
+
+    @discardableResult
+    private func discardCachedSnapshotIfAccountBoundaryIsUnverified(
+        currentBoundary: QuotaAccountBoundary?,
+        force: Bool = false
+    ) -> Bool {
+        guard let cachedSnapshot = latestRealSnapshot
+                ?? (snapshot.dataSource == .real ? snapshot : nil) else {
+            return false
+        }
+
+        if !force {
+            // Unbound snapshots can only enter AppState through test doubles or
+            // mock services. Production real snapshots are rejected before this
+            // point unless the provider attached a verified account boundary.
+            if cachedSnapshot.accountBoundary == nil {
+                if allowsUnboundSnapshotsForTesting {
+                    return false
+                }
+            } else if cachedSnapshot.accountBoundary?.matches(currentBoundary) == true {
+                return false
+            }
+        }
+
+        latestRealSnapshot = nil
+        snapshot = .notConnected
+        lastSuccessAt = nil
+        return true
     }
 
     private func finishManagedRefresh(_ result: Result<QuotaSnapshot, Error>, refreshID: UUID) {
@@ -434,6 +575,28 @@ final class AppState: ObservableObject {
         switch result {
         case .success(let refreshed):
             if refreshed.dataSource == .real {
+                if let refreshedBoundary = refreshed.accountBoundary {
+                    let currentBoundary = accountBoundaryProvider()
+                    lastObservedAccountBoundary = currentBoundary
+                    guard refreshedBoundary.matches(currentBoundary) else {
+                        let boundaryError: RealQuotaError = currentBoundary == nil
+                            ? .accountIdentityUnavailable
+                            : .accountChangedDuringRefresh
+                        applyRefreshFailure(boundaryError, referenceDate: referenceDate)
+                        return
+                    }
+
+                    if let cachedBoundary = latestRealSnapshot?.accountBoundary,
+                       !refreshedBoundary.matches(cachedBoundary) {
+                        latestRealSnapshot = nil
+                    }
+                } else if !allowsUnboundSnapshotsForTesting {
+                    applyRefreshFailure(
+                        RealQuotaError.accountIdentityUnavailable,
+                        referenceDate: referenceDate
+                    )
+                    return
+                }
                 if let latestRealSnapshot, refreshed.refreshedAt < latestRealSnapshot.refreshedAt {
                     snapshot = latestRealSnapshot
                     status = isDataStale(at: referenceDate) ? .stale : .success
@@ -475,18 +638,44 @@ final class AppState: ObservableObject {
                 AppLogger.refresh.info("Mock refresh succeeded")
             }
         case .failure(let error):
-            consecutiveFailures += 1
-            failureCount = consecutiveFailures
-            let classifiedStatus = classifyError(error)
-            lastErrorSummary = safeErrorMessage(from: error)
-            status = classifiedStatus
-            realQuotaHealth = healthDiagnostic(for: error)
-            if let real = latestRealSnapshot { snapshot = real }
-            setBackoffInterval(backoffFor(consecutiveFailures: consecutiveFailures))
-            commitState(at: referenceDate)
-            scheduleTemporalCheck(referenceDate: referenceDate)
-            AppLogger.refresh.error("Refresh failed (consecutive=\(self.consecutiveFailures)) status=\(classifiedStatus.rawValue, privacy: .public) backoff=\(self.backoffInterval)s")
+            applyRefreshFailure(error, referenceDate: referenceDate)
         }
+    }
+
+    private func applyRefreshFailure(_ error: Error, referenceDate: Date) {
+        consecutiveFailures += 1
+        failureCount = consecutiveFailures
+        let classifiedStatus = classifyError(error)
+        var forceInvalidation = classifiedStatus == .authRequired
+        if let realError = error as? RealQuotaError {
+            switch realError {
+            case .authenticationRequired, .chatGPTAccountRequired,
+                 .accountIdentityUnavailable, .accountChangedDuringRefresh:
+                forceInvalidation = true
+            default:
+                break
+            }
+        }
+
+        let currentBoundary = accountBoundaryProvider()
+        lastObservedAccountBoundary = currentBoundary
+        _ = discardCachedSnapshotIfAccountBoundaryIsUnverified(
+            currentBoundary: currentBoundary,
+            force: forceInvalidation
+        )
+
+        lastErrorSummary = safeErrorMessage(from: error)
+        status = classifiedStatus
+        if let real = latestRealSnapshot {
+            snapshot = real
+        } else if snapshot.dataSource == .real {
+            snapshot = .notConnected
+        }
+        realQuotaHealth = healthDiagnostic(for: error)
+        setBackoffInterval(backoffFor(consecutiveFailures: consecutiveFailures))
+        commitState(at: referenceDate)
+        scheduleTemporalCheck(referenceDate: referenceDate)
+        AppLogger.refresh.error("Refresh failed (consecutive=\(self.consecutiveFailures)) status=\(classifiedStatus.rawValue, privacy: .public) backoff=\(self.backoffInterval)s")
     }
 
     // MARK: - Error classification
@@ -618,6 +807,10 @@ final class AppState: ObservableObject {
             return "需要重新登录 Codex"
         case .chatGPTAccountRequired:
             return "需要使用 ChatGPT 账号登录 Codex"
+        case .accountIdentityUnavailable:
+            return "无法确认当前 Codex 账号与登录会话"
+        case .accountChangedDuringRefresh:
+            return "Codex 账号或登录会话在刷新期间发生变化"
         case .rpcRejected:
             return "RPC 请求失败"
         case .responseInvalid, .noUsableRateLimits:
@@ -819,6 +1012,7 @@ final class AppState: ObservableObject {
         case .networkChanged: return "network-changed"
         case .temporalBoundary: return "temporal-boundary"
         case .systemClockChange: return "system-clock-change"
+        case .accountBoundaryChanged: return "account-boundary-changed"
         }
     }
 

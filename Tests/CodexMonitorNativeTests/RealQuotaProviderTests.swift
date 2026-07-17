@@ -276,6 +276,7 @@ final class RealQuotaProviderTests: XCTestCase {
 
         let snapshot = try await task.value
         XCTAssertEqual(snapshot.fiveHourQuotaPercent, 50)
+        XCTAssertEqual(snapshot.accountBoundary, .testDefault)
         XCTAssertEqual(transport.shutdownCount, 1)
     }
 
@@ -379,6 +380,42 @@ final class RealQuotaProviderTests: XCTestCase {
         }
         XCTAssertNil(parameters["protocolVersion"])
         XCTAssertNil(parameters["capabilities"])
+    }
+
+    func testRPCClientRejectsSuccessfulQuotaWhenAccountIdentityIsUnavailable() async {
+        let transport = ControlledRPCTransport()
+        let boundaryReader = LockedAccountBoundaryReader([.testDefault, nil])
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler(),
+            authBoundaryReader: { _ in boundaryReader.next() }
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.initializeResponse)
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.rateLimitResponse)
+
+        await assertFailure(.accountIdentityUnavailable, from: task)
+    }
+
+    func testRPCClientRejectsSuccessfulQuotaWhenAccountChangesDuringRefresh() async {
+        let transport = ControlledRPCTransport()
+        let boundaryReader = LockedAccountBoundaryReader([.testDefault, .testOtherAccount])
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler(),
+            authBoundaryReader: { _ in boundaryReader.next() }
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.initializeResponse)
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.rateLimitResponse)
+
+        await assertFailure(.accountChangedDuringRefresh, from: task)
     }
 
     func testRPCClientUnusableResponseReclaimsTransportExactlyOnce() async {
@@ -966,7 +1003,8 @@ final class RealQuotaProviderTests: XCTestCase {
             weeklyQuotaPercent: 64,
             fiveHourQuotaPercent: 38,
             refreshedAt: .now,
-            dataSource: .real
+            dataSource: .real,
+            accountBoundary: .testDefault
         )
         let fileSystem = MutableResolverFileSystem(items: [
             firstPath: .regularFile(executable: true),
@@ -996,7 +1034,8 @@ final class RealQuotaProviderTests: XCTestCase {
             weeklyQuotaPercent: 64,
             fiveHourQuotaPercent: 38,
             refreshedAt: .now,
-            dataSource: .real
+            dataSource: .real,
+            accountBoundary: .testDefault
         )
         let fileSystem = MutableResolverFileSystem(items: [
             firstPath: .regularFile(executable: true),
@@ -1697,7 +1736,8 @@ final class RealQuotaProviderTests: XCTestCase {
             weeklyQuotaPercent: 70,
             fiveHourQuotaPercent: 60,
             refreshedAt: Date(timeIntervalSince1970: 100),
-            dataSource: .real
+            dataSource: .real,
+            accountBoundary: .testDefault
         )
         let partial = QuotaSnapshot(
             weeklyQuotaPercent: 0,
@@ -1705,7 +1745,8 @@ final class RealQuotaProviderTests: XCTestCase {
             weeklyQuotaState: .unavailable,
             fiveHourQuotaState: .live,
             refreshedAt: Date(timeIntervalSince1970: 200),
-            dataSource: .real
+            dataSource: .real,
+            accountBoundary: .testDefault
         )
 
         let merged = partial.mergingPartial(with: cached)
@@ -1819,7 +1860,8 @@ final class RealQuotaProviderTests: XCTestCase {
             quotaWindows: [
                 QuotaWindow(limitId: "codex", windowId: "secondary", kind: .weekly, durationMinutes: 10080, remainingPercent: 60),
                 QuotaWindow(limitId: "codex", windowId: "primary", kind: .fiveHour, durationMinutes: 300, remainingPercent: 80)
-            ]
+            ],
+            accountBoundary: .testDefault
         )
         let partial = QuotaSnapshot(
             weeklyQuotaPercent: 0,
@@ -1830,7 +1872,8 @@ final class RealQuotaProviderTests: XCTestCase {
             dataSource: .real,
             quotaWindows: [
                 QuotaWindow(limitId: "codex_other", windowId: "primary", kind: .weekly, durationMinutes: nil, remainingPercent: 0, state: .unavailable)
-            ]
+            ],
+            accountBoundary: .testDefault
         )
 
         let merged = partial.mergingPartial(with: cached)
@@ -2136,6 +2179,22 @@ private final class ControlledRPCTransport: CodexRPCTransport, @unchecked Sendab
 private enum ControlledRPCTransportError: Error, Equatable {
     case startFailed
     case writeFailed
+}
+
+private final class LockedAccountBoundaryReader: @unchecked Sendable {
+    private let lock = NSLock()
+    private var boundaries: [QuotaAccountBoundary?]
+
+    init(_ boundaries: [QuotaAccountBoundary?]) {
+        self.boundaries = boundaries
+    }
+
+    func next() -> QuotaAccountBoundary? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !boundaries.isEmpty else { return nil }
+        return boundaries.removeFirst()
+    }
 }
 
 private final class ControlledTimeoutScheduler: CodexRPCTimeoutScheduling, @unchecked Sendable {

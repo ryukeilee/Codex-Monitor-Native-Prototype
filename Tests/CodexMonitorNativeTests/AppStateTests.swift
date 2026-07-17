@@ -528,7 +528,7 @@ final class AppStateTests: XCTestCase {
         await task.value
     }
 
-    func testAuthFailureShowsLoginRequiredAndPreservesCachedSnapshot() async {
+    func testAuthFailureShowsLoginRequiredAndInvalidatesPreviousSessionSnapshot() async {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.auth.\(UUID().uuidString)")!
         let store = SnapshotStore(defaults: defaults, key: "snapshot")
         let initial = QuotaSnapshot(
@@ -544,13 +544,18 @@ final class AppStateTests: XCTestCase {
 
         await appState.refreshNow(trigger: .manual)
 
-        XCTAssertEqual(appState.snapshot, initial)
+        XCTAssertEqual(appState.snapshot.dataSource, .mock)
+        XCTAssertEqual(appState.snapshot.weeklyQuotaState, .unavailable)
+        XCTAssertNil(appState.lastSuccessAt)
         XCTAssertEqual(appState.status, .authRequired)
-        XCTAssertEqual(appState.realQuotaHealth, RealQuotaHealthDiagnostic(kind: .loginRequired, isUsingCachedSnapshot: true))
+        XCTAssertEqual(appState.realQuotaHealth, RealQuotaHealthDiagnostic(kind: .loginRequired, isUsingCachedSnapshot: false))
         XCTAssertEqual(appState.lastErrorSummary, "需要重新登录 Codex")
+        XCTAssertEqual(store.loadState()?.snapshot.dataSource, .mock)
+        XCTAssertEqual(store.loadState()?.status, .authRequired)
+        XCTAssertNil(defaults.data(forKey: "snapshot.backup"))
     }
 
-    func testNonChatGPTAccountShowsAccountSwitchRequiredAndPreservesCachedSnapshot() async {
+    func testNonChatGPTAccountShowsAccountSwitchRequiredAndInvalidatesPreviousSnapshot() async {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.chatgptAccount.\(UUID().uuidString)")!
         let store = SnapshotStore(defaults: defaults, key: "snapshot")
         let initial = QuotaSnapshot(
@@ -566,13 +571,217 @@ final class AppStateTests: XCTestCase {
 
         await appState.refreshNow(trigger: .manual)
 
-        XCTAssertEqual(appState.snapshot, initial)
+        XCTAssertEqual(appState.snapshot.dataSource, .mock)
+        XCTAssertEqual(appState.snapshot.weeklyQuotaState, .unavailable)
+        XCTAssertNil(appState.lastSuccessAt)
         XCTAssertEqual(appState.status, .authRequired)
         XCTAssertEqual(
             appState.realQuotaHealth,
-            RealQuotaHealthDiagnostic(kind: .loginRequired, isUsingCachedSnapshot: true)
+            RealQuotaHealthDiagnostic(kind: .loginRequired, isUsingCachedSnapshot: false)
         )
         XCTAssertEqual(appState.lastErrorSummary, "需要使用 ChatGPT 账号登录 Codex")
+        XCTAssertEqual(store.loadState()?.snapshot.dataSource, .mock)
+        XCTAssertEqual(store.loadState()?.status, .authRequired)
+        XCTAssertNil(defaults.data(forKey: "snapshot.backup"))
+    }
+
+    func testProductionRestoreRequiresMatchingAccountAndSessionBoundary() {
+        let matchingStore = makeAccountBoundaryStore(
+            suffix: "matching",
+            boundary: .testDefault
+        )
+        let matching = AppState(
+            snapshotStore: matchingStore,
+            refreshService: MockRefreshService(error: MockRefreshError.simulatedFailure),
+            accountBoundaryProvider: { .testDefault }
+        )
+
+        XCTAssertEqual(matching.snapshot.accountBoundary, .testDefault)
+        XCTAssertEqual(matching.snapshot.dataSource, .real)
+
+        for (suffix, currentBoundary) in [
+            ("account-switch", QuotaAccountBoundary.testOtherAccount),
+            ("relogin", QuotaAccountBoundary.testRelogin)
+        ] {
+            let store = makeAccountBoundaryStore(
+                suffix: suffix,
+                boundary: .testDefault
+            )
+            let state = AppState(
+                snapshotStore: store,
+                refreshService: MockRefreshService(error: MockRefreshError.simulatedFailure),
+                accountBoundaryProvider: { currentBoundary }
+            )
+
+            XCTAssertEqual(state.snapshot.dataSource, .mock)
+            XCTAssertEqual(state.snapshot.weeklyQuotaState, .unavailable)
+            XCTAssertEqual(state.status, .noSnapshot)
+            XCTAssertNil(state.lastSuccessAt)
+            XCTAssertEqual(store.loadState()?.snapshot.dataSource, .mock)
+        }
+    }
+
+    func testProductionRestoreDiscardsLegacyAndUnverifiableRealSnapshots() {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.accountBoundary.legacy.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        store.saveSnapshot(QuotaSnapshot(
+            weeklyQuotaPercent: 72,
+            fiveHourQuotaPercent: 69,
+            refreshedAt: .distantPast,
+            dataSource: .real
+        ))
+
+        let state = AppState(
+            snapshotStore: store,
+            refreshService: MockRefreshService(error: MockRefreshError.simulatedFailure),
+            accountBoundaryProvider: { nil }
+        )
+
+        XCTAssertEqual(state.snapshot.dataSource, .mock)
+        XCTAssertEqual(state.status, .noSnapshot)
+        XCTAssertNil(state.lastSuccessAt)
+        XCTAssertEqual(store.loadState()?.snapshot.dataSource, .mock)
+    }
+
+    func testFailurePreservesCacheOnlyWhileCurrentBoundaryStillMatches() async {
+        let provider = MutableAccountBoundaryProvider(.testDefault)
+        let matchingStore = makeAccountBoundaryStore(
+            suffix: "failure-matching",
+            boundary: .testDefault
+        )
+        let matching = AppState(
+            snapshotStore: matchingStore,
+            refreshService: MockRefreshService(error: MockRefreshError.simulatedFailure),
+            accountBoundaryProvider: { provider.value }
+        )
+
+        await matching.refreshNow(trigger: .manual)
+
+        XCTAssertEqual(matching.snapshot.accountBoundary, .testDefault)
+        XCTAssertEqual(matching.status, .networkFailed)
+        XCTAssertTrue(matching.isUsingCachedSnapshot)
+
+        let invalidatedStore = makeAccountBoundaryStore(
+            suffix: "failure-unverifiable",
+            boundary: .testDefault
+        )
+        let invalidated = AppState(
+            snapshotStore: invalidatedStore,
+            refreshService: MockRefreshService(error: MockRefreshError.simulatedFailure),
+            accountBoundaryProvider: { provider.value }
+        )
+        provider.value = nil
+
+        await invalidated.refreshNow(trigger: .manual)
+
+        XCTAssertEqual(invalidated.snapshot.dataSource, .mock)
+        XCTAssertEqual(invalidated.status, .networkFailed)
+        XCTAssertFalse(invalidated.isUsingCachedSnapshot)
+        XCTAssertNil(invalidated.lastSuccessAt)
+        XCTAssertEqual(invalidatedStore.loadState()?.snapshot.dataSource, .mock)
+    }
+
+    func testBoundaryChangeImmediatelyInvalidatesCacheAndAcceptsOnlyNewOwner() async {
+        let provider = MutableAccountBoundaryProvider(.testDefault)
+        let store = makeAccountBoundaryStore(
+            suffix: "live-switch",
+            boundary: .testDefault
+        )
+        let switchedSnapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 25,
+            fiveHourQuotaPercent: 35,
+            refreshedAt: .now,
+            dataSource: .real,
+            accountBoundary: .testOtherAccount
+        )
+        let state = AppState(
+            snapshotStore: store,
+            refreshService: MockRefreshService(snapshot: switchedSnapshot),
+            initialNetworkReachability: false,
+            accountBoundaryProvider: { provider.value }
+        )
+
+        provider.value = .testOtherAccount
+        state.accountBoundaryDidChange()
+
+        XCTAssertEqual(state.snapshot.dataSource, .mock)
+        XCTAssertEqual(state.status, .noSnapshot)
+        XCTAssertNil(state.lastSuccessAt)
+        XCTAssertEqual(store.loadState()?.snapshot.dataSource, .mock)
+
+        state.updateNetworkReachability(true)
+        await state.refreshNow(trigger: .manual)
+
+        XCTAssertEqual(state.snapshot, switchedSnapshot)
+        XCTAssertEqual(state.status, .success)
+        XCTAssertEqual(store.loadState()?.snapshot.accountBoundary, .testOtherAccount)
+    }
+
+    func testShutdownInvalidatesCacheWhenLoginBoundaryDisappearedBeforeObserverPoll() {
+        let provider = MutableAccountBoundaryProvider(.testDefault)
+        let store = makeAccountBoundaryStore(
+            suffix: "shutdown-boundary",
+            boundary: .testDefault
+        )
+        let state = AppState(
+            snapshotStore: store,
+            refreshService: MockRefreshService(error: MockRefreshError.simulatedFailure),
+            accountBoundaryProvider: { provider.value }
+        )
+
+        provider.value = nil
+        state.shutdown()
+
+        XCTAssertEqual(state.snapshot.dataSource, .mock)
+        XCTAssertEqual(state.status, .noSnapshot)
+        XCTAssertNil(state.lastSuccessAt)
+        XCTAssertEqual(store.loadState()?.snapshot.dataSource, .mock)
+    }
+
+    func testSnapshotStoreAccountReplacementDoesNotRetainPriorAccountBackup() {
+        let defaults = UserDefaults(
+            suiteName: "CodexMonitorNativeTests.accountBoundary.backup.\(UUID().uuidString)"
+        )!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let oldAccount = QuotaSnapshot(
+            weeklyQuotaPercent: 90,
+            fiveHourQuotaPercent: 80,
+            refreshedAt: Date(timeIntervalSince1970: 200),
+            dataSource: .real,
+            accountBoundary: .testDefault
+        )
+        let newAccount = QuotaSnapshot(
+            weeklyQuotaPercent: 20,
+            fiveHourQuotaPercent: 30,
+            refreshedAt: Date(timeIntervalSince1970: 100),
+            dataSource: .real,
+            accountBoundary: .testOtherAccount
+        )
+
+        store.saveSnapshot(oldAccount)
+        store.saveSnapshot(oldAccount)
+        XCTAssertNotNil(defaults.data(forKey: "snapshot.backup"))
+
+        store.saveSnapshot(newAccount)
+
+        XCTAssertEqual(store.loadState()?.snapshot, newAccount)
+        XCTAssertNil(defaults.data(forKey: "snapshot.backup"))
+    }
+
+    private func makeAccountBoundaryStore(
+        suffix: String,
+        boundary: QuotaAccountBoundary
+    ) -> SnapshotStore {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.accountBoundary.\(suffix).\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        store.saveSnapshot(QuotaSnapshot(
+            weeklyQuotaPercent: 72,
+            fiveHourQuotaPercent: 69,
+            refreshedAt: .distantPast,
+            dataSource: .real,
+            accountBoundary: boundary
+        ))
+        return store
     }
 
     func testParseFailureShowsResponseInvalidAndPreservesCachedSnapshot() async {
@@ -1952,5 +2161,14 @@ private actor SequenceRefreshService: QuotaRefreshing {
 
     func callCount() -> Int {
         callCountValue
+    }
+}
+
+@MainActor
+private final class MutableAccountBoundaryProvider {
+    var value: QuotaAccountBoundary?
+
+    init(_ value: QuotaAccountBoundary?) {
+        self.value = value
     }
 }

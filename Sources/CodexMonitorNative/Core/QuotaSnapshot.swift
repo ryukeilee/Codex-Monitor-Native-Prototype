@@ -408,6 +408,32 @@ struct ResetBankSnapshot: Codable, Equatable, Identifiable {
     }
 }
 
+struct QuotaAccountBoundary: Codable, Equatable, Sendable {
+    let accountFingerprint: String
+    let sessionFingerprint: String
+
+    var isValid: Bool {
+        Self.isSHA256Fingerprint(accountFingerprint)
+            && Self.isSHA256Fingerprint(sessionFingerprint)
+    }
+
+    func matches(_ other: QuotaAccountBoundary?) -> Bool {
+        guard isValid, let other, other.isValid else { return false }
+        return self == other
+    }
+
+    private static func isSHA256Fingerprint(_ value: String) -> Bool {
+        value.count == 64 && value.unicodeScalars.allSatisfy { scalar in
+            switch scalar.value {
+            case 48...57, 97...102:
+                return true
+            default:
+                return false
+            }
+        }
+    }
+}
+
 struct QuotaSnapshot: Codable, Equatable {
     let weeklyQuotaPercent: Int
     let fiveHourQuotaPercent: Int
@@ -427,6 +453,7 @@ struct QuotaSnapshot: Codable, Equatable {
     let errorMessage: String?
     let schemaVersion: Int
     let quotaWindows: [QuotaWindow]
+    let accountBoundary: QuotaAccountBoundary?
 
     init(
         weeklyQuotaPercent: Int,
@@ -446,7 +473,8 @@ struct QuotaSnapshot: Codable, Equatable {
         dataSource: QuotaDataSource,
         errorMessage: String? = nil,
         schemaVersion: Int = QuotaSnapshot.currentSchemaVersion,
-        quotaWindows: [QuotaWindow] = []
+        quotaWindows: [QuotaWindow] = [],
+        accountBoundary: QuotaAccountBoundary? = nil
     ) {
         self.weeklyQuotaPercent = max(0, min(100, weeklyQuotaPercent))
         self.fiveHourQuotaPercent = max(0, min(100, fiveHourQuotaPercent))
@@ -466,8 +494,12 @@ struct QuotaSnapshot: Codable, Equatable {
         self.errorMessage = errorMessage
         self.schemaVersion = schemaVersion
         self.quotaWindows = quotaWindows
+        self.accountBoundary = accountBoundary
     }
 
+    // `accountBoundary` is optional on the wire, so adding it remains a
+    // backward-compatible schema-v8 extension. Older Widget binaries ignore
+    // the extra key instead of rejecting a version bump during app upgrades.
     static let currentSchemaVersion = 8
 
     static let fallback = QuotaSnapshot(
@@ -527,6 +559,7 @@ struct QuotaSnapshot: Codable, Equatable {
         case errorMessage
         case schemaVersion
         case quotaWindows
+        case accountBoundary
     }
 
     init(from decoder: Decoder) throws {
@@ -555,6 +588,7 @@ struct QuotaSnapshot: Codable, Equatable {
         let errorMessage = try container.decodeIfPresent(String.self, forKey: .errorMessage)
         let schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
         let quotaWindows = Self.decodeQuotaWindowsLossy(from: container)
+        let accountBoundary = try container.decodeIfPresent(QuotaAccountBoundary.self, forKey: .accountBoundary)
 
         self.init(
             weeklyQuotaPercent: weeklyQuotaPercent,
@@ -574,7 +608,8 @@ struct QuotaSnapshot: Codable, Equatable {
             dataSource: dataSource,
             errorMessage: errorMessage,
             schemaVersion: schemaVersion,
-            quotaWindows: quotaWindows
+            quotaWindows: quotaWindows,
+            accountBoundary: accountBoundary
         )
     }
 
@@ -594,7 +629,9 @@ struct QuotaSnapshot: Codable, Equatable {
     func mergingPartial(with cachedSnapshot: QuotaSnapshot?) -> QuotaSnapshot {
         guard dataSource == .real,
               let cachedSnapshot,
-              cachedSnapshot.dataSource == .real else {
+              cachedSnapshot.dataSource == .real,
+              let accountBoundary,
+              accountBoundary.matches(cachedSnapshot.accountBoundary) else {
             return self
         }
 
@@ -639,7 +676,32 @@ struct QuotaSnapshot: Codable, Equatable {
             dataSource: dataSource,
             errorMessage: errorMessage,
             schemaVersion: schemaVersion,
-            quotaWindows: mergedWindows
+            quotaWindows: mergedWindows,
+            accountBoundary: accountBoundary
+        )
+    }
+
+    func bound(to accountBoundary: QuotaAccountBoundary) -> QuotaSnapshot {
+        QuotaSnapshot(
+            weeklyQuotaPercent: weeklyQuotaPercent,
+            fiveHourQuotaPercent: fiveHourQuotaPercent,
+            weeklyQuotaState: weeklyQuotaState,
+            fiveHourQuotaState: fiveHourQuotaState,
+            resetAvailableCount: resetAvailableCount,
+            resetCreditDetailsState: resetCreditDetailsState,
+            resetCreditDiagnostic: resetCreditDiagnostic,
+            resetCreditDetails: resetCreditDetails,
+            resetCreditStatusSummary: resetCreditStatusSummary,
+            resetCreditTimeEntries: resetCreditTimeEntries,
+            resetCreditRawFields: resetCreditRawFields,
+            fiveHourResetAt: fiveHourResetAt,
+            resetBanks: resetBanks,
+            refreshedAt: refreshedAt,
+            dataSource: dataSource,
+            errorMessage: errorMessage,
+            schemaVersion: schemaVersion,
+            quotaWindows: quotaWindows,
+            accountBoundary: accountBoundary
         )
     }
 

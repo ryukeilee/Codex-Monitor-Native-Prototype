@@ -12,7 +12,8 @@ final class QuotaRefreshServiceTests: XCTestCase {
             resetCreditDetailsState: .appServerCountOnly,
             fiveHourResetAt: makeDate("2026-06-19T14:10:00Z"),
             refreshedAt: makeDate("2026-06-19T12:40:00Z"),
-            dataSource: .real
+            dataSource: .real,
+            accountBoundary: .testDefault
         )
         let details = ResetCreditsDetailPayload(
             availableCount: 2,
@@ -57,7 +58,8 @@ final class QuotaRefreshServiceTests: XCTestCase {
             resetCreditDetailsState: .appServerCountOnly,
             fiveHourResetAt: makeDate("2026-06-19T14:10:00Z"),
             refreshedAt: makeDate("2026-06-19T12:40:00Z"),
-            dataSource: .real
+            dataSource: .real,
+            accountBoundary: .testDefault
         )
 
         let service = QuotaRefreshService(
@@ -99,7 +101,8 @@ final class QuotaRefreshServiceTests: XCTestCase {
             ],
             resetCreditStatusSummary: [ResetCreditStatusSummary(status: "available", count: 2)],
             refreshedAt: makeDate("2026-06-19T12:40:00Z"),
-            dataSource: .real
+            dataSource: .real,
+            accountBoundary: .testDefault
         )
         let appServerSnapshot = QuotaSnapshot(
             weeklyQuotaPercent: 69,
@@ -107,7 +110,8 @@ final class QuotaRefreshServiceTests: XCTestCase {
             resetAvailableCount: 2,
             resetCreditDetailsState: .appServerCountOnly,
             refreshedAt: makeDate("2026-06-19T12:45:00Z"),
-            dataSource: .real
+            dataSource: .real,
+            accountBoundary: .testDefault
         )
         let service = QuotaRefreshService(
             realProvider: StubRealQuotaProvider(snapshot: appServerSnapshot),
@@ -147,7 +151,8 @@ final class QuotaRefreshServiceTests: XCTestCase {
                 )
             ],
             refreshedAt: makeDate("2026-06-19T12:40:00Z"),
-            dataSource: .real
+            dataSource: .real,
+            accountBoundary: .testDefault
         )
         let appServerSnapshot = QuotaSnapshot(
             weeklyQuotaPercent: 69,
@@ -155,7 +160,8 @@ final class QuotaRefreshServiceTests: XCTestCase {
             resetAvailableCount: 1,
             resetCreditDetailsState: .appServerCountOnly,
             refreshedAt: makeDate("2026-06-19T12:45:00Z"),
-            dataSource: .real
+            dataSource: .real,
+            accountBoundary: .testDefault
         )
         let service = QuotaRefreshService(
             realProvider: StubRealQuotaProvider(snapshot: appServerSnapshot),
@@ -175,7 +181,8 @@ final class QuotaRefreshServiceTests: XCTestCase {
             weeklyQuotaPercent: 70,
             fiveHourQuotaPercent: 64,
             refreshedAt: makeDate("2026-06-19T12:40:00Z"),
-            dataSource: .real
+            dataSource: .real,
+            accountBoundary: .testDefault
         )
         let partial = QuotaSnapshot(
             weeklyQuotaPercent: 0,
@@ -183,7 +190,8 @@ final class QuotaRefreshServiceTests: XCTestCase {
             weeklyQuotaState: .unavailable,
             fiveHourQuotaState: .live,
             refreshedAt: makeDate("2026-06-19T12:45:00Z"),
-            dataSource: .real
+            dataSource: .real,
+            accountBoundary: .testDefault
         )
         let service = QuotaRefreshService(
             realProvider: StubRealQuotaProvider(snapshot: partial),
@@ -197,6 +205,72 @@ final class QuotaRefreshServiceTests: XCTestCase {
         XCTAssertEqual(refreshed.weeklyQuotaState, .cached)
         XCTAssertEqual(refreshed.fiveHourQuotaPercent, 58)
         XCTAssertEqual(refreshed.fiveHourQuotaState, .live)
+    }
+
+    func testRefreshDoesNotMergeCachedFieldsAcrossAccountBoundary() async throws {
+        let current = QuotaSnapshot(
+            weeklyQuotaPercent: 70,
+            fiveHourQuotaPercent: 64,
+            resetAvailableCount: 1,
+            resetCreditDetailsState: .detailed,
+            resetCreditDetails: [
+                ResetCreditDetailSnapshot(
+                    ordinal: 1,
+                    status: "available",
+                    grantedAt: nil,
+                    expiresAt: makeDate("2026-06-20T12:00:00Z")
+                )
+            ],
+            refreshedAt: makeDate("2026-06-19T12:40:00Z"),
+            dataSource: .real,
+            accountBoundary: .testDefault
+        )
+        let switchedAccountPartial = QuotaSnapshot(
+            weeklyQuotaPercent: 0,
+            fiveHourQuotaPercent: 58,
+            weeklyQuotaState: .unavailable,
+            fiveHourQuotaState: .live,
+            resetAvailableCount: 1,
+            refreshedAt: makeDate("2026-06-19T12:45:00Z"),
+            dataSource: .real,
+            accountBoundary: .testOtherAccount
+        )
+        let service = QuotaRefreshService(
+            realProvider: StubRealQuotaProvider(snapshot: switchedAccountPartial),
+            resetCreditsDetailProvider: FailingResetCreditsProvider(),
+            mockProvider: MockQuotaProvider()
+        )
+
+        let refreshed = try await service.refresh(basedOn: current)
+
+        XCTAssertEqual(refreshed.weeklyQuotaPercent, 0)
+        XCTAssertEqual(refreshed.weeklyQuotaState, .unavailable)
+        XCTAssertEqual(refreshed.fiveHourQuotaPercent, 58)
+        XCTAssertTrue(refreshed.resetCreditDetails.isEmpty)
+        XCTAssertEqual(refreshed.accountBoundary, .testOtherAccount)
+    }
+
+    func testRefreshRejectsUnboundRealSnapshot() async {
+        let unbound = QuotaSnapshot(
+            weeklyQuotaPercent: 70,
+            fiveHourQuotaPercent: 64,
+            refreshedAt: makeDate("2026-06-19T12:40:00Z"),
+            dataSource: .real
+        )
+        let service = QuotaRefreshService(
+            realProvider: StubRealQuotaProvider(snapshot: unbound),
+            resetCreditsDetailProvider: FailingResetCreditsProvider(),
+            mockProvider: MockQuotaProvider()
+        )
+
+        do {
+            _ = try await service.refresh(basedOn: .notConnected)
+            XCTFail("Expected account identity validation failure")
+        } catch let error as RealQuotaError {
+            XCTAssertEqual(error, .accountIdentityUnavailable)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
     }
 
     private func makeDate(_ iso8601: String) -> Date {

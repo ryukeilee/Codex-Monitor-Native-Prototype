@@ -448,7 +448,8 @@ final class WidgetTimelineBridgeTests: XCTestCase {
                 weeklyQuotaPercent: 81,
                 fiveHourQuotaPercent: 63,
                 refreshedAt: Date(timeIntervalSince1970: 200),
-                dataSource: .real
+                dataSource: .real,
+                accountBoundary: .testDefault
             ),
             status: .success,
             lastSuccessAt: Date(timeIntervalSince1970: 200),
@@ -504,7 +505,8 @@ final class WidgetTimelineBridgeTests: XCTestCase {
                 weeklyQuotaPercent: 75,
                 fiveHourQuotaPercent: 55,
                 refreshedAt: Date(timeIntervalSince1970: 100),
-                dataSource: .real
+                dataSource: .real,
+                accountBoundary: .testDefault
             ),
             status: .success,
             lastSuccessAt: Date(timeIntervalSince1970: 100),
@@ -538,7 +540,8 @@ final class WidgetTimelineBridgeTests: XCTestCase {
                 weeklyQuotaPercent: 78,
                 fiveHourQuotaPercent: 52,
                 refreshedAt: Date(timeIntervalSince1970: 100),
-                dataSource: .real
+                dataSource: .real,
+                accountBoundary: .testDefault
             ),
             status: .success,
             lastSuccessAt: Date(timeIntervalSince1970: 100),
@@ -567,7 +570,8 @@ final class WidgetTimelineBridgeTests: XCTestCase {
                 weeklyQuotaPercent: 70,
                 fiveHourQuotaPercent: 60,
                 refreshedAt: Date(timeIntervalSince1970: 100),
-                dataSource: .real
+                dataSource: .real,
+                accountBoundary: .testDefault
             ),
             status: .success,
             lastSuccessAt: Date(timeIntervalSince1970: 100),
@@ -581,7 +585,8 @@ final class WidgetTimelineBridgeTests: XCTestCase {
                 fiveHourQuotaPercent: 80,
                 refreshedAt: Date(timeIntervalSince1970: 300),
                 dataSource: .real,
-                schemaVersion: QuotaSnapshot.currentSchemaVersion + 1
+                schemaVersion: QuotaSnapshot.currentSchemaVersion + 1,
+                accountBoundary: .testDefault
             ),
             status: .success,
             lastSuccessAt: Date(timeIntervalSince1970: 300),
@@ -609,7 +614,7 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         let fileManager = WidgetStateTestFileManager(groupURL: groupURL)
         let stateURL = WidgetDisplayStateStore.stateURL(fileManager: fileManager)
         let trusted = WidgetDisplayState.make(
-            snapshot: QuotaSnapshot(weeklyQuotaPercent: 70, fiveHourQuotaPercent: 60, refreshedAt: Date(timeIntervalSince1970: 100), dataSource: .real),
+            snapshot: QuotaSnapshot(weeklyQuotaPercent: 70, fiveHourQuotaPercent: 60, refreshedAt: Date(timeIntervalSince1970: 100), dataSource: .real, accountBoundary: .testDefault),
             status: .success,
             lastSuccessAt: Date(timeIntervalSince1970: 100),
             lastAttemptAt: nil,
@@ -617,7 +622,7 @@ final class WidgetTimelineBridgeTests: XCTestCase {
             savedAt: Date(timeIntervalSince1970: 100)
         )
         let future = WidgetDisplayState.make(
-            snapshot: QuotaSnapshot(weeklyQuotaPercent: 90, fiveHourQuotaPercent: 80, refreshedAt: Date(timeIntervalSince1970: 300), dataSource: .real, schemaVersion: QuotaSnapshot.currentSchemaVersion + 1),
+            snapshot: QuotaSnapshot(weeklyQuotaPercent: 90, fiveHourQuotaPercent: 80, refreshedAt: Date(timeIntervalSince1970: 300), dataSource: .real, schemaVersion: QuotaSnapshot.currentSchemaVersion + 1, accountBoundary: .testDefault),
             status: .success,
             lastSuccessAt: Date(timeIntervalSince1970: 300),
             lastAttemptAt: nil,
@@ -680,8 +685,8 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         let groupURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("CodexMonitorNativeTests.widgetRealNewest.\(UUID().uuidString)", isDirectory: true)
         let fileManager = WidgetStateTestFileManager(groupURL: groupURL)
-        let newerSnapshot = QuotaSnapshot(weeklyQuotaPercent: 90, fiveHourQuotaPercent: 80, refreshedAt: Date(timeIntervalSince1970: 200), dataSource: .real)
-        let olderSnapshot = QuotaSnapshot(weeklyQuotaPercent: 10, fiveHourQuotaPercent: 20, refreshedAt: Date(timeIntervalSince1970: 100), dataSource: .real)
+        let newerSnapshot = QuotaSnapshot(weeklyQuotaPercent: 90, fiveHourQuotaPercent: 80, refreshedAt: Date(timeIntervalSince1970: 200), dataSource: .real, accountBoundary: .testDefault)
+        let olderSnapshot = QuotaSnapshot(weeklyQuotaPercent: 10, fiveHourQuotaPercent: 20, refreshedAt: Date(timeIntervalSince1970: 100), dataSource: .real, accountBoundary: .testDefault)
         let newer = WidgetDisplayState.make(snapshot: newerSnapshot, status: .success, lastSuccessAt: newerSnapshot.refreshedAt, lastAttemptAt: nil, effectiveFiveHourResetAt: nil, savedAt: Date(timeIntervalSince1970: 100))
         let older = WidgetDisplayState.make(snapshot: olderSnapshot, status: .success, lastSuccessAt: olderSnapshot.refreshedAt, lastAttemptAt: nil, effectiveFiveHourResetAt: nil, savedAt: Date(timeIntervalSince1970: 200))
 
@@ -700,7 +705,8 @@ final class WidgetTimelineBridgeTests: XCTestCase {
             weeklyQuotaPercent: 81,
             fiveHourQuotaPercent: 63,
             refreshedAt: now,
-            dataSource: .real
+            dataSource: .real,
+            accountBoundary: .testDefault
         )
         let state = WidgetDisplayState.make(
             snapshot: snapshot,
@@ -727,7 +733,7 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         let groupURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("CodexMonitorNativeTests.widgetRealThenMock.\(UUID().uuidString)", isDirectory: true)
         let fileManager = WidgetStateTestFileManager(groupURL: groupURL)
-        let realSnapshot = QuotaSnapshot(weeklyQuotaPercent: 90, fiveHourQuotaPercent: 80, refreshedAt: Date(timeIntervalSince1970: 100), dataSource: .real)
+        let realSnapshot = QuotaSnapshot(weeklyQuotaPercent: 90, fiveHourQuotaPercent: 80, refreshedAt: Date(timeIntervalSince1970: 100), dataSource: .real, accountBoundary: .testDefault)
         let real = WidgetDisplayState.make(snapshot: realSnapshot, status: .success, lastSuccessAt: realSnapshot.refreshedAt, lastAttemptAt: nil, effectiveFiveHourResetAt: nil, savedAt: Date(timeIntervalSince1970: 100))
         let mock = WidgetDisplayState.make(snapshot: .notConnected, status: .demoMode, lastSuccessAt: nil, lastAttemptAt: nil, effectiveFiveHourResetAt: nil, savedAt: Date(timeIntervalSince1970: 200))
 
@@ -735,6 +741,106 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         WidgetDisplayStateStore.save(mock, fileManager: fileManager)
 
         XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager).snapshot, realSnapshot)
+    }
+
+    func testWidgetRejectsLegacyRealSnapshotWithoutAccountBoundary() throws {
+        let groupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexMonitorNativeTests.widgetUnboundReal.\(UUID().uuidString)", isDirectory: true)
+        let fileManager = WidgetStateTestFileManager(groupURL: groupURL)
+        let stateURL = WidgetDisplayStateStore.stateURL(fileManager: fileManager)
+        let unbound = WidgetDisplayState.make(
+            snapshot: QuotaSnapshot(
+                weeklyQuotaPercent: 90,
+                fiveHourQuotaPercent: 80,
+                refreshedAt: Date(timeIntervalSince1970: 100),
+                dataSource: .real
+            ),
+            status: .success,
+            lastSuccessAt: Date(timeIntervalSince1970: 100),
+            lastAttemptAt: nil,
+            effectiveFiveHourResetAt: nil,
+            savedAt: Date(timeIntervalSince1970: 100)
+        )
+        let rawData = try JSONEncoder().encode(unbound)
+        try FileManager.default.createDirectory(at: groupURL, withIntermediateDirectories: true)
+        try rawData.write(to: stateURL)
+
+        XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager), .placeholder)
+        XCTAssertEqual(try Data(contentsOf: stateURL.appendingPathExtension("corrupt")), rawData)
+    }
+
+    func testWidgetAccountInvalidationReplacesRealStateAndRemovesRealBackup() {
+        let groupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexMonitorNativeTests.widgetAccountInvalidation.\(UUID().uuidString)", isDirectory: true)
+        let fileManager = WidgetStateTestFileManager(groupURL: groupURL)
+        let stateURL = WidgetDisplayStateStore.stateURL(fileManager: fileManager)
+        let realSnapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 90,
+            fiveHourQuotaPercent: 80,
+            refreshedAt: Date(timeIntervalSince1970: 100),
+            dataSource: .real,
+            accountBoundary: .testDefault
+        )
+        let real = WidgetDisplayState.make(
+            snapshot: realSnapshot,
+            status: .success,
+            lastSuccessAt: realSnapshot.refreshedAt,
+            lastAttemptAt: nil,
+            effectiveFiveHourResetAt: nil,
+            savedAt: Date(timeIntervalSince1970: 100)
+        )
+        let invalidated = WidgetDisplayState.make(
+            snapshot: .notConnected,
+            status: .authRequired,
+            lastSuccessAt: nil,
+            lastAttemptAt: Date(timeIntervalSince1970: 200),
+            effectiveFiveHourResetAt: nil,
+            savedAt: Date(timeIntervalSince1970: 50)
+        )
+
+        WidgetDisplayStateStore.save(real, fileManager: fileManager)
+        WidgetDisplayStateStore.save(real, fileManager: fileManager)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stateURL.appendingPathExtension("backup").path))
+
+        WidgetDisplayStateStore.save(invalidated, fileManager: fileManager)
+
+        XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager), invalidated)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stateURL.appendingPathExtension("backup").path))
+    }
+
+    func testWidgetAcceptsOlderTimestampFromDifferentVerifiedAccount() {
+        let groupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexMonitorNativeTests.widgetAccountSwitch.\(UUID().uuidString)", isDirectory: true)
+        let fileManager = WidgetStateTestFileManager(groupURL: groupURL)
+        let oldAccount = QuotaSnapshot(
+            weeklyQuotaPercent: 90,
+            fiveHourQuotaPercent: 80,
+            refreshedAt: Date(timeIntervalSince1970: 200),
+            dataSource: .real,
+            accountBoundary: .testDefault
+        )
+        let newAccount = QuotaSnapshot(
+            weeklyQuotaPercent: 20,
+            fiveHourQuotaPercent: 30,
+            refreshedAt: Date(timeIntervalSince1970: 100),
+            dataSource: .real,
+            accountBoundary: .testOtherAccount
+        )
+
+        let oldState = WidgetDisplayState.make(snapshot: oldAccount, status: .success, lastSuccessAt: oldAccount.refreshedAt, lastAttemptAt: nil, effectiveFiveHourResetAt: nil, savedAt: Date(timeIntervalSince1970: 100))
+        WidgetDisplayStateStore.save(oldState, fileManager: fileManager)
+        WidgetDisplayStateStore.save(oldState, fileManager: fileManager)
+        let backupURL = WidgetDisplayStateStore.stateURL(fileManager: fileManager)
+            .appendingPathExtension("backup")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backupURL.path))
+
+        WidgetDisplayStateStore.save(
+            WidgetDisplayState.make(snapshot: newAccount, status: .success, lastSuccessAt: newAccount.refreshedAt, lastAttemptAt: nil, effectiveFiveHourResetAt: nil, savedAt: Date(timeIntervalSince1970: 50)),
+            fileManager: fileManager
+        )
+
+        XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager).snapshot, newAccount)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backupURL.path))
     }
 
     func testRestoredStaleSnapshotWritesStaleStateForWidget() {

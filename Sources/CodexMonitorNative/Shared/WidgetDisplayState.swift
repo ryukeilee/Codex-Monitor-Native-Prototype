@@ -468,11 +468,34 @@ enum WidgetDisplayStateStore {
                 PersistenceLog.logger.error("Cannot overwrite widget state written by a newer persistence version")
                 return
             }
-            if let current = currentData,
-               let currentState = decodeEnvelope(current) ?? decodeLegacyState(current) {
-                if (currentState.snapshot.dataSource == .real && state.snapshot.dataSource != .real) ||
-                    state.savedAt < currentState.savedAt ||
-                    (state.snapshot.dataSource == .real && currentState.snapshot.dataSource == .real && state.snapshot.refreshedAt < currentState.snapshot.refreshedAt) {
+            let currentState = currentData.flatMap {
+                decodeEnvelope($0) ?? decodeLegacyState($0)
+            }
+            let explicitlyInvalidatesRealSnapshot = currentState.map {
+                $0.snapshot.dataSource == .real
+                    && state.snapshot.dataSource != .real
+                    && state.status != .demoMode
+            } ?? false
+            let crossesAccountBoundary = currentState.map {
+                guard let currentBoundary = $0.snapshot.accountBoundary,
+                      let newBoundary = state.snapshot.accountBoundary else {
+                    return false
+                }
+                return $0.snapshot.dataSource == .real
+                    && state.snapshot.dataSource == .real
+                    && !newBoundary.matches(currentBoundary)
+            } ?? false
+            if let currentState {
+                if (currentState.snapshot.dataSource == .real
+                        && state.snapshot.dataSource != .real
+                        && !explicitlyInvalidatesRealSnapshot) ||
+                    (!explicitlyInvalidatesRealSnapshot
+                        && !crossesAccountBoundary
+                        && state.savedAt < currentState.savedAt) ||
+                    (state.snapshot.dataSource == .real
+                        && currentState.snapshot.dataSource == .real
+                        && !crossesAccountBoundary
+                        && state.snapshot.refreshedAt < currentState.snapshot.refreshedAt) {
                     PersistenceLog.logger.info("Ignored older widget state write savedAt=\(state.savedAt.timeIntervalSince1970, format: .fixed(precision: 0))")
                     return
                 }
@@ -486,9 +509,11 @@ enum WidgetDisplayStateStore {
             let revision = currentRevision + 1
             let envelope = try PersistenceEnvelope(value: state, revision: revision)
             let data = try encodedEnvelopeData(envelope, preservingLegacyPayload: state)
-            if let current = currentData,
+            let backupURL = url.appendingPathExtension("backup")
+            if explicitlyInvalidatesRealSnapshot || crossesAccountBoundary {
+                try? fileManager.removeItem(at: backupURL)
+            } else if let current = currentData,
                decodeEnvelope(current) != nil || decodeLegacyState(current) != nil {
-                let backupURL = url.appendingPathExtension("backup")
                 try current.write(to: backupURL, options: .atomic)
                 guard let backupReadback = try? Data(contentsOf: backupURL), backupReadback == current else {
                     PersistenceLog.logger.error("Widget state backup verification failed; primary was not replaced")
@@ -561,7 +586,11 @@ enum WidgetDisplayStateStore {
     }
 
     private static func isSupported(_ state: WidgetDisplayState) -> Bool {
-        (1...QuotaSnapshot.currentSchemaVersion).contains(state.snapshot.schemaVersion)
+        guard (1...QuotaSnapshot.currentSchemaVersion).contains(state.snapshot.schemaVersion) else {
+            return false
+        }
+        return state.snapshot.dataSource != .real
+            || state.snapshot.accountBoundary?.isValid == true
     }
 
     private static func restoreEnvelopeBackup(

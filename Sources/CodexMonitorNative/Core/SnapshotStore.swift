@@ -98,6 +98,12 @@ struct SnapshotStore {
         }
 
         let currentRevision = current?.revision ?? 0
+        let explicitlyInvalidatesRealSnapshot = current.map {
+            isExplicitRealSnapshotInvalidation(state: state, existing: $0.value)
+        } ?? false
+        let crossesAccountBoundary = current.map {
+            isRealSnapshotBoundaryReplacement(state: state, existing: $0.value)
+        } ?? false
         guard currentRevision < UInt64.max else {
             AppLogger.snapshot.error("Cannot persist app state: revision reached UInt64.max")
             return
@@ -108,7 +114,9 @@ struct SnapshotStore {
             let data = try encoder.encode(envelope)
             let trustedData = currentData.flatMap { isTrustedPersistenceData($0) ? $0 : nil }
                 ?? defaults.data(forKey: backupKey).flatMap { isTrustedPersistenceData($0) ? $0 : nil }
-            if let currentData, isTrustedPersistenceData(currentData) {
+            if explicitlyInvalidatesRealSnapshot || crossesAccountBoundary {
+                defaults.removeObject(forKey: backupKey)
+            } else if let currentData, isTrustedPersistenceData(currentData) {
                 defaults.set(currentData, forKey: backupKey)
                 guard defaults.data(forKey: backupKey) == currentData,
                       defaults.data(forKey: backupKey).map(isTrustedPersistenceData) == true else {
@@ -301,9 +309,38 @@ struct SnapshotStore {
     }
 
     private func shouldReject(state: PersistedAppState, existing: PersistedAppState) -> Bool {
-        if existing.snapshot.dataSource == .real, state.snapshot.dataSource != .real { return true }
+        if existing.snapshot.dataSource == .real, state.snapshot.dataSource != .real {
+            return !isExplicitRealSnapshotInvalidation(state: state, existing: existing)
+        }
         guard existing.snapshot.dataSource == .real, state.snapshot.dataSource == .real else { return false }
+        if let existingBoundary = existing.snapshot.accountBoundary,
+           let newBoundary = state.snapshot.accountBoundary,
+           !newBoundary.matches(existingBoundary) {
+            return false
+        }
         return state.snapshot.refreshedAt < existing.snapshot.refreshedAt
+    }
+
+    private func isExplicitRealSnapshotInvalidation(
+        state: PersistedAppState,
+        existing: PersistedAppState
+    ) -> Bool {
+        existing.snapshot.dataSource == .real
+            && state.snapshot.dataSource != .real
+            && state.status != .demoMode
+    }
+
+    private func isRealSnapshotBoundaryReplacement(
+        state: PersistedAppState,
+        existing: PersistedAppState
+    ) -> Bool {
+        guard existing.snapshot.dataSource == .real,
+              state.snapshot.dataSource == .real,
+              let existingBoundary = existing.snapshot.accountBoundary,
+              let newBoundary = state.snapshot.accountBoundary else {
+            return false
+        }
+        return !newBoundary.matches(existingBoundary)
     }
 
     private func migratePersistedStateIfNeeded(
@@ -363,7 +400,8 @@ struct SnapshotStore {
             dataSource: snapshot.dataSource,
             errorMessage: snapshot.errorMessage,
             schemaVersion: QuotaSnapshot.currentSchemaVersion,
-            quotaWindows: snapshot.quotaWindows
+            quotaWindows: snapshot.quotaWindows,
+            accountBoundary: snapshot.accountBoundary
         )
     }
 

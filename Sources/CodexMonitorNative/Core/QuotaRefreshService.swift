@@ -30,6 +30,10 @@ struct QuotaRefreshService: QuotaRefreshing {
         // The caller (AppState) will classify the error and preserve
         // the last successful real snapshot.
         let realSnapshot = try await realProvider.fetchQuota()
+        guard realSnapshot.dataSource != .real
+                || realSnapshot.accountBoundary?.isValid == true else {
+            throw RealQuotaError.accountIdentityUnavailable
+        }
         let mergedSnapshot = realSnapshot.mergingPartial(with: currentSnapshot)
         let enrichedSnapshot = await enrichResetCreditsDetails(
             for: mergedSnapshot,
@@ -63,7 +67,8 @@ struct QuotaRefreshService: QuotaRefreshing {
                 dataSource: snapshot.dataSource,
                 errorMessage: snapshot.errorMessage,
                 schemaVersion: snapshot.schemaVersion,
-                quotaWindows: snapshot.quotaWindows
+                quotaWindows: snapshot.quotaWindows,
+                accountBoundary: snapshot.accountBoundary
             )
         } catch {
             let reusableDetails = reusableResetCreditDetails(
@@ -94,7 +99,8 @@ struct QuotaRefreshService: QuotaRefreshing {
                 dataSource: snapshot.dataSource,
                 errorMessage: snapshot.errorMessage,
                 schemaVersion: snapshot.schemaVersion,
-                quotaWindows: snapshot.quotaWindows
+                quotaWindows: snapshot.quotaWindows,
+                accountBoundary: snapshot.accountBoundary
             )
         }
     }
@@ -104,6 +110,8 @@ struct QuotaRefreshService: QuotaRefreshing {
         for refreshedSnapshot: QuotaSnapshot
     ) -> [ResetCreditDetailSnapshot] {
         guard previousSnapshot.dataSource == .real,
+              let accountBoundary = refreshedSnapshot.accountBoundary,
+              accountBoundary.matches(previousSnapshot.accountBoundary),
               let refreshedCount = refreshedSnapshot.resetAvailableCount,
               refreshedCount > 0,
               previousSnapshot.resetAvailableCount == refreshedCount else {

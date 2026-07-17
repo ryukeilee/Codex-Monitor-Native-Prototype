@@ -1,5 +1,6 @@
 import Foundation
 import CoreFoundation
+import CryptoKit
 
 protocol RealQuotaRefreshing: Sendable {
     func fetchQuota() async throws -> QuotaSnapshot
@@ -14,6 +15,8 @@ enum RealQuotaError: LocalizedError, Equatable, Sendable {
     case requestTimedOut
     case authenticationRequired
     case chatGPTAccountRequired
+    case accountIdentityUnavailable
+    case accountChangedDuringRefresh
     case rpcRejected(code: Int64)
     case responseInvalid
     case noUsableRateLimits
@@ -40,6 +43,10 @@ enum RealQuotaError: LocalizedError, Equatable, Sendable {
             return "Codex authentication is required"
         case .chatGPTAccountRequired:
             return "Codex must be signed in with a ChatGPT account"
+        case .accountIdentityUnavailable:
+            return "Codex account identity could not be verified"
+        case .accountChangedDuringRefresh:
+            return "Codex account changed during quota refresh"
         case .rpcRejected(let code):
             return "Codex RPC request rejected (code \(code))"
         case .responseInvalid:
@@ -70,7 +77,8 @@ enum RealQuotaError: LocalizedError, Equatable, Sendable {
             return .authRequired
         case .rpcRejected:
             return .networkFailed
-        case .responseInvalid, .noUsableRateLimits:
+        case .accountIdentityUnavailable, .accountChangedDuringRefresh,
+             .responseInvalid, .noUsableRateLimits:
             return .parseFailed
         }
     }
@@ -94,9 +102,130 @@ enum RealQuotaError: LocalizedError, Equatable, Sendable {
             return .loginRequired
         case .rpcRejected:
             return .rpcRejected
-        case .responseInvalid, .noUsableRateLimits:
+        case .accountIdentityUnavailable, .accountChangedDuringRefresh,
+             .responseInvalid, .noUsableRateLimits:
             return .responseInvalid
         }
+    }
+}
+
+enum CodexAuthIdentityReader {
+    private static let accountClaimNamespace = "https://api.openai.com/auth"
+
+    static func currentBoundary(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        fileManager: FileManager = .default
+    ) -> QuotaAccountBoundary? {
+        boundary(
+            codexHome: defaultCodexHomeURL(
+                environment: environment,
+                fileManager: fileManager
+            ).path,
+            fileManager: fileManager
+        )
+    }
+
+    static func defaultCodexHomeURL(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        fileManager: FileManager = .default
+    ) -> URL {
+        if let override = environment["CODEX_HOME"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !override.isEmpty {
+            return URL(fileURLWithPath: NSString(string: override).expandingTildeInPath, isDirectory: true)
+        }
+        return fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".codex", isDirectory: true)
+    }
+
+    static func boundary(
+        codexHome: String,
+        fileManager: FileManager = .default
+    ) -> QuotaAccountBoundary? {
+        let expandedHome = NSString(string: codexHome).expandingTildeInPath
+        let authURL = URL(fileURLWithPath: expandedHome, isDirectory: true)
+            .appendingPathComponent("auth.json", isDirectory: false)
+        guard fileManager.isReadableFile(atPath: authURL.path),
+              let data = try? Data(contentsOf: authURL) else {
+            return nil
+        }
+        return parse(data: data)
+    }
+
+    static func parse(data: Data) -> QuotaAccountBoundary? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tokens = root["tokens"] as? [String: Any] else {
+            return nil
+        }
+
+        if let authMode = normalizedString(root["auth_mode"]),
+           authMode.lowercased() != "chatgpt" {
+            return nil
+        }
+
+        let idToken = normalizedString(tokens["id_token"])
+        let claims = jwtPayload(from: idToken)
+        let accountClaims = claims?[accountClaimNamespace] as? [String: Any]
+
+        let accountCandidate = firstNonempty([
+            labeled("account-id", tokens["account_id"]),
+            labeled("chatgpt-account-id", accountClaims?["chatgpt_account_id"]),
+            labeled("chatgpt-user-id", accountClaims?["chatgpt_user_id"]),
+            labeled("user-id", accountClaims?["user_id"]),
+            labeled("subject", claims?["sub"])
+        ])
+        guard let accountCandidate else { return nil }
+
+        let sessionCandidate = firstNonempty([
+            labeled("sid", claims?["sid"]),
+            labeled("refresh-token", tokens["refresh_token"]),
+            labeled("token-id", claims?["jti"])
+        ])
+        guard let sessionCandidate else { return nil }
+
+        return QuotaAccountBoundary(
+            accountFingerprint: fingerprint("account:\(accountCandidate)"),
+            sessionFingerprint: fingerprint("session:\(sessionCandidate)")
+        )
+    }
+
+    private static func jwtPayload(from token: String?) -> [String: Any]? {
+        guard let token else { return nil }
+        let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count >= 2 else { return nil }
+
+        var encoded = String(parts[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = encoded.count % 4
+        if remainder != 0 {
+            encoded.append(String(repeating: "=", count: 4 - remainder))
+        }
+        guard let data = Data(base64Encoded: encoded),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return object
+    }
+
+    private static func labeled(_ label: String, _ value: Any?) -> String? {
+        guard let value = normalizedString(value) else { return nil }
+        return "\(label):\(value)"
+    }
+
+    private static func normalizedString(_ value: Any?) -> String? {
+        guard let string = value as? String else { return nil }
+        let normalized = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    private static func firstNonempty(_ values: [String?]) -> String? {
+        values.lazy.compactMap { $0 }.first
+    }
+
+    private static func fingerprint(_ value: String) -> String {
+        SHA256.hash(data: Data(value.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
     }
 }
 
@@ -455,6 +584,7 @@ actor CodexRPCClient {
 
     private let transport: any CodexRPCTransport
     private let timeoutScheduler: any CodexRPCTimeoutScheduling
+    private let authBoundaryReader: @Sendable (String) -> QuotaAccountBoundary?
     private let eventQueue = CodexRPCEventQueue()
     private let maxFrameBytes: Int
     private let maxStderrBytes: Int
@@ -465,6 +595,8 @@ actor CodexRPCClient {
     private var hasResumed = false
     private var hasCompletedInitialization = false
     private var hasObservedStdoutEOF = false
+    private var codexHome: String?
+    private var initialAccountBoundary: QuotaAccountBoundary?
     private var pendingResponse: PendingResponse?
     private var completion: ((Result<QuotaSnapshot, Error>) -> Void)?
     private var timeoutWork: (any CodexRPCCancellable)?
@@ -472,6 +604,7 @@ actor CodexRPCClient {
     init(codexPath: String) {
         transport = ProcessRPCTransport(codexPath: codexPath)
         timeoutScheduler = DispatchTimeoutScheduler()
+        authBoundaryReader = { CodexAuthIdentityReader.boundary(codexHome: $0) }
         maxFrameBytes = 512 * 1_024
         maxStderrBytes = 16 * 1_024
     }
@@ -480,13 +613,38 @@ actor CodexRPCClient {
         transport: any CodexRPCTransport,
         timeoutScheduler: any CodexRPCTimeoutScheduling,
         maxFrameBytes: Int = 512 * 1_024,
+        maxStderrBytes: Int = 16 * 1_024,
+        authBoundaryReader: @escaping @Sendable (String) -> QuotaAccountBoundary?
+    ) {
+        self.transport = transport
+        self.timeoutScheduler = timeoutScheduler
+        self.authBoundaryReader = authBoundaryReader
+        self.maxFrameBytes = max(1, maxFrameBytes)
+        self.maxStderrBytes = max(1, maxStderrBytes)
+    }
+
+#if DEBUG
+    // Protocol-focused transport tests use a deterministic boundary unless the
+    // identity transition itself is under test. No synthetic identity reader
+    // is available in production builds.
+    init(
+        transport: any CodexRPCTransport,
+        timeoutScheduler: any CodexRPCTimeoutScheduling,
+        maxFrameBytes: Int = 512 * 1_024,
         maxStderrBytes: Int = 16 * 1_024
     ) {
         self.transport = transport
         self.timeoutScheduler = timeoutScheduler
+        self.authBoundaryReader = { _ in
+            QuotaAccountBoundary(
+                accountFingerprint: String(repeating: "a", count: 64),
+                sessionFingerprint: String(repeating: "b", count: 64)
+            )
+        }
         self.maxFrameBytes = max(1, maxFrameBytes)
         self.maxStderrBytes = max(1, maxStderrBytes)
     }
+#endif
 
     func fetchQuota(timeoutSeconds: Double) async throws -> QuotaSnapshot {
         try await withTaskCancellationHandler(operation: {
@@ -552,13 +710,16 @@ actor CodexRPCClient {
 
     private func handleInitializeResponse(_ result: CodexAppServerJSONValue) {
         guard case .object(let object) = result,
-              case .string = object["codexHome"],
+              case .string(let codexHome) = object["codexHome"],
               case .string = object["platformFamily"],
               case .string = object["platformOs"],
               case .string = object["userAgent"] else {
             complete(.failure(RealQuotaError.codexIncompatible))
             return
         }
+
+        self.codexHome = codexHome
+        initialAccountBoundary = authBoundaryReader(codexHome)
 
         do {
             try writeFrame(CodexAppServerCodec.encodeNotification(method: "initialized"))
@@ -596,7 +757,20 @@ actor CodexRPCClient {
             return
         }
 
-        complete(.success(snapshot))
+        guard let codexHome,
+              let initialAccountBoundary,
+              initialAccountBoundary.isValid,
+              let currentAccountBoundary = authBoundaryReader(codexHome),
+              currentAccountBoundary.isValid else {
+            complete(.failure(RealQuotaError.accountIdentityUnavailable))
+            return
+        }
+        guard initialAccountBoundary.matches(currentAccountBoundary) else {
+            complete(.failure(RealQuotaError.accountChangedDuringRefresh))
+            return
+        }
+
+        complete(.success(snapshot.bound(to: currentAccountBoundary)))
     }
 
     private func handleStdoutChunk(_ chunk: Data) {
