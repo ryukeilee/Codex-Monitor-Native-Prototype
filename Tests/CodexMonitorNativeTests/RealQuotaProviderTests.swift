@@ -34,6 +34,8 @@ final class RealQuotaProviderTests: XCTestCase {
         )
         let transport = ProcessRPCTransport(process: process, shutdownGraceSeconds: 0)
 
+        XCTAssertEqual(process.configuredArguments, ["app-server"])
+
         XCTAssertThrowsError(
             try transport.start(stdout: { _ in }, stdoutEOF: {}, stderr: { _ in }, termination: { _ in })
         ) { error in
@@ -298,7 +300,7 @@ final class RealQuotaProviderTests: XCTestCase {
         XCTAssertEqual(timeoutScheduler.cancelCount, 1)
     }
 
-    func testRPCClientProcessExitReclaimsTransportExactlyOnce() async {
+    func testRPCClientExitBeforeInitializationIsClassifiedAsSpawnFailure() async {
         let transport = ControlledRPCTransport()
         let timeoutScheduler = ControlledTimeoutScheduler()
         let client = CodexRPCClient(transport: transport, timeoutScheduler: timeoutScheduler)
@@ -309,12 +311,28 @@ final class RealQuotaProviderTests: XCTestCase {
 
         do {
             _ = try await task.value
-            XCTFail("Expected process exit error")
+            XCTFail("Expected spawn failure")
         } catch let error as RealQuotaError {
-            XCTAssertEqual(error, .processExited(9))
+            XCTAssertEqual(error, .spawnFailed)
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
+        XCTAssertEqual(transport.shutdownCount, 1)
+        XCTAssertEqual(timeoutScheduler.cancelCount, 1)
+    }
+
+    func testRPCClientExitAfterInitializationIsClassifiedAsProcessExit() async {
+        let transport = ControlledRPCTransport()
+        let timeoutScheduler = ControlledTimeoutScheduler()
+        let client = CodexRPCClient(transport: transport, timeoutScheduler: timeoutScheduler)
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.initializeResponse)
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+        transport.emitTermination(status: 9)
+
+        await assertFailure(.processExited(9), from: task)
         XCTAssertEqual(transport.shutdownCount, 1)
         XCTAssertEqual(timeoutScheduler.cancelCount, 1)
     }
@@ -353,6 +371,14 @@ final class RealQuotaProviderTests: XCTestCase {
                 .request(id: .integer(2), method: "account/rateLimits/read", params: nil)
             ]
         )
+        let initializeRequest = try XCTUnwrap(transport.writtenMessages.first)
+        guard case .request(_, _, let params) = initializeRequest,
+              let params,
+              case .object(let parameters) = params else {
+            return XCTFail("Expected initialize request parameters")
+        }
+        XCTAssertNil(parameters["protocolVersion"])
+        XCTAssertNil(parameters["capabilities"])
     }
 
     func testRPCClientUnusableResponseReclaimsTransportExactlyOnce() async {
@@ -378,7 +404,7 @@ final class RealQuotaProviderTests: XCTestCase {
         XCTAssertEqual(timeoutScheduler.cancelCount, 1)
     }
 
-    func testRPCClientRejectsMismatchedResponseID() async {
+    func testRPCClientClassifiesMismatchedInitializeResponseIDAsIncompatible() async {
         let transport = ControlledRPCTransport()
         let client = CodexRPCClient(
             transport: transport,
@@ -389,11 +415,11 @@ final class RealQuotaProviderTests: XCTestCase {
         await fulfillment(of: [transport.startedExpectation], timeout: 1)
         transport.emitStdout(Data("{\"id\":99,\"result\":{}}\n".utf8))
 
-        await assertFailure(.responseInvalid, from: task)
+        await assertFailure(.codexIncompatible, from: task)
         XCTAssertEqual(transport.shutdownCount, 1)
     }
 
-    func testRPCClientRejectsMalformedFrameWithoutWaitingForTimeout() async {
+    func testRPCClientClassifiesMalformedInitializeFrameAsIncompatibleWithoutWaitingForTimeout() async {
         let transport = ControlledRPCTransport()
         let timeoutScheduler = ControlledTimeoutScheduler()
         let client = CodexRPCClient(transport: transport, timeoutScheduler: timeoutScheduler)
@@ -402,11 +428,11 @@ final class RealQuotaProviderTests: XCTestCase {
         await fulfillment(of: [transport.startedExpectation], timeout: 1)
         transport.emitStdout(Data("not-json\n".utf8))
 
-        await assertFailure(.responseInvalid, from: task)
+        await assertFailure(.codexIncompatible, from: task)
         XCTAssertEqual(timeoutScheduler.cancelCount, 1)
     }
 
-    func testRPCClientRejectsInvalidInitializePayloadAsHandshakeFailure() async {
+    func testRPCClientClassifiesInvalidInitializePayloadAsIncompatible() async {
         let transport = ControlledRPCTransport()
         let client = CodexRPCClient(
             transport: transport,
@@ -417,8 +443,24 @@ final class RealQuotaProviderTests: XCTestCase {
         await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
         transport.emitStdout(Data("{\"id\":1,\"result\":{\"protocolVersion\":1}}\n".utf8))
 
-        await assertFailure(.handshakeFailed, from: task)
+        await assertFailure(.codexIncompatible, from: task)
         XCTAssertEqual(transport.shutdownCount, 1)
+    }
+
+    func testRPCClientAcceptsInitializeResponseWithUnknownExtraFields() async throws {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":1,\"result\":{\"codexHome\":\"/tmp/codex\",\"platformFamily\":\"unix\",\"platformOs\":\"macos\",\"userAgent\":\"codex-test\",\"futureField\":true}}\n".utf8))
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.rateLimitResponse)
+
+        _ = try await task.value
     }
 
     func testRPCClientIgnoresNotificationsWhileAwaitingMatchingResponse() async throws {
@@ -495,7 +537,7 @@ final class RealQuotaProviderTests: XCTestCase {
         await assertFailure(.rpcRejected(code: -32_077), from: task)
     }
 
-    func testRPCClientRejectsUnsupportedServerRequestAndRepliesMethodNotFound() async {
+    func testRPCClientClassifiesUnsupportedServerRequestAsIncompatibleAndRepliesMethodNotFound() async {
         let transport = ControlledRPCTransport()
         let client = CodexRPCClient(
             transport: transport,
@@ -506,7 +548,7 @@ final class RealQuotaProviderTests: XCTestCase {
         await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
         transport.emitStdout(Data("{\"id\":\"server-1\",\"method\":\"attestation/generate\",\"params\":{}}\n".utf8))
 
-        await assertFailure(.unsupportedServerRequest, from: task)
+        await assertFailure(.codexIncompatible, from: task)
         XCTAssertEqual(
             transport.writtenMessages.last,
             .error(
@@ -516,7 +558,7 @@ final class RealQuotaProviderTests: XCTestCase {
         )
     }
 
-    func testRPCClientRejectsFrameThatExceedsConfiguredLimit() async {
+    func testRPCClientClassifiesOversizedInitializeFrameAsIncompatible() async {
         let transport = ControlledRPCTransport()
         let client = CodexRPCClient(
             transport: transport,
@@ -528,10 +570,10 @@ final class RealQuotaProviderTests: XCTestCase {
         await fulfillment(of: [transport.startedExpectation], timeout: 1)
         transport.emitStdout(Data(repeating: 0x41, count: 33))
 
-        await assertFailure(.responseInvalid, from: task)
+        await assertFailure(.codexIncompatible, from: task)
     }
 
-    func testRPCClientTreatsWriteFailureAsTransportFailure() async {
+    func testRPCClientTreatsInitializeWriteFailureAsSpawnFailure() async {
         let transport = ControlledRPCTransport(writeError: .writeFailed)
         let client = CodexRPCClient(
             transport: transport,
@@ -540,8 +582,35 @@ final class RealQuotaProviderTests: XCTestCase {
 
         let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
 
+        await assertFailure(.spawnFailed, from: task)
+        XCTAssertEqual(transport.shutdownCount, 1)
+    }
+
+    func testRPCClientTreatsRateLimitWriteFailureAsTransportFailure() async {
+        let transport = ControlledRPCTransport(
+            writeError: .writeFailed,
+            writeErrorOnMethod: "account/rateLimits/read"
+        )
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.initializeResponse)
+
         await assertFailure(.transportFailed, from: task)
         XCTAssertEqual(transport.shutdownCount, 1)
+    }
+
+    func testRPCClientClassifiesRealFastExitAsSpawnFailure() async {
+        let client = CodexRPCClient(codexPath: "/usr/bin/false")
+
+        await assertFailure(
+            .spawnFailed,
+            from: Task { try await client.fetchQuota(timeoutSeconds: 1) }
+        )
     }
 
     func testRPCClientNormalizesStartFailure() async {
@@ -557,7 +626,161 @@ final class RealQuotaProviderTests: XCTestCase {
         XCTAssertEqual(transport.shutdownCount, 1)
     }
 
-    func testRPCClientBoundsStderrAndClassifiesCleanEarlyExitConsistently() async {
+    func testRPCClientClassifiesInitializeMethodNotFoundAsIncompatible() async {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":1,\"error\":{\"code\":-32601,\"message\":\"method missing\"}}\n".utf8))
+
+        await assertFailure(.codexIncompatible, from: task)
+    }
+
+    func testRPCClientClassifiesInitializeInvalidParamsAsIncompatible() async {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":1,\"error\":{\"code\":-32602,\"message\":\"invalid params\"}}\n".utf8))
+
+        await assertFailure(.codexIncompatible, from: task)
+    }
+
+    func testRPCClientClassifiesUnavailableRateLimitsMethodAsIncompatible() async {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.initializeResponse)
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":2,\"error\":{\"code\":-32601,\"message\":\"method missing\"}}\n".utf8))
+
+        await assertFailure(.codexIncompatible, from: task)
+    }
+
+    func testRPCClientClassifiesRejectedRateLimitsParametersAsIncompatible() async {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.initializeResponse)
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":2,\"error\":{\"code\":-32602,\"message\":\"invalid params\"}}\n".utf8))
+
+        await assertFailure(.codexIncompatible, from: task)
+    }
+
+    func testRPCClientUsesAccountReadToClassifyRateLimitsInvalidRequestAsLoginRequired() async {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.initializeResponse)
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":2,\"error\":{\"code\":-32600,\"message\":\"invalid request\"}}\n".utf8))
+        await fulfillment(of: [transport.accountRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":3,\"result\":{\"account\":null,\"requiresOpenaiAuth\":true}}\n".utf8))
+
+        await assertFailure(.authenticationRequired, from: task)
+        XCTAssertEqual(
+            transport.writtenMessages.last,
+            .request(id: .integer(3), method: "account/read", params: .object([:]))
+        )
+    }
+
+    func testRPCClientDistinguishesAuthenticatedNonChatGPTAccount() async {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.initializeResponse)
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":2,\"error\":{\"code\":-32600,\"message\":\"invalid request\"}}\n".utf8))
+        await fulfillment(of: [transport.accountRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":3,\"result\":{\"account\":{\"type\":\"apiKey\"},\"requiresOpenaiAuth\":false}}\n".utf8))
+
+        await assertFailure(.chatGPTAccountRequired, from: task)
+    }
+
+    func testRPCClientDoesNotCallNullAccountAuthenticatedWhenOpenAIAuthIsNotRequired() async {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.initializeResponse)
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":2,\"error\":{\"code\":-32600,\"message\":\"invalid request\"}}\n".utf8))
+        await fulfillment(of: [transport.accountRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":3,\"result\":{\"account\":null,\"requiresOpenaiAuth\":false}}\n".utf8))
+
+        await assertFailure(.rpcRejected(code: -32_600), from: task)
+    }
+
+    func testRPCClientUsesAccountReadToConfirmRateLimitsCapabilityMismatch() async {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.initializeResponse)
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":2,\"error\":{\"code\":-32600,\"message\":\"invalid request\"}}\n".utf8))
+        await fulfillment(of: [transport.accountRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":3,\"result\":{\"account\":{\"type\":\"chatgpt\",\"email\":null,\"planType\":\"plus\"},\"requiresOpenaiAuth\":true}}\n".utf8))
+
+        await assertFailure(.codexIncompatible, from: task)
+    }
+
+    func testRPCClientTreatsUnavailableAccountProbeAsIncompatible() async {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.initializeResponse)
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":2,\"error\":{\"code\":-32600,\"message\":\"invalid request\"}}\n".utf8))
+        await fulfillment(of: [transport.accountRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":3,\"error\":{\"code\":-32600,\"message\":\"invalid request\"}}\n".utf8))
+
+        await assertFailure(.codexIncompatible, from: task)
+    }
+
+    func testRPCClientBoundsStderrAndClassifiesCleanStartupExitConsistently() async {
         let transport = ControlledRPCTransport()
         let client = CodexRPCClient(
             transport: transport,
@@ -570,8 +793,8 @@ final class RealQuotaProviderTests: XCTestCase {
         transport.emitStderr(Data("private-diagnostic-value".utf8))
         transport.emitTermination(status: 0)
 
-        await assertFailure(.processExited(0), from: task)
-        XCTAssertFalse(RealQuotaError.processExited(0).localizedDescription.contains("private-diagnostic-value"))
+        await assertFailure(.spawnFailed, from: task)
+        XCTAssertFalse(RealQuotaError.spawnFailed.localizedDescription.contains("private-diagnostic-value"))
     }
 
     func testRPCClientPreservesRemoteFailureWhenCleanupAlsoFails() async {
@@ -712,6 +935,155 @@ final class RealQuotaProviderTests: XCTestCase {
         let snapshot = try await task.value
         XCTAssertEqual(snapshot.fiveHourQuotaPercent, 60)
         XCTAssertEqual(snapshot.weeklyQuotaPercent, 80)
+    }
+
+    func testProviderDistinguishesMissingAndNonRunnableExecutables() async {
+        let missingFileSystem = MutableResolverFileSystem()
+        let missingProvider = makeProvider(
+            environment: ["PATH": "/missing/bin"],
+            fileSystem: missingFileSystem,
+            fetcher: ControlledExecutableQuotaFetcher(outcomes: [:])
+        )
+        await assertFailure(.codexNotFound, from: Task { try await missingProvider.fetchQuota() })
+
+        let nonRunnablePath = "/custom/codex"
+        let nonRunnableFileSystem = MutableResolverFileSystem(items: [
+            nonRunnablePath: .regularFile(executable: false)
+        ])
+        let nonRunnableProvider = makeProvider(
+            environment: ["CODEX_BIN": nonRunnablePath],
+            fileSystem: nonRunnableFileSystem,
+            fetcher: ControlledExecutableQuotaFetcher(outcomes: [:])
+        )
+        await assertFailure(.codexNotExecutable, from: Task { try await nonRunnableProvider.fetchQuota() })
+    }
+
+    func testProviderFallsBackAcrossStartupAndCompatibilityFailures() async throws {
+        let firstPath = "/first/bin/codex"
+        let secondPath = "/second/bin/codex"
+        let thirdPath = "/third/bin/codex"
+        let expected = QuotaSnapshot(
+            weeklyQuotaPercent: 64,
+            fiveHourQuotaPercent: 38,
+            refreshedAt: .now,
+            dataSource: .real
+        )
+        let fileSystem = MutableResolverFileSystem(items: [
+            firstPath: .regularFile(executable: true),
+            secondPath: .regularFile(executable: true),
+            thirdPath: .regularFile(executable: true)
+        ])
+        let fetcher = ControlledExecutableQuotaFetcher(outcomes: [
+            firstPath: [.failure(.spawnFailed)],
+            secondPath: [.failure(.codexIncompatible)],
+            thirdPath: [.success(expected)]
+        ])
+        let provider = makeProvider(
+            environment: ["PATH": "/first/bin:/second/bin:/third/bin"],
+            fileSystem: fileSystem,
+            fetcher: fetcher
+        )
+
+        let snapshot = try await provider.fetchQuota()
+        XCTAssertEqual(snapshot, expected)
+        XCTAssertEqual(fetcher.requestedPaths, [firstPath, secondPath, thirdPath])
+    }
+
+    func testProviderDoesNotFallbackForOperationalRPCFailure() async {
+        let firstPath = "/first/bin/codex"
+        let secondPath = "/second/bin/codex"
+        let expected = QuotaSnapshot(
+            weeklyQuotaPercent: 64,
+            fiveHourQuotaPercent: 38,
+            refreshedAt: .now,
+            dataSource: .real
+        )
+        let fileSystem = MutableResolverFileSystem(items: [
+            firstPath: .regularFile(executable: true),
+            secondPath: .regularFile(executable: true)
+        ])
+        let fetcher = ControlledExecutableQuotaFetcher(outcomes: [
+            firstPath: [.failure(.rpcRejected(code: -32_000))],
+            secondPath: [.success(expected)]
+        ])
+        let provider = makeProvider(
+            environment: ["PATH": "/first/bin:/second/bin"],
+            fileSystem: fileSystem,
+            fetcher: fetcher
+        )
+
+        await assertFailure(.rpcRejected(code: -32_000), from: Task { try await provider.fetchQuota() })
+        XCTAssertEqual(fetcher.requestedPaths, [firstPath])
+    }
+
+    func testProviderReresolvesCandidatesAfterExecutableMoves() async throws {
+        let oldPath = "/node/v1/bin/codex"
+        let newPath = "/node/v2/bin/codex"
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 64,
+            fiveHourQuotaPercent: 38,
+            refreshedAt: .now,
+            dataSource: .real
+        )
+        let fileSystem = MutableResolverFileSystem(items: [
+            oldPath: .regularFile(executable: true),
+            newPath: .missing
+        ])
+        let fetcher = ControlledExecutableQuotaFetcher(outcomes: [
+            oldPath: [.success(snapshot)],
+            newPath: [.success(snapshot)]
+        ])
+        let provider = makeProvider(
+            environment: ["PATH": "/node/v1/bin:/node/v2/bin"],
+            fileSystem: fileSystem,
+            fetcher: fetcher
+        )
+
+        _ = try await provider.fetchQuota()
+        fileSystem.setItem(.missing, at: oldPath)
+        fileSystem.setItem(.regularFile(executable: true), at: newPath)
+        _ = try await provider.fetchQuota()
+
+        XCTAssertEqual(fetcher.requestedPaths, [oldPath, newPath])
+    }
+
+    func testProviderReportsCompatibilityWhenNoFallbackCandidateWorks() async {
+        let firstPath = "/first/bin/codex"
+        let secondPath = "/second/bin/codex"
+        let fileSystem = MutableResolverFileSystem(items: [
+            firstPath: .regularFile(executable: true),
+            secondPath: .regularFile(executable: true)
+        ])
+        let fetcher = ControlledExecutableQuotaFetcher(outcomes: [
+            firstPath: [.failure(.codexIncompatible)],
+            secondPath: [.failure(.spawnFailed)]
+        ])
+        let provider = makeProvider(
+            environment: ["PATH": "/first/bin:/second/bin"],
+            fileSystem: fileSystem,
+            fetcher: fetcher
+        )
+
+        await assertFailure(.codexIncompatible, from: Task { try await provider.fetchQuota() })
+        XCTAssertEqual(fetcher.requestedPaths, [firstPath, secondPath])
+    }
+
+    private func makeProvider(
+        environment: [String: String],
+        fileSystem: MutableResolverFileSystem,
+        fetcher: ControlledExecutableQuotaFetcher
+    ) -> RealQuotaProvider {
+        let resolver = CodexExecutableResolver(
+            environment: { environment },
+            homeDirectory: { "/Users/test" },
+            fileSystem: fileSystem.interface
+        )
+        return RealQuotaProvider(
+            executableResolver: resolver,
+            fetchQuotaFromExecutable: { path, timeoutSeconds in
+                try fetcher.fetch(path: path, timeoutSeconds: timeoutSeconds)
+            }
+        )
     }
 
     private static let initializeResponse = Data("{\"id\":1,\"result\":{\"codexHome\":\"/tmp/codex\",\"platformFamily\":\"unix\",\"platformOs\":\"macos\",\"userAgent\":\"codex-test\"}}\n".utf8)
@@ -1588,7 +1960,10 @@ private final class ControlledProcessHandle: ProcessRPCProcess, @unchecked Senda
         self.runError = runError
     }
 
-    func configure(codexPath _: String, stdin: Pipe, stdout: Pipe, stderr: Pipe) {
+    private(set) var configuredArguments: [String] = []
+
+    func configure(codexPath _: String, arguments: [String], stdin: Pipe, stdout: Pipe, stderr: Pipe) {
+        configuredArguments = arguments
         stdinPipe = stdin
         stdoutPipe = stdout
         stderrPipe = stderr
@@ -1667,6 +2042,7 @@ private final class ControlledRPCTransport: CodexRPCTransport, @unchecked Sendab
     let startedExpectation = XCTestExpectation(description: "transport started")
     let initializeRequestExpectation = XCTestExpectation(description: "initialize request written")
     let rateLimitRequestExpectation = XCTestExpectation(description: "rate limits request written")
+    let accountRequestExpectation = XCTestExpectation(description: "account request written")
     private(set) var shutdownCount = 0
     private(set) var handlersCleared = false
     private(set) var writtenMessages: [CodexAppServerMessage] = []
@@ -1677,15 +2053,18 @@ private final class ControlledRPCTransport: CodexRPCTransport, @unchecked Sendab
     private let cleanupError: ProcessCleanupError?
     private let startError: ControlledRPCTransportError?
     private let writeError: ControlledRPCTransportError?
+    private let writeErrorOnMethod: String?
 
     init(
         cleanupError: ProcessCleanupError? = nil,
         startError: ControlledRPCTransportError? = nil,
-        writeError: ControlledRPCTransportError? = nil
+        writeError: ControlledRPCTransportError? = nil,
+        writeErrorOnMethod: String? = nil
     ) {
         self.cleanupError = cleanupError
         self.startError = startError
         self.writeError = writeError
+        self.writeErrorOnMethod = writeErrorOnMethod
     }
 
     func start(
@@ -1703,15 +2082,26 @@ private final class ControlledRPCTransport: CodexRPCTransport, @unchecked Sendab
     }
 
     func write(_ data: Data) throws {
-        if let writeError { throw writeError }
         let line = Data(data.dropLast(data.last == 0x0A ? 1 : 0))
-        if let message = try? CodexAppServerCodec.decodeLine(line) {
+        let decodedMessage = try? CodexAppServerCodec.decodeLine(line)
+        if let writeError {
+            if writeErrorOnMethod == nil {
+                throw writeError
+            }
+            if case .request(_, let method, _)? = decodedMessage, method == writeErrorOnMethod {
+                throw writeError
+            }
+        }
+        if let message = decodedMessage {
             writtenMessages.append(message)
             if case .request(_, "initialize", _) = message {
                 initializeRequestExpectation.fulfill()
             }
             if case .request(_, "account/rateLimits/read", _) = message {
                 rateLimitRequestExpectation.fulfill()
+            }
+            if case .request(_, "account/read", _) = message {
+                accountRequestExpectation.fulfill()
             }
         }
     }
@@ -1774,5 +2164,64 @@ private final class ControlledTimeoutScheduler: CodexRPCTimeoutScheduling, @unch
         func cancel() {
             onCancel()
         }
+    }
+}
+
+private final class MutableResolverFileSystem: @unchecked Sendable {
+    private let lock = NSLock()
+    private var items: [String: CodexExecutableResolver.FileSystem.Item]
+
+    init(items: [String: CodexExecutableResolver.FileSystem.Item] = [:]) {
+        self.items = items
+    }
+
+    var interface: CodexExecutableResolver.FileSystem {
+        CodexExecutableResolver.FileSystem(
+            itemAtPath: { [self] path in item(at: path) },
+            canonicalPath: { $0 },
+            directoryContents: { _ in [] }
+        )
+    }
+
+    func setItem(_ item: CodexExecutableResolver.FileSystem.Item, at path: String) {
+        lock.lock()
+        items[path] = item
+        lock.unlock()
+    }
+
+    private func item(at path: String) -> CodexExecutableResolver.FileSystem.Item {
+        lock.lock()
+        defer { lock.unlock() }
+        return items[path] ?? .missing
+    }
+}
+
+private final class ControlledExecutableQuotaFetcher: @unchecked Sendable {
+    private let lock = NSLock()
+    private var outcomes: [String: [Result<QuotaSnapshot, RealQuotaError>]]
+    private var paths: [String] = []
+
+    init(outcomes: [String: [Result<QuotaSnapshot, RealQuotaError>]]) {
+        self.outcomes = outcomes
+    }
+
+    var requestedPaths: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return paths
+    }
+
+    func fetch(path: String, timeoutSeconds _: Double) throws -> QuotaSnapshot {
+        let outcome: Result<QuotaSnapshot, RealQuotaError>
+        lock.lock()
+        paths.append(path)
+        if var pathOutcomes = outcomes[path], !pathOutcomes.isEmpty {
+            outcome = pathOutcomes.removeFirst()
+            outcomes[path] = pathOutcomes
+        } else {
+            outcome = .failure(.spawnFailed)
+        }
+        lock.unlock()
+        return try outcome.get()
     }
 }

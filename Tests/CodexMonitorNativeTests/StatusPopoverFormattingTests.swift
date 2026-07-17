@@ -208,6 +208,29 @@ final class StatusPopoverFormattingTests: XCTestCase {
         XCTAssertEqual(formatted, "真实链路：响应不可解析，当前无可用快照")
     }
 
+    func testRealQuotaHealthLineDistinguishesIncompatibleVersionWithCachedSnapshot() {
+        let formatted = StatusPopoverFormatting.realQuotaHealthLine(
+            RealQuotaHealthDiagnostic(kind: .versionIncompatible, isUsingCachedSnapshot: true)
+        )
+
+        XCTAssertEqual(formatted, "真实链路：Codex 版本不兼容，显示上次成功数据")
+    }
+
+    func testRealQuotaHealthLineDistinguishesNonRunnableFileAndStartupFailure() {
+        XCTAssertEqual(
+            StatusPopoverFormatting.realQuotaHealthLine(
+                RealQuotaHealthDiagnostic(kind: .executableNotRunnable, isUsingCachedSnapshot: false)
+            ),
+            "真实链路：找到 codex，但文件不可执行，当前无可用快照"
+        )
+        XCTAssertEqual(
+            StatusPopoverFormatting.realQuotaHealthLine(
+                RealQuotaHealthDiagnostic(kind: .appServerStartFailed, isUsingCachedSnapshot: true)
+            ),
+            "真实链路：Codex app-server 启动失败，显示上次成功数据"
+        )
+    }
+
     func testTitleSummaryMatchesStatusState() {
         XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .success), "最新数据")
         XCTAssertEqual(StatusPopoverFormatting.titleSummary(for: .refreshing), "读取中")

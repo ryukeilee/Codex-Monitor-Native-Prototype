@@ -5,12 +5,15 @@ protocol RealQuotaRefreshing: Sendable {
     func fetchQuota() async throws -> QuotaSnapshot
 }
 
-enum RealQuotaError: LocalizedError, Equatable {
+enum RealQuotaError: LocalizedError, Equatable, Sendable {
     case codexNotFound
+    case codexNotExecutable
     case spawnFailed
+    case codexIncompatible
     case handshakeFailed
     case requestTimedOut
     case authenticationRequired
+    case chatGPTAccountRequired
     case rpcRejected(code: Int64)
     case responseInvalid
     case noUsableRateLimits
@@ -23,14 +26,20 @@ enum RealQuotaError: LocalizedError, Equatable {
         switch self {
         case .codexNotFound:
             return "Codex executable not found"
+        case .codexNotExecutable:
+            return "Codex executable is not runnable"
         case .spawnFailed:
-            return "Failed to launch Codex"
+            return "Failed to launch Codex app-server"
+        case .codexIncompatible:
+            return "Codex app-server is incompatible"
         case .handshakeFailed:
             return "Codex app-server handshake failed"
         case .requestTimedOut:
             return "Codex app-server request timed out"
         case .authenticationRequired:
             return "Codex authentication is required"
+        case .chatGPTAccountRequired:
+            return "Codex must be signed in with a ChatGPT account"
         case .rpcRejected(let code):
             return "Codex RPC request rejected (code \(code))"
         case .responseInvalid:
@@ -53,10 +62,11 @@ enum RealQuotaError: LocalizedError, Equatable {
         switch self {
         case .codexNotFound:
             return .noSnapshot
-        case .spawnFailed, .handshakeFailed, .requestTimedOut, .processExited, .transportFailed,
+        case .codexNotExecutable, .spawnFailed, .codexIncompatible, .handshakeFailed, .requestTimedOut,
+             .processExited, .transportFailed,
              .unsupportedServerRequest, .processCleanupFailed:
             return .networkFailed
-        case .authenticationRequired:
+        case .authenticationRequired, .chatGPTAccountRequired:
             return .authRequired
         case .rpcRejected:
             return .networkFailed
@@ -69,12 +79,18 @@ enum RealQuotaError: LocalizedError, Equatable {
         switch self {
         case .codexNotFound:
             return .executableMissing
-        case .spawnFailed, .handshakeFailed, .processExited, .transportFailed,
+        case .codexNotExecutable:
+            return .executableNotRunnable
+        case .codexIncompatible:
+            return .versionIncompatible
+        case .spawnFailed:
+            return .appServerStartFailed
+        case .handshakeFailed, .processExited, .transportFailed,
              .unsupportedServerRequest, .processCleanupFailed:
             return .codexUnavailable
         case .requestTimedOut:
             return .requestTimedOut
-        case .authenticationRequired:
+        case .authenticationRequired, .chatGPTAccountRequired:
             return .loginRequired
         case .rpcRejected:
             return .rpcRejected
@@ -160,7 +176,7 @@ protocol ProcessRPCProcess: AnyObject, Sendable {
     var isRunning: Bool { get }
     var terminationStatus: Int32 { get }
     var terminationHandler: (@Sendable (any ProcessRPCProcess) -> Void)? { get set }
-    func configure(codexPath: String, stdin: Pipe, stdout: Pipe, stderr: Pipe)
+    func configure(codexPath: String, arguments: [String], stdin: Pipe, stdout: Pipe, stderr: Pipe)
     func run() throws
     func terminate()
     func kill() -> Bool
@@ -187,9 +203,9 @@ private final class FoundationProcessRPCProcess: ProcessRPCProcess, @unchecked S
         }
     }
 
-    func configure(codexPath: String, stdin: Pipe, stdout: Pipe, stderr: Pipe) {
+    func configure(codexPath: String, arguments: [String], stdin: Pipe, stdout: Pipe, stderr: Pipe) {
         process.executableURL = URL(fileURLWithPath: codexPath)
-        process.arguments = ["app-server", "--stdio"]
+        process.arguments = arguments
         process.standardInput = stdin
         process.standardOutput = stdout
         process.standardError = stderr
@@ -274,13 +290,25 @@ final class ProcessRPCTransport: CodexRPCTransport, @unchecked Sendable {
     init(codexPath: String, shutdownGraceSeconds: TimeInterval = 1) {
         self.process = FoundationProcessRPCProcess()
         self.shutdownGraceSeconds = shutdownGraceSeconds
-        process.configure(codexPath: codexPath, stdin: stdinPipe, stdout: stdoutPipe, stderr: stderrPipe)
+        process.configure(
+            codexPath: codexPath,
+            arguments: ["app-server"],
+            stdin: stdinPipe,
+            stdout: stdoutPipe,
+            stderr: stderrPipe
+        )
     }
 
     init(process: any ProcessRPCProcess, shutdownGraceSeconds: TimeInterval = 1) {
         self.process = process
         self.shutdownGraceSeconds = shutdownGraceSeconds
-        process.configure(codexPath: "", stdin: stdinPipe, stdout: stdoutPipe, stderr: stderrPipe)
+        process.configure(
+            codexPath: "",
+            arguments: ["app-server"],
+            stdin: stdinPipe,
+            stdout: stdoutPipe,
+            stderr: stderrPipe
+        )
     }
 
     func start(
@@ -417,6 +445,7 @@ actor CodexRPCClient {
     private enum Operation: String, Sendable {
         case initialize
         case rateLimitsRead
+        case accountReadAfterRateLimitsInvalidRequest
     }
 
     private struct PendingResponse: Sendable {
@@ -434,6 +463,7 @@ actor CodexRPCClient {
     private var stderrData = Data()
     private var nextId: Int64 = 1
     private var hasResumed = false
+    private var hasCompletedInitialization = false
     private var hasObservedStdoutEOF = false
     private var pendingResponse: PendingResponse?
     private var completion: ((Result<QuotaSnapshot, Error>) -> Void)?
@@ -526,7 +556,7 @@ actor CodexRPCClient {
               case .string = object["platformFamily"],
               case .string = object["platformOs"],
               case .string = object["userAgent"] else {
-            complete(.failure(RealQuotaError.handshakeFailed))
+            complete(.failure(RealQuotaError.codexIncompatible))
             return
         }
 
@@ -538,6 +568,7 @@ actor CodexRPCClient {
             return
         }
 
+        hasCompletedInitialization = true
         sendRequest(operation: .rateLimitsRead, method: "account/rateLimits/read")
     }
 
@@ -574,7 +605,7 @@ actor CodexRPCClient {
 
         while let newlineRange = stdoutBuffer.range(of: Data("\n".utf8)) {
             if newlineRange.lowerBound > maxFrameBytes {
-                complete(.failure(RealQuotaError.responseInvalid))
+                complete(.failure(protocolFrameError()))
                 return
             }
             let lineData = stdoutBuffer.subdata(in: 0..<newlineRange.lowerBound)
@@ -584,7 +615,7 @@ actor CodexRPCClient {
         }
 
         if stdoutBuffer.count > maxFrameBytes {
-            complete(.failure(RealQuotaError.responseInvalid))
+            complete(.failure(protocolFrameError()))
         }
     }
 
@@ -596,7 +627,7 @@ actor CodexRPCClient {
         let trailingLine = stdoutBuffer
         stdoutBuffer.removeAll(keepingCapacity: false)
         guard trailingLine.count <= maxFrameBytes else {
-            complete(.failure(RealQuotaError.responseInvalid))
+            complete(.failure(protocolFrameError()))
             return
         }
         handleLine(trailingLine)
@@ -626,7 +657,10 @@ actor CodexRPCClient {
            !stderr.isEmpty {
             AppLogger.codexRPC.error("Codex app-server exited code=\(status, privacy: .public) stderr=\(stderr, privacy: .private)")
         }
-        complete(.failure(RealQuotaError.processExited(status)))
+        let error: RealQuotaError = hasCompletedInitialization
+            ? .processExited(status)
+            : .spawnFailed
+        complete(.failure(error))
     }
 
     private func handleTimeout() {
@@ -645,7 +679,7 @@ actor CodexRPCClient {
             message = try CodexAppServerCodec.decodeLine(lineData)
         } catch {
             AppLogger.codexRPC.error("Codex app-server emitted an invalid protocol frame")
-            complete(.failure(RealQuotaError.responseInvalid))
+            complete(.failure(protocolFrameError()))
             return
         }
 
@@ -653,7 +687,7 @@ actor CodexRPCClient {
         case .response(let id, let result):
             guard let pendingResponse, pendingResponse.id == id else {
                 AppLogger.codexRPC.error("Codex app-server response id did not match the pending request")
-                complete(.failure(RealQuotaError.responseInvalid))
+                complete(.failure(protocolFrameError()))
                 return
             }
             self.pendingResponse = nil
@@ -662,16 +696,26 @@ actor CodexRPCClient {
                 handleInitializeResponse(result)
             case .rateLimitsRead:
                 handleRateLimitsResponse(result)
+            case .accountReadAfterRateLimitsInvalidRequest:
+                handleAccountReadAfterRateLimitsInvalidRequest(result)
             }
         case .error(let id, let remoteError):
             guard let pendingResponse, pendingResponse.id == id else {
                 AppLogger.codexRPC.error("Codex app-server error id did not match the pending request")
-                complete(.failure(RealQuotaError.responseInvalid))
+                complete(.failure(protocolFrameError()))
                 return
             }
             self.pendingResponse = nil
             AppLogger.codexRPC.error("Codex RPC \(pendingResponse.operation.rawValue, privacy: .public) rejected code=\(remoteError.code, privacy: .public) message=\(remoteError.message, privacy: .private)")
-            complete(.failure(RealQuotaError.rpcRejected(code: remoteError.code)))
+            if pendingResponse.operation == .rateLimitsRead, remoteError.code == -32_600 {
+                sendRequest(
+                    operation: .accountReadAfterRateLimitsInvalidRequest,
+                    method: "account/read",
+                    params: .object([:])
+                )
+                return
+            }
+            complete(.failure(classifyRemoteError(remoteError, for: pendingResponse.operation)))
         case .notification:
             break
         case .request(let id, let method, _):
@@ -683,7 +727,7 @@ actor CodexRPCClient {
             if let response {
                 try? writeFrame(response)
             }
-            complete(.failure(RealQuotaError.unsupportedServerRequest))
+            complete(.failure(RealQuotaError.codexIncompatible))
         }
     }
 
@@ -707,7 +751,11 @@ actor CodexRPCClient {
         } catch {
             pendingResponse = nil
             AppLogger.codexRPC.error("Failed to write Codex RPC request: \(String(describing: error), privacy: .private)")
-            complete(.failure(RealQuotaError.transportFailed))
+            complete(.failure(
+                operation == .initialize
+                    ? RealQuotaError.spawnFailed
+                    : RealQuotaError.transportFailed
+            ))
         }
     }
 
@@ -715,6 +763,63 @@ actor CodexRPCClient {
         var framedData = data
         framedData.append(0x0A)
         try transport.write(framedData)
+    }
+
+    private func classifyRemoteError(
+        _ remoteError: CodexAppServerRemoteError,
+        for operation: Operation
+    ) -> RealQuotaError {
+        switch operation {
+        case .initialize:
+            if remoteError.code == -32_601 || remoteError.code == -32_602 {
+                return .codexIncompatible
+            }
+        case .rateLimitsRead:
+            if remoteError.code == -32_601 || remoteError.code == -32_602 {
+                return .codexIncompatible
+            }
+        case .accountReadAfterRateLimitsInvalidRequest:
+            if remoteError.code == -32_600 || remoteError.code == -32_601 || remoteError.code == -32_602 {
+                return .codexIncompatible
+            }
+            return .rpcRejected(code: -32_600)
+        }
+        return .rpcRejected(code: remoteError.code)
+    }
+
+    private func handleAccountReadAfterRateLimitsInvalidRequest(_ result: CodexAppServerJSONValue) {
+        guard case .object(let object) = result else {
+            complete(.failure(RealQuotaError.rpcRejected(code: -32_600)))
+            return
+        }
+
+        if case .null? = object["account"] {
+            let error: RealQuotaError = object["requiresOpenaiAuth"] == .bool(true)
+                ? .authenticationRequired
+                : .rpcRejected(code: -32_600)
+            complete(.failure(error))
+            return
+        }
+        if case .object(let account)? = object["account"],
+           case .string(let accountType)? = account["type"] {
+            let error: RealQuotaError = accountType == "chatgpt"
+                ? .codexIncompatible
+                : .chatGPTAccountRequired
+            complete(.failure(error))
+            return
+        }
+        if case .bool(true)? = object["requiresOpenaiAuth"] {
+            complete(.failure(RealQuotaError.authenticationRequired))
+            return
+        }
+
+        complete(.failure(RealQuotaError.rpcRejected(code: -32_600)))
+    }
+
+    private func protocolFrameError() -> RealQuotaError {
+        pendingResponse?.operation == .initialize
+            ? .codexIncompatible
+            : .responseInvalid
     }
 
     private func cancel() {
@@ -783,20 +888,68 @@ struct RealQuotaProvider: RealQuotaRefreshing {
         let resetMetadata: ParsedResetMetadata
     }
 
-    private let codexPath: String?
+    private let executableResolver: CodexExecutableResolver
     private let timeoutSeconds: Double
+    private let fetchQuotaFromExecutable: @Sendable (String, Double) async throws -> QuotaSnapshot
 
     init(codexPath: String? = nil, timeoutSeconds: Double = 10) {
-        self.codexPath = codexPath ?? RealQuotaProvider.resolveCodexPath()
+        executableResolver = CodexExecutableResolver(explicitOverride: codexPath)
         self.timeoutSeconds = timeoutSeconds
+        fetchQuotaFromExecutable = { path, timeoutSeconds in
+            let client = CodexRPCClient(codexPath: path)
+            return try await client.fetchQuota(timeoutSeconds: timeoutSeconds)
+        }
+    }
+
+    init(
+        executableResolver: CodexExecutableResolver,
+        timeoutSeconds: Double = 10,
+        fetchQuotaFromExecutable: @escaping @Sendable (String, Double) async throws -> QuotaSnapshot
+    ) {
+        self.executableResolver = executableResolver
+        self.timeoutSeconds = timeoutSeconds
+        self.fetchQuotaFromExecutable = fetchQuotaFromExecutable
     }
 
     func fetchQuota() async throws -> QuotaSnapshot {
-        guard let codexPath else {
-            throw RealQuotaError.codexNotFound
+        let candidates: [CodexExecutableResolver.Candidate]
+        do {
+            candidates = try executableResolver.resolve()
+        } catch let failure as CodexExecutableResolver.ResolutionFailure {
+            switch failure {
+            case .noCandidatesFound:
+                throw RealQuotaError.codexNotFound
+            case .candidatesNotRunnable:
+                throw RealQuotaError.codexNotExecutable
+            }
         }
-        let client = CodexRPCClient(codexPath: codexPath)
-        return try await client.fetchQuota(timeoutSeconds: timeoutSeconds)
+
+        var candidateFailure: RealQuotaError?
+        for candidate in candidates {
+            do {
+                AppLogger.codexRPC.info(
+                    "Trying codex candidate source=\(String(describing: candidate.source), privacy: .public) path=\(candidate.path, privacy: .private)"
+                )
+                return try await fetchQuotaFromExecutable(candidate.path, timeoutSeconds)
+            } catch let error as RealQuotaError where error.isExecutableCandidateFailure {
+                AppLogger.codexRPC.warning(
+                    "Rejected codex candidate source=\(String(describing: candidate.source), privacy: .public) reason=\(error.localizedDescription, privacy: .public)"
+                )
+                candidateFailure = preferredCandidateFailure(candidateFailure, error)
+            }
+        }
+
+        throw candidateFailure ?? RealQuotaError.codexNotFound
+    }
+
+    private func preferredCandidateFailure(
+        _ current: RealQuotaError?,
+        _ newFailure: RealQuotaError
+    ) -> RealQuotaError {
+        if current == .codexIncompatible || newFailure == .codexIncompatible {
+            return .codexIncompatible
+        }
+        return newFailure
     }
 
     // MARK: - Response Parsing (with field-level validation)
@@ -1366,45 +1519,15 @@ struct RealQuotaProvider: RealQuotaRefreshing {
         return Date(timeIntervalSince1970: seconds)
     }
 
-    // MARK: - Codex Path Resolution
+}
 
-    static func resolveCodexPath() -> String? {
-        if let envPath = ProcessInfo.processInfo.environment["CODEX_BIN"]
-            ?? ProcessInfo.processInfo.environment["CODEX_EXECUTABLE"],
-           isExecutable(envPath) {
-            AppLogger.codexRPC.info("Using codex from CODEX_BIN: \(envPath, privacy: .public)")
-            return envPath
+private extension RealQuotaError {
+    var isExecutableCandidateFailure: Bool {
+        switch self {
+        case .spawnFailed, .codexIncompatible:
+            return true
+        default:
+            return false
         }
-
-        let searchDirs = searchPaths()
-
-        for dir in searchDirs {
-            let candidate = dir.hasSuffix("codex") ? dir : (dir as NSString).appendingPathComponent("codex")
-            if isExecutable(candidate) {
-                AppLogger.codexRPC.info("Found codex at: \(candidate, privacy: .public)")
-                return candidate
-            }
-        }
-
-        AppLogger.codexRPC.error("Codex executable not found in any search path")
-        return nil
-    }
-
-    private static func searchPaths() -> [String] {
-        let envPath = ProcessInfo.processInfo.environment["PATH"] ?? ""
-        let pathDirs = envPath.components(separatedBy: ":")
-
-        let defaultPaths = [
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "/Applications/Codex.app/Contents/Resources",
-            "/Applications/Codex.app/Contents/MacOS"
-        ]
-
-        return pathDirs + defaultPaths
-    }
-
-    private static func isExecutable(_ path: String) -> Bool {
-        FileManager.default.isExecutableFile(atPath: path)
     }
 }
