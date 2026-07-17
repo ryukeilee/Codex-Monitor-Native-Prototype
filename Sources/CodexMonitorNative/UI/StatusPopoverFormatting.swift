@@ -693,7 +693,10 @@ enum StatusPopoverFormatting {
             snapshot: snapshot,
             creditItems: creditItems
         )
-        let detailLines = resetCreditDetailLines(snapshot: snapshot)
+        let detailLines = resetCreditDetailLines(
+            snapshot: snapshot,
+            hasDisplayableCreditItems: !creditItems.isEmpty
+        )
 
         return ResetCreditsSummary(
             countLine: countLine,
@@ -1056,7 +1059,10 @@ enum StatusPopoverFormatting {
         }
     }
 
-    private static func resetCreditDetailLines(snapshot: QuotaSnapshot) -> [String] {
+    private static func resetCreditDetailLines(
+        snapshot: QuotaSnapshot,
+        hasDisplayableCreditItems: Bool
+    ) -> [String] {
         var details: [String] = []
 
         switch snapshot.resetCreditDetailsState {
@@ -1064,7 +1070,13 @@ enum StatusPopoverFormatting {
             details.append("已加载重置次数详情")
         case .unavailable:
             if let diagnostic = snapshot.resetCreditDiagnostic?.summary {
-                details.append("详情失败：\(diagnostic)")
+                if hasDisplayableCreditItems {
+                    details.append("详情刷新失败，显示上次成功时间：\(diagnostic)")
+                } else {
+                    details.append("详情失败：\(diagnostic)")
+                }
+            } else if hasDisplayableCreditItems {
+                details.append("详情刷新失败，显示上次成功时间")
             } else {
                 details.append("详情暂不可用，当前仅显示 Codex 提供的次数")
             }
@@ -1096,7 +1108,7 @@ enum StatusPopoverFormatting {
     ) -> String? {
         switch snapshot.resetCreditDetailsState {
         case .unavailable:
-            return "到期时间暂不可用"
+            return creditItems.isEmpty ? "到期时间暂不可用" : nil
         case .appServerCountOnly:
             return "到期时间暂不可用"
         case .detailed:
@@ -1121,6 +1133,10 @@ enum StatusPopoverFormatting {
         }
 
         return snapshot.resetCreditDetails
+            .filter { detail in
+                snapshot.resetCreditDetailsState != .unavailable ||
+                detail.expiresAt.map { $0 > now } == true
+            }
             .sorted(by: compareResetCreditDetails)
             .map { detail in
             let expiryText: String
@@ -1140,7 +1156,10 @@ enum StatusPopoverFormatting {
                 countdownText = "暂不可用"
             }
 
-            let subtitleParts = ["剩余 \(countdownText)"]
+            var subtitleParts = ["剩余 \(countdownText)"]
+            if snapshot.resetCreditDetailsState == .unavailable {
+                subtitleParts.append("上次成功")
+            }
             var grantedText: String?
             if let grantedAt = detail.grantedAt {
                 grantedText = shortTimestamp(

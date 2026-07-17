@@ -49,7 +49,7 @@ struct WidgetPresentation: Equatable {
             visibleQuotaItems: selection.visibleItems,
             family: family,
             overflowCount: selection.overflowCount,
-            resetCreditFooterText: state.resetCreditFooterText
+            resetCreditFooterText: state.resetCreditFooterText(now: now)
         )
     }
 
@@ -101,8 +101,17 @@ struct WidgetPresentation: Equatable {
 
     private static func footerText(from line: String?) -> String? {
         guard let line else { return nil }
-        let prefix = "最早重置 "
-        return line.hasPrefix(prefix) ? String(line.dropFirst(prefix.count)) : line
+        let currentPrefix = "最早重置 "
+        if line.hasPrefix(currentPrefix) {
+            return String(line.dropFirst(currentPrefix.count))
+        }
+
+        let cachedPrefix = "上次重置 "
+        if line.hasPrefix(cachedPrefix) {
+            return "上次 \(line.dropFirst(cachedPrefix.count))"
+        }
+
+        return line
     }
 
     private init(

@@ -819,6 +819,76 @@ final class StatusPopoverFormattingTests: XCTestCase {
         XCTAssertEqual(summary?.detailLines, ["详情暂不可用，当前仅显示 Codex 提供的次数"])
     }
 
+    func testResetCreditsSummaryShowsCachedExpiryWhenDetailRefreshFails() {
+        let now = makeDate("2026-06-19T12:40:00Z")
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 52,
+            fiveHourQuotaPercent: 37,
+            resetAvailableCount: 1,
+            resetCreditDetailsState: .unavailable,
+            resetCreditDiagnostic: ResetCreditDiagnosticSnapshot(summary: "HTTP 状态码 503"),
+            resetCreditDetails: [
+                ResetCreditDetailSnapshot(
+                    ordinal: 1,
+                    status: "available",
+                    grantedAt: makeDate("2026-06-19T10:10:00Z"),
+                    expiresAt: makeDate("2026-06-19T13:10:00Z")
+                )
+            ],
+            refreshedAt: now,
+            dataSource: .real
+        )
+
+        let summary = StatusPopoverFormatting.resetCreditsSummary(
+            snapshot: snapshot,
+            status: .success,
+            now: now,
+            calendar: Calendar(identifier: .gregorian).setting(timeZone: TimeZone(secondsFromGMT: 0)!),
+            locale: Locale(identifier: "en_US"),
+            timeZone: TimeZone(secondsFromGMT: 0)!
+        )
+
+        XCTAssertNil(summary?.timingLine)
+        XCTAssertEqual(summary?.featuredCreditItem?.expiryText, "今天 13:10")
+        XCTAssertEqual(summary?.featuredCreditItem?.remainingText, "剩余 30分 · 上次成功")
+        XCTAssertEqual(
+            summary?.detailLines,
+            ["详情刷新失败，显示上次成功时间：HTTP 状态码 503"]
+        )
+    }
+
+    func testResetCreditsSummaryHidesCachedExpiryAfterItPasses() {
+        let now = makeDate("2026-06-19T13:11:00Z")
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 52,
+            fiveHourQuotaPercent: 37,
+            resetAvailableCount: 1,
+            resetCreditDetailsState: .unavailable,
+            resetCreditDiagnostic: ResetCreditDiagnosticSnapshot(summary: "HTTP 状态码 503"),
+            resetCreditDetails: [
+                ResetCreditDetailSnapshot(
+                    ordinal: 1,
+                    status: "available",
+                    grantedAt: nil,
+                    expiresAt: makeDate("2026-06-19T13:10:00Z")
+                )
+            ],
+            refreshedAt: makeDate("2026-06-19T12:40:00Z"),
+            dataSource: .real
+        )
+
+        let summary = StatusPopoverFormatting.resetCreditsSummary(
+            snapshot: snapshot,
+            status: .success,
+            now: now
+        )
+
+        XCTAssertEqual(summary?.timingLine, "到期时间暂不可用")
+        XCTAssertNil(summary?.featuredCreditItem)
+        XCTAssertTrue(summary?.additionalCreditItems.isEmpty ?? false)
+        XCTAssertEqual(summary?.detailLines, ["详情失败：HTTP 状态码 503"])
+    }
+
     func testResetCreditsSummaryShowsSanitizedFailureReasonWithoutSecrets() {
         let snapshot = QuotaSnapshot(
             weeklyQuotaPercent: 52,

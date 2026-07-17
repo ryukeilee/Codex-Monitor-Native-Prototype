@@ -31,12 +31,18 @@ struct QuotaRefreshService: QuotaRefreshing {
         // the last successful real snapshot.
         let realSnapshot = try await realProvider.fetchQuota()
         let mergedSnapshot = realSnapshot.mergingPartial(with: currentSnapshot)
-        let enrichedSnapshot = await enrichResetCreditsDetails(for: mergedSnapshot)
+        let enrichedSnapshot = await enrichResetCreditsDetails(
+            for: mergedSnapshot,
+            fallingBackTo: currentSnapshot
+        )
         AppLogger.refresh.info("Real quota fetch succeeded")
         return enrichedSnapshot
     }
 
-    private func enrichResetCreditsDetails(for snapshot: QuotaSnapshot) async -> QuotaSnapshot {
+    private func enrichResetCreditsDetails(
+        for snapshot: QuotaSnapshot,
+        fallingBackTo previousSnapshot: QuotaSnapshot
+    ) async -> QuotaSnapshot {
         do {
             let details = try await resetCreditsDetailProvider.fetchDetails()
             return QuotaSnapshot(
@@ -60,7 +66,14 @@ struct QuotaRefreshService: QuotaRefreshing {
                 quotaWindows: snapshot.quotaWindows
             )
         } catch {
-            AppLogger.refresh.warning("Reset credits detail fetch unavailable (\(sanitizedResetCreditsError(error), privacy: .public)); falling back to app-server count only")
+            let reusableDetails = reusableResetCreditDetails(
+                from: previousSnapshot,
+                for: snapshot
+            )
+            let fallbackDescription = reusableDetails.isEmpty
+                ? "app-server count only"
+                : "app-server count with previous unexpired detail times"
+            AppLogger.refresh.warning("Reset credits detail fetch unavailable (\(sanitizedResetCreditsError(error), privacy: .public)); using \(fallbackDescription, privacy: .public)")
             return QuotaSnapshot(
                 weeklyQuotaPercent: snapshot.weeklyQuotaPercent,
                 fiveHourQuotaPercent: snapshot.fiveHourQuotaPercent,
@@ -69,8 +82,10 @@ struct QuotaRefreshService: QuotaRefreshing {
                 resetAvailableCount: snapshot.resetAvailableCount,
                 resetCreditDetailsState: .unavailable,
                 resetCreditDiagnostic: ResetCreditDiagnosticSnapshot(summary: sanitizedResetCreditsError(error)),
-                resetCreditDetails: [],
-                resetCreditStatusSummary: [],
+                resetCreditDetails: reusableDetails,
+                resetCreditStatusSummary: reusableDetails.isEmpty
+                    ? []
+                    : [ResetCreditStatusSummary(status: "available", count: reusableDetails.count)],
                 resetCreditTimeEntries: [],
                 resetCreditRawFields: [],
                 fiveHourResetAt: snapshot.fiveHourResetAt,
@@ -81,6 +96,23 @@ struct QuotaRefreshService: QuotaRefreshing {
                 schemaVersion: snapshot.schemaVersion,
                 quotaWindows: snapshot.quotaWindows
             )
+        }
+    }
+
+    private func reusableResetCreditDetails(
+        from previousSnapshot: QuotaSnapshot,
+        for refreshedSnapshot: QuotaSnapshot
+    ) -> [ResetCreditDetailSnapshot] {
+        guard previousSnapshot.dataSource == .real,
+              let refreshedCount = refreshedSnapshot.resetAvailableCount,
+              refreshedCount > 0,
+              previousSnapshot.resetAvailableCount == refreshedCount else {
+            return []
+        }
+
+        return previousSnapshot.resetCreditDetails.filter { detail in
+            detail.status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "available" &&
+            detail.expiresAt.map { $0 > refreshedSnapshot.refreshedAt } == true
         }
     }
 

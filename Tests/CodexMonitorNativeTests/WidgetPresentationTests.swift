@@ -106,6 +106,46 @@ final class WidgetPresentationTests: XCTestCase {
         XCTAssertEqual(cached.primaryQuota?.caption, "（历史缓存）")
     }
 
+    func testPresentationMarksCachedResetCreditFooterAndHidesItAfterExpiry() {
+        let now = Date(timeIntervalSince1970: 1_720_000_000)
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 71,
+            fiveHourQuotaPercent: 64,
+            resetAvailableCount: 1,
+            resetCreditDetailsState: .unavailable,
+            resetCreditDiagnostic: ResetCreditDiagnosticSnapshot(summary: "HTTP 状态码 503"),
+            resetCreditDetails: [
+                ResetCreditDetailSnapshot(
+                    ordinal: 1,
+                    status: "available",
+                    grantedAt: now.addingTimeInterval(-1_000),
+                    expiresAt: now.addingTimeInterval(60 * 60)
+                )
+            ],
+            refreshedAt: now,
+            dataSource: .real
+        )
+        let state = WidgetDisplayState.make(
+            snapshot: snapshot,
+            status: .success,
+            lastSuccessAt: now,
+            lastAttemptAt: now,
+            effectiveFiveHourResetAt: nil,
+            savedAt: now
+        )
+
+        let active = WidgetPresentation(state: state, family: .small, now: now)
+        let expired = WidgetPresentation(
+            state: state,
+            family: .small,
+            now: now.addingTimeInterval(60 * 60 + 1)
+        )
+
+        XCTAssertTrue(state.resetCreditFooterLine?.hasPrefix("上次重置 ") ?? false)
+        XCTAssertTrue(active.footerText?.hasPrefix("上次 ") ?? false)
+        XCTAssertNil(expired.footerText)
+    }
+
     private func quota(
         id: String,
         label: String,

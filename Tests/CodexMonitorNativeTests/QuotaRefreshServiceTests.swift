@@ -75,6 +75,101 @@ final class QuotaRefreshServiceTests: XCTestCase {
         XCTAssertTrue(refreshed.resetCreditStatusSummary.isEmpty)
     }
 
+    func testRefreshKeepsMatchingUnexpiredResetCreditTimesWhenDetailRefreshFails() async throws {
+        let earlyExpiry = makeDate("2026-06-19T18:00:00Z")
+        let lateExpiry = makeDate("2026-06-20T12:00:00Z")
+        let previous = QuotaSnapshot(
+            weeklyQuotaPercent: 70,
+            fiveHourQuotaPercent: 64,
+            resetAvailableCount: 2,
+            resetCreditDetailsState: .detailed,
+            resetCreditDetails: [
+                ResetCreditDetailSnapshot(
+                    ordinal: 1,
+                    status: "available",
+                    grantedAt: makeDate("2026-06-19T10:00:00Z"),
+                    expiresAt: earlyExpiry
+                ),
+                ResetCreditDetailSnapshot(
+                    ordinal: 2,
+                    status: "available",
+                    grantedAt: makeDate("2026-06-19T12:00:00Z"),
+                    expiresAt: lateExpiry
+                )
+            ],
+            resetCreditStatusSummary: [ResetCreditStatusSummary(status: "available", count: 2)],
+            refreshedAt: makeDate("2026-06-19T12:40:00Z"),
+            dataSource: .real
+        )
+        let appServerSnapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 69,
+            fiveHourQuotaPercent: 63,
+            resetAvailableCount: 2,
+            resetCreditDetailsState: .appServerCountOnly,
+            refreshedAt: makeDate("2026-06-19T12:45:00Z"),
+            dataSource: .real
+        )
+        let service = QuotaRefreshService(
+            realProvider: StubRealQuotaProvider(snapshot: appServerSnapshot),
+            resetCreditsDetailProvider: FailingResetCreditsProvider(),
+            mockProvider: MockQuotaProvider()
+        )
+
+        let refreshed = try await service.refresh(basedOn: previous)
+
+        XCTAssertEqual(refreshed.resetAvailableCount, 2)
+        XCTAssertEqual(refreshed.resetCreditDetailsState, .unavailable)
+        XCTAssertEqual(refreshed.resetCreditDiagnostic?.summary, "HTTP 状态码 503")
+        XCTAssertEqual(refreshed.resetCreditDetails.compactMap(\.expiresAt), [earlyExpiry, lateExpiry])
+        XCTAssertEqual(
+            refreshed.resetCreditStatusSummary,
+            [ResetCreditStatusSummary(status: "available", count: 2)]
+        )
+
+        let refreshedAgain = try await service.refresh(basedOn: refreshed)
+
+        XCTAssertEqual(refreshedAgain.resetCreditDetails.compactMap(\.expiresAt), [earlyExpiry, lateExpiry])
+        XCTAssertEqual(refreshedAgain.resetCreditDetailsState, .unavailable)
+    }
+
+    func testRefreshDropsCachedResetCreditTimesWhenAvailableCountChanges() async throws {
+        let previous = QuotaSnapshot(
+            weeklyQuotaPercent: 70,
+            fiveHourQuotaPercent: 64,
+            resetAvailableCount: 2,
+            resetCreditDetailsState: .detailed,
+            resetCreditDetails: [
+                ResetCreditDetailSnapshot(
+                    ordinal: 1,
+                    status: "available",
+                    grantedAt: nil,
+                    expiresAt: makeDate("2026-06-19T18:00:00Z")
+                )
+            ],
+            refreshedAt: makeDate("2026-06-19T12:40:00Z"),
+            dataSource: .real
+        )
+        let appServerSnapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 69,
+            fiveHourQuotaPercent: 63,
+            resetAvailableCount: 1,
+            resetCreditDetailsState: .appServerCountOnly,
+            refreshedAt: makeDate("2026-06-19T12:45:00Z"),
+            dataSource: .real
+        )
+        let service = QuotaRefreshService(
+            realProvider: StubRealQuotaProvider(snapshot: appServerSnapshot),
+            resetCreditsDetailProvider: FailingResetCreditsProvider(),
+            mockProvider: MockQuotaProvider()
+        )
+
+        let refreshed = try await service.refresh(basedOn: previous)
+
+        XCTAssertEqual(refreshed.resetAvailableCount, 1)
+        XCTAssertTrue(refreshed.resetCreditDetails.isEmpty)
+        XCTAssertTrue(refreshed.resetCreditStatusSummary.isEmpty)
+    }
+
     func testRefreshMergesPartialRPCFieldsWithCurrentRealSnapshot() async throws {
         let current = QuotaSnapshot(
             weeklyQuotaPercent: 70,

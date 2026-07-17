@@ -232,6 +232,28 @@ struct WidgetDisplayState: Codable, Equatable {
         resetCreditFooterLine ?? earliestResetCreditLine()
     }
 
+    func resetCreditFooterText(
+        now: Date,
+        locale: Locale = .autoupdatingCurrent,
+        timeZone: TimeZone = .autoupdatingCurrent
+    ) -> String? {
+        let earliestExpiry = snapshot.resetCreditDetails
+            .filter { normalizedResetCreditStatus($0.status) == "available" }
+            .compactMap(\.expiresAt)
+            .filter { snapshot.resetCreditDetailsState != .unavailable || $0 > now }
+            .min()
+
+        guard let earliestExpiry else {
+            return nil
+        }
+
+        return resetCreditLine(
+            expiresAt: earliestExpiry,
+            locale: locale,
+            timeZone: timeZone
+        )
+    }
+
     func earliestResetCreditLine(
         locale: Locale = .autoupdatingCurrent,
         timeZone: TimeZone = .autoupdatingCurrent
@@ -240,11 +262,24 @@ struct WidgetDisplayState: Codable, Equatable {
             return nil
         }
 
+        return resetCreditLine(
+            expiresAt: earliestResetCreditExpiresAt,
+            locale: locale,
+            timeZone: timeZone
+        )
+    }
+
+    private func resetCreditLine(
+        expiresAt: Date,
+        locale: Locale,
+        timeZone: TimeZone
+    ) -> String {
         let formatter = DateFormatter()
         formatter.locale = locale
         formatter.timeZone = timeZone
         formatter.dateFormat = "M/d HH:mm"
-        return "最早重置 \(formatter.string(from: earliestResetCreditExpiresAt))"
+        let prefix = snapshot.resetCreditDetailsState == .unavailable ? "上次重置" : "最早重置"
+        return "\(prefix) \(formatter.string(from: expiresAt))"
     }
 
     private static func makeResetCreditFooterLine(for snapshot: QuotaSnapshot) -> String? {
@@ -261,7 +296,8 @@ struct WidgetDisplayState: Codable, Equatable {
         formatter.locale = .autoupdatingCurrent
         formatter.timeZone = .autoupdatingCurrent
         formatter.dateFormat = "M/d HH:mm"
-        return "最早重置 \(formatter.string(from: earliestExpiry))"
+        let prefix = snapshot.resetCreditDetailsState == .unavailable ? "上次重置" : "最早重置"
+        return "\(prefix) \(formatter.string(from: earliestExpiry))"
     }
 
     func isEquivalent(to other: WidgetDisplayState) -> Bool {
