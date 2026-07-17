@@ -305,10 +305,14 @@ enum StatusPopoverFormatting {
             return "--"
         }
 
-        let remaining = Int(date.timeIntervalSince(now).rounded())
-        if remaining <= 0 {
+        let interval = date.timeIntervalSince(now)
+        if interval <= 0 {
             return "已恢复"
         }
+
+        // Keep the strict boundary (`now < deadline`) authoritative. Rounding
+        // to nearest used to report recovery up to half a second early.
+        let remaining = Int(ceil(interval))
 
         let hours = remaining / 3600
         let minutes = (remaining % 3600) / 60
@@ -523,10 +527,15 @@ enum StatusPopoverFormatting {
 
     static func weeklyQuotaMenuTitle(
         snapshot: QuotaSnapshot,
-        status: QuotaRefreshStatus
+        status: QuotaRefreshStatus,
+        now: Date = .now
     ) -> String {
         guard snapshot.dataSource == .real else { return "--%" }
-        let weeklyItem = quotaWindowDisplayItems(snapshot: snapshot, status: status)
+        let weeklyItem = quotaWindowDisplayItems(
+            snapshot: snapshot,
+            status: status,
+            now: now
+        )
             .first { $0.kind == .weekly && $0.trustedPercent != nil }
         return weeklyItem?.percentText ?? "--%"
     }
@@ -771,9 +780,13 @@ enum StatusPopoverFormatting {
         locale: Locale,
         timeZone: TimeZone
     ) -> QuotaWindowDisplayItem {
-        let isTrusted = showsQuotaValues(for: status)
+        let hasDisplayTrust = showsQuotaValues(for: status)
             && dataSource == .real
             && window.state.isDisplayable
+        let isBeforeReset = window.resetAt.map {
+            QuotaTemporalSemantics.isPending(deadline: $0, at: now)
+        } ?? true
+        let isTrusted = hasDisplayTrust && isBeforeReset
         let trustedPercent = isTrusted ? window.remainingPercent : nil
         let percentText: String
         if let trustedPercent {
@@ -784,7 +797,7 @@ enum StatusPopoverFormatting {
 
         let resetText: String
         let resetRemainingText: String
-        if isTrusted, let resetAt = window.resetAt {
+        if hasDisplayTrust, let resetAt = window.resetAt {
             resetText = shortTimestamp(
                 for: resetAt,
                 now: now,
@@ -793,7 +806,7 @@ enum StatusPopoverFormatting {
                 timeZone: timeZone
             )
             resetRemainingText = relativeRecoveryLine(for: resetAt, now: now)
-        } else if isTrusted {
+        } else if hasDisplayTrust {
             resetText = "未暴露"
             resetRemainingText = "未暴露"
         } else {
@@ -814,7 +827,8 @@ enum StatusPopoverFormatting {
             stateText: quotaWindowStateText(
                 state: window.state,
                 dataSource: dataSource,
-                status: status
+                status: status,
+                hasReachedReset: hasDisplayTrust && !isBeforeReset
             ),
             resetAt: window.resetAt,
             resetText: resetText,
@@ -826,7 +840,8 @@ enum StatusPopoverFormatting {
     private static func quotaWindowStateText(
         state: QuotaFieldState,
         dataSource: QuotaDataSource,
-        status: QuotaRefreshStatus
+        status: QuotaRefreshStatus,
+        hasReachedReset: Bool
     ) -> String {
         if status == .demoMode || dataSource != .real {
             return status == .demoMode ? "演示" : "不可用"
@@ -834,6 +849,10 @@ enum StatusPopoverFormatting {
 
         guard showsQuotaValues(for: status) else {
             return "等待同步"
+        }
+
+        if hasReachedReset {
+            return "已恢复，待刷新"
         }
 
         switch state {
@@ -1133,10 +1152,7 @@ enum StatusPopoverFormatting {
         }
 
         return snapshot.resetCreditDetails
-            .filter { detail in
-                snapshot.resetCreditDetailsState != .unavailable ||
-                detail.expiresAt.map { $0 > now } == true
-            }
+            .filter { QuotaTemporalSemantics.isAvailableResetCredit($0, at: now) }
             .sorted(by: compareResetCreditDetails)
             .map { detail in
             let expiryText: String

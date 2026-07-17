@@ -1,8 +1,14 @@
 import Foundation
 
 struct AppStateEvent: Equatable {
+    enum UpdateReason: Equatable {
+        case stateChange
+        case temporalReconciliation
+    }
+
     let persistedState: PersistedAppState
     let presentationSnapshot: QuotaPresentationSnapshot
+    let updateReason: UpdateReason
 
     init(
         snapshot: QuotaSnapshot,
@@ -11,7 +17,8 @@ struct AppStateEvent: Equatable {
         lastAttemptAt: Date?,
         failureCount: Int,
         effectiveFiveHourResetAt: Date?,
-        savedAt: Date = .now
+        savedAt: Date = .now,
+        updateReason: UpdateReason = .stateChange
     ) {
         let persistedState = PersistedAppState(
             snapshot: snapshot,
@@ -30,6 +37,7 @@ struct AppStateEvent: Equatable {
             effectiveFiveHourResetAt: effectiveFiveHourResetAt,
             savedAt: savedAt
         )
+        self.updateReason = updateReason
     }
 
     static let placeholder = AppStateEvent(
@@ -48,6 +56,8 @@ final class AppState: ObservableObject {
         case manual
         case scheduled
         case wake
+        case temporalBoundary
+        case systemClockChange
     }
 
     // MARK: - Published state
@@ -85,6 +95,8 @@ final class AppState: ObservableObject {
     private var consecutiveFailures: Int = 0
     private let defaultInterval: TimeInterval = 300
     private let staleAfterInterval: TimeInterval
+    private let now: () -> Date
+    private let sleep: @Sendable (UInt64) async throws -> Void
     private let taskResources = AppStateTaskResources()
     private var activeRefresh: ActiveRefresh?
     private var pendingRefresh: PendingRefresh?
@@ -93,14 +105,11 @@ final class AppState: ObservableObject {
     var isRefreshing: Bool { status == .refreshing }
     var isUsingCachedSnapshot: Bool { realQuotaHealth.isUsingCachedSnapshot }
     var hasScheduledFreshnessTask: Bool { taskResources.freshnessTask != nil }
+    var hasScheduledTemporalTask: Bool { taskResources.freshnessTask != nil }
     var hasManagedRefreshTask: Bool { taskResources.refreshTask != nil }
 
     var isDataStale: Bool {
-        guard snapshot.dataSource == .real, let lastSuccessAt else {
-            return false
-        }
-
-        return Date.now.timeIntervalSince(lastSuccessAt) >= staleAfterInterval
+        isDataStale(at: now())
     }
 
     // MARK: - Init
@@ -108,10 +117,16 @@ final class AppState: ObservableObject {
     init<T: QuotaRefreshing>(
         snapshotStore: SnapshotStore,
         refreshService: T,
-        staleAfterInterval: TimeInterval = 20 * 60
+        staleAfterInterval: TimeInterval = QuotaTemporalSemantics.defaultStaleAfterInterval,
+        now: @escaping () -> Date = { .now },
+        sleep: @escaping @Sendable (UInt64) async throws -> Void = { nanoseconds in
+            try await Task.sleep(nanoseconds: nanoseconds)
+        }
     ) {
         self.snapshotStore = snapshotStore
         self.staleAfterInterval = staleAfterInterval
+        self.now = now
+        self.sleep = sleep
         self.refreshAction = { snapshot in
             try await refreshService.refresh(basedOn: snapshot)
         }
@@ -129,7 +144,9 @@ final class AppState: ObservableObject {
                 latestRealSnapshot = stored
                 status = normalizedRestoredStatus(
                     persistedStatus: persistedState.status,
-                    snapshot: stored
+                    snapshot: stored,
+                    lastSuccessAt: lastSuccessAt,
+                    referenceDate: now()
                 )
                 realQuotaHealth = RealQuotaHealthDiagnostic(
                     kind: .waitingForFirstRequest,
@@ -139,7 +156,9 @@ final class AppState: ObservableObject {
             } else {
                 status = normalizedRestoredStatus(
                     persistedStatus: persistedState.status,
-                    snapshot: stored
+                    snapshot: stored,
+                    lastSuccessAt: lastSuccessAt,
+                    referenceDate: now()
                 )
                 realQuotaHealth = RealQuotaHealthDiagnostic(
                     kind: .waitingForFirstRequest,
@@ -157,10 +176,9 @@ final class AppState: ObservableObject {
             AppLogger.snapshot.info("No persisted snapshot; starting in not-connected state")
         }
 
-        commitState()
-        if status == .success {
-            scheduleFreshnessCheck()
-        }
+        let referenceDate = now()
+        commitState(at: referenceDate)
+        scheduleTemporalCheck(referenceDate: referenceDate)
     }
 
     deinit {
@@ -175,7 +193,7 @@ final class AppState: ObservableObject {
     }
 
     var displayStatus: QuotaRefreshStatus {
-        resolvedDisplayStatus(for: status)
+        resolvedDisplayStatus(for: status, at: now())
     }
 
     var formattedLastAttempt: String? {
@@ -296,13 +314,14 @@ final class AppState: ObservableObject {
         if let real = latestRealSnapshot {
             snapshot = real
         }
-        status = resolvedDisplayStatus(for: lastSettledStatus)
+        let referenceDate = now()
+        status = resolvedDisplayStatus(for: lastSettledStatus, at: referenceDate)
         realQuotaHealth = RealQuotaHealthDiagnostic(
             kind: .waitingForFirstRequest,
             isUsingCachedSnapshot: latestRealSnapshot != nil
         )
         lastErrorSummary = nil
-        commitState()
+        commitState(at: referenceDate)
     }
 
     private func markQueuedRefresh() {
@@ -312,7 +331,7 @@ final class AppState: ObservableObject {
     private func beginRefresh(trigger: RefreshTrigger) -> QuotaSnapshot {
         let triggerName = triggerName(for: trigger)
         let baselineSnapshot = latestRealSnapshot ?? snapshot
-        enterRefreshingState(attemptedAt: .now)
+        enterRefreshingState(attemptedAt: now())
         AppLogger.refresh.info("Starting \(triggerName, privacy: .public) refresh (baseline source=\(baselineSnapshot.dataSource.rawValue, privacy: .public))")
         return baselineSnapshot
     }
@@ -367,14 +386,16 @@ final class AppState: ObservableObject {
     }
 
     private func applyRefreshResult(_ result: Result<QuotaSnapshot, Error>) {
+        let referenceDate = now()
         switch result {
         case .success(let refreshed):
             if refreshed.dataSource == .real {
                 if let latestRealSnapshot, refreshed.refreshedAt < latestRealSnapshot.refreshedAt {
                     snapshot = latestRealSnapshot
-                    status = latestRealSnapshot.isFresh(referenceDate: .now, staleAfterInterval: staleAfterInterval) ? .success : .stale
+                    status = isDataStale(at: referenceDate) ? .stale : .success
                     realQuotaHealth = RealQuotaHealthDiagnostic(kind: .requestSucceeded, isUsingCachedSnapshot: true)
-                    commitState()
+                    commitState(at: referenceDate)
+                    scheduleTemporalCheck(referenceDate: referenceDate)
                     AppLogger.refresh.error("Ignored out-of-order real refresh refreshedAt=\(refreshed.refreshedAt.timeIntervalSince1970, format: .fixed(precision: 0)) olderThan=\(latestRealSnapshot.refreshedAt.timeIntervalSince1970, format: .fixed(precision: 0))")
                     return
                 }
@@ -387,27 +408,26 @@ final class AppState: ObservableObject {
                 status = .success
                 realQuotaHealth = RealQuotaHealthDiagnostic(kind: .requestSucceeded, isUsingCachedSnapshot: false)
                 setBackoffInterval(defaultInterval)
-                commitState()
-                scheduleFreshnessCheck()
+                commitState(at: referenceDate)
+                scheduleTemporalCheck(referenceDate: referenceDate)
                 AppLogger.refresh.info("Real refresh succeeded: weekly=\(refreshed.weeklyQuotaPercent)% fiveHour=\(refreshed.fiveHourQuotaPercent)%")
             } else if let latestRealSnapshot {
                 snapshot = latestRealSnapshot
-                status = resolvedDisplayStatus(for: lastSettledStatus)
+                status = resolvedDisplayStatus(for: lastSettledStatus, at: referenceDate)
                 realQuotaHealth = RealQuotaHealthDiagnostic(
                     kind: .waitingForFirstRequest,
                     isUsingCachedSnapshot: true
                 )
-                commitState()
-                if status == .success {
-                    scheduleFreshnessCheck()
-                }
+                commitState(at: referenceDate)
+                scheduleTemporalCheck(referenceDate: referenceDate)
                 AppLogger.refresh.info("Ignored mock refresh because a real snapshot is already cached")
             } else {
                 snapshot = refreshed
                 status = .demoMode
                 lastErrorSummary = nil
                 realQuotaHealth = RealQuotaHealthDiagnostic(kind: .waitingForFirstRequest, isUsingCachedSnapshot: false)
-                commitState()
+                commitState(at: referenceDate)
+                scheduleTemporalCheck(referenceDate: referenceDate)
                 AppLogger.refresh.info("Mock refresh succeeded")
             }
         case .failure(let error):
@@ -416,11 +436,11 @@ final class AppState: ObservableObject {
             let classifiedStatus = classifyError(error)
             lastErrorSummary = safeErrorMessage(from: error)
             status = classifiedStatus
-            taskResources.cancelFreshnessTask()
             realQuotaHealth = healthDiagnostic(for: error)
             if let real = latestRealSnapshot { snapshot = real }
             setBackoffInterval(backoffFor(consecutiveFailures: consecutiveFailures))
-            commitState()
+            commitState(at: referenceDate)
+            scheduleTemporalCheck(referenceDate: referenceDate)
             AppLogger.refresh.error("Refresh failed (consecutive=\(self.consecutiveFailures)) status=\(classifiedStatus.rawValue, privacy: .public) backoff=\(self.backoffInterval)s")
         }
     }
@@ -559,48 +579,112 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func scheduleFreshnessCheck() {
+    /// Re-evaluates wall-clock projections after clock, time-zone, locale, or
+    /// calendar changes. Typed refresh failures remain authoritative; only a
+    /// successful state can transition to stale here.
+    func reconcileTemporalState() {
+        let referenceDate = now()
+        if status == .success, isDataStale(at: referenceDate) {
+            status = .stale
+            lastErrorSummary = nil
+        }
+        commitState(reason: .temporalReconciliation, at: referenceDate)
+        scheduleTemporalCheck(referenceDate: referenceDate)
+    }
+
+    private func scheduleTemporalCheck(referenceDate: Date) {
         taskResources.cancelFreshnessTask()
 
-        guard snapshot.dataSource == .real, let lastSuccessAt else {
+        guard snapshot.dataSource == .real,
+              let schedule = temporalSchedule(after: referenceDate) else {
             return
         }
 
-        let elapsed = Date.now.timeIntervalSince(lastSuccessAt)
-        let remaining = staleAfterInterval - elapsed
-
-        if remaining <= 0 {
-            if status == .success {
-                status = .stale
-                commitState()
-            }
-            return
-        }
-
+        let delay = schedule.fireAt.timeIntervalSince(referenceDate)
+        let nanoseconds = Self.nanoseconds(for: delay)
+        let sleep = self.sleep
         let generation = taskResources.nextFreshnessGeneration()
-        taskResources.freshnessTask = Task { [weak self] in
-            let delay = UInt64(remaining * 1_000_000_000)
+        taskResources.freshnessTask = Task { @MainActor [weak self] in
             do {
-                try await Task.sleep(nanoseconds: delay)
+                try await sleep(nanoseconds)
             } catch {
                 return
             }
 
-            await MainActor.run {
-                guard let self, self.taskResources.isCurrentFreshnessTask(generation) else { return }
-                defer { self.taskResources.clearFreshnessTask(for: generation) }
-                guard self.status == .success, self.isDataStale else { return }
-
-                self.status = .stale
-                self.lastErrorSummary = nil
-                self.commitState()
-                AppLogger.refresh.info("Marked data stale after \(self.staleAfterInterval, format: .fixed(precision: 0)) seconds without a successful refresh")
+            guard let self,
+                  self.taskResources.isCurrentFreshnessTask(generation) else {
+                return
             }
+            self.taskResources.clearFreshnessTask(for: generation)
+            self.handleTemporalSchedule(schedule)
         }
     }
 
-    private func commitState() {
-        let resolvedStatus = resolvedDisplayStatus(for: status)
+    private func temporalSchedule(after referenceDate: Date) -> TemporalSchedule? {
+        let transitions = QuotaTemporalSemantics.upcomingTransitions(
+            snapshot: snapshot,
+            status: status,
+            lastSuccessAt: lastSuccessAt,
+            now: referenceDate,
+            staleAfterInterval: staleAfterInterval
+        )
+        guard let fireAt = transitions.first?.date else {
+            return nil
+        }
+
+        return TemporalSchedule(
+            fireAt: fireAt,
+            refreshDeadlines: transitions
+                .filter(\.requiresRefresh)
+                .map(\.date)
+        )
+    }
+
+    private func handleTemporalSchedule(_ schedule: TemporalSchedule) {
+        let referenceDate = now()
+
+        if status == .success, isDataStale(at: referenceDate) {
+            status = .stale
+            lastErrorSummary = nil
+            AppLogger.refresh.info("Marked data stale after \(self.staleAfterInterval, format: .fixed(precision: 0)) seconds without a successful refresh")
+        }
+
+        // Task.sleep is monotonic; the wall clock may have moved in either
+        // direction while it was suspended. Publish current projections and
+        // always derive the next task from the new wall-clock value.
+        commitState(reason: .temporalReconciliation, at: referenceDate)
+        scheduleTemporalCheck(referenceDate: referenceDate)
+
+        let crossedRefreshBoundary = schedule.refreshDeadlines.contains {
+            !QuotaTemporalSemantics.isPending(deadline: $0, at: referenceDate)
+        }
+        if crossedRefreshBoundary {
+            refresh(trigger: .temporalBoundary)
+        }
+    }
+
+    static func nanoseconds(for delay: TimeInterval) -> UInt64 {
+        guard delay > 0 else { return 1 }
+
+        // Keep the conversion strictly below UInt64's floating-point rounding
+        // edge. `Double(UInt64.max)` rounds to 2^64 and traps when converted
+        // back to UInt64.
+        let maximumWholeSeconds = UInt64.max / 1_000_000_000
+        let maximumNanoseconds = maximumWholeSeconds * 1_000_000_000
+        guard delay.isFinite,
+              delay < Double(maximumWholeSeconds) else {
+            return maximumNanoseconds
+        }
+
+        return max(1, UInt64((delay * 1_000_000_000).rounded(.down)))
+    }
+
+    private func commitState(
+        reason: AppStateEvent.UpdateReason = .stateChange,
+        at referenceDate: Date? = nil
+    ) {
+        let referenceDate = referenceDate ?? now()
+        let resolvedStatus = resolvedDisplayStatus(for: status, at: referenceDate)
         if resolvedStatus != status {
             status = resolvedStatus
         }
@@ -613,7 +697,9 @@ final class AppState: ObservableObject {
             lastSuccessAt: lastSuccessAt,
             lastAttemptAt: lastAttemptAt,
             failureCount: failureCount,
-            effectiveFiveHourResetAt: effectiveFiveHourResetAt
+            effectiveFiveHourResetAt: effectiveFiveHourResetAt,
+            savedAt: referenceDate,
+            updateReason: reason
         )
         snapshotStore.saveState(event.persistedState)
         stateEvent = event
@@ -624,16 +710,20 @@ final class AppState: ObservableObject {
         if let attemptedAt {
             lastAttemptAt = attemptedAt
         }
-        taskResources.cancelFreshnessTask()
         realQuotaHealth = RealQuotaHealthDiagnostic(
             kind: .requestInProgress,
             isUsingCachedSnapshot: latestRealSnapshot != nil
         )
-        commitState()
+        let referenceDate = now()
+        commitState(at: referenceDate)
+        scheduleTemporalCheck(referenceDate: referenceDate)
     }
 
-    private func resolvedDisplayStatus(for status: QuotaRefreshStatus) -> QuotaRefreshStatus {
-        if status == .success, isDataStale {
+    private func resolvedDisplayStatus(
+        for status: QuotaRefreshStatus,
+        at referenceDate: Date
+    ) -> QuotaRefreshStatus {
+        if status == .success, isDataStale(at: referenceDate) {
             return .stale
         }
 
@@ -642,14 +732,21 @@ final class AppState: ObservableObject {
 
     private func normalizedRestoredStatus(
         persistedStatus: QuotaRefreshStatus,
-        snapshot: QuotaSnapshot
+        snapshot: QuotaSnapshot,
+        lastSuccessAt: Date?,
+        referenceDate: Date
     ) -> QuotaRefreshStatus {
         if snapshot.dataSource == .real {
             switch persistedStatus {
             case .networkFailed, .authRequired, .parseFailed:
                 return persistedStatus
             case .idle, .refreshing, .success, .stale, .noSnapshot, .demoMode:
-                return snapshot.isFresh(referenceDate: .now, staleAfterInterval: staleAfterInterval) ? .success : .stale
+                guard let lastSuccessAt else { return .stale }
+                return QuotaTemporalSemantics.freshness(
+                    lastSuccessAt: lastSuccessAt,
+                    now: referenceDate,
+                    staleAfterInterval: staleAfterInterval
+                ).isFresh ? .success : .stale
             }
         }
 
@@ -668,9 +765,28 @@ final class AppState: ObservableObject {
         case .manual: return "manual"
         case .scheduled: return "scheduled"
         case .wake: return "wake"
+        case .temporalBoundary: return "temporal-boundary"
+        case .systemClockChange: return "system-clock-change"
         }
     }
 
+    private func isDataStale(at referenceDate: Date) -> Bool {
+        guard snapshot.dataSource == .real, let lastSuccessAt else {
+            return false
+        }
+
+        return !QuotaTemporalSemantics.freshness(
+            lastSuccessAt: lastSuccessAt,
+            now: referenceDate,
+            staleAfterInterval: staleAfterInterval
+        ).isFresh
+    }
+
+}
+
+private struct TemporalSchedule {
+    let fireAt: Date
+    let refreshDeadlines: [Date]
 }
 
 private final class AppStateTaskResources {
@@ -722,11 +838,5 @@ private struct PendingRefresh {
     mutating func resumeWaiters() {
         waiters.forEach { $0.resume() }
         waiters.removeAll()
-    }
-}
-
-private extension QuotaSnapshot {
-    func isFresh(referenceDate: Date, staleAfterInterval: TimeInterval) -> Bool {
-        referenceDate.timeIntervalSince(refreshedAt) < staleAfterInterval
     }
 }

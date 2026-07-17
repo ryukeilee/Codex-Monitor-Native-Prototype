@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var popoverController: PopoverController?
     private var refreshScheduler: RefreshScheduler?
     private var sleepWakeObserver: SleepWakeObserver?
+    private var systemClockObserver: SystemClockObserver?
     private var widgetTimelineBridge: WidgetTimelineBridge?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -50,6 +51,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         observer.start()
 
+        // Wall-clock and presentation-environment changes can invalidate an
+        // already scheduled deadline. Reconcile immediately; only a true
+        // clock adjustment needs a new server request.
+        let clockObserver = SystemClockObserver { [weak state] changes in
+            state?.reconcileTemporalState()
+            if changes.contains(.clock) {
+                state?.refresh(trigger: .systemClockChange)
+            }
+        }
+        clockObserver.start()
+
         // Initial refresh after a short delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak state] in
             state?.refresh(trigger: .manual)
@@ -61,6 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.statusBarController = statusBarController
         self.refreshScheduler = scheduler
         self.sleepWakeObserver = observer
+        self.systemClockObserver = clockObserver
         self.widgetTimelineBridge = widgetTimelineBridge
     }
 
@@ -68,6 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AppLogger.lifecycle.info("Application will terminate")
         refreshScheduler?.stop()
         sleepWakeObserver?.stop()
+        systemClockObserver?.stop()
         appState?.shutdown()
     }
 

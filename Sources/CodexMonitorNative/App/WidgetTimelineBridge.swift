@@ -21,20 +21,25 @@ final class WidgetTimelineBridge {
 
         appState.$stateEvent
             .sink { [weak self] stateEvent in
-                self?.propagate(stateEvent.presentationSnapshot)
+                self?.propagate(stateEvent)
             }
             .store(in: &cancellables)
     }
 
-    private func propagate(_ state: QuotaPresentationSnapshot) {
-        guard lastPropagatedState?.isEquivalent(to: state) != true else {
-            return
+    private func propagate(_ event: AppStateEvent) {
+        let state = event.presentationSnapshot
+        let stateChanged = lastPropagatedState?.isEquivalent(to: state) != true
+
+        if stateChanged {
+            saveState(state)
+            lastPropagatedState = state
         }
 
-        saveState(state)
-        lastPropagatedState = state
-
-        guard state.status != .refreshing else {
+        let requiresTemporalReload = event.updateReason == .temporalReconciliation
+        guard stateChanged || requiresTemporalReload else {
+            return
+        }
+        guard state.status != .refreshing || requiresTemporalReload else {
             return
         }
 

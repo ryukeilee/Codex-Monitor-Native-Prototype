@@ -798,11 +798,230 @@ final class AppStateTests: XCTestCase {
         let store = SnapshotStore(defaults: defaults, key: "snapshot")
         store.saveSnapshot(newer)
 
-        let appState = AppState(snapshotStore: store, refreshService: MockRefreshService(snapshot: older))
+        let appState = AppState(
+            snapshotStore: store,
+            refreshService: MockRefreshService(snapshot: older),
+            now: { Date(timeIntervalSince1970: 250) }
+        )
         await appState.refreshNow(trigger: .manual)
 
         XCTAssertEqual(appState.snapshot, newer)
         XCTAssertNotEqual(appState.status, .refreshing)
+        XCTAssertTrue(appState.hasScheduledFreshnessTask)
+    }
+
+    func testTemporalReconciliationMarksSuccessStaleAtExactBoundaryAndPersistsIt() {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.clockForward.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let refreshedAt = Date(timeIntervalSince1970: 1_000)
+        var currentDate = refreshedAt.addingTimeInterval(59)
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 72,
+            fiveHourQuotaPercent: 69,
+            refreshedAt: refreshedAt,
+            dataSource: .real
+        )
+        store.saveSnapshot(snapshot)
+        let appState = AppState(
+            snapshotStore: store,
+            refreshService: MockRefreshService(snapshot: snapshot),
+            staleAfterInterval: 60,
+            now: { currentDate }
+        )
+
+        XCTAssertEqual(appState.status, .success)
+        currentDate = refreshedAt.addingTimeInterval(60)
+
+        appState.reconcileTemporalState()
+
+        XCTAssertEqual(appState.status, .stale)
+        XCTAssertEqual(appState.stateEvent.updateReason, .temporalReconciliation)
+        XCTAssertEqual(store.loadState()?.status, .stale)
+        XCTAssertFalse(appState.hasScheduledFreshnessTask)
+    }
+
+    func testClockRollbackKeepsFreshSnapshotAndRearmsTemporalCheck() {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.clockRollback.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let refreshedAt = Date(timeIntervalSince1970: 2_000)
+        var currentDate = refreshedAt
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 72,
+            fiveHourQuotaPercent: 69,
+            refreshedAt: refreshedAt,
+            dataSource: .real
+        )
+        store.saveSnapshot(snapshot)
+        let appState = AppState(
+            snapshotStore: store,
+            refreshService: MockRefreshService(snapshot: snapshot),
+            staleAfterInterval: 60,
+            now: { currentDate }
+        )
+
+        currentDate = refreshedAt.addingTimeInterval(-3_600)
+        appState.reconcileTemporalState()
+
+        XCTAssertEqual(appState.status, .success)
+        XCTAssertFalse(appState.isDataStale)
+        XCTAssertTrue(appState.hasScheduledFreshnessTask)
+        XCTAssertEqual(appState.stateEvent.updateReason, .temporalReconciliation)
+    }
+
+    func testFreshnessTaskWakeAfterClockRollbackRearmsUntilWallDeadline() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.clockRollbackWake.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let refreshedAt = Date(timeIntervalSince1970: 3_000)
+        var currentDate = refreshedAt
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 72,
+            fiveHourQuotaPercent: 69,
+            refreshedAt: refreshedAt,
+            dataSource: .real
+        )
+        store.saveSnapshot(snapshot)
+        let sleeper = AppStateTemporalSequenceSleep()
+        let appState = AppState(
+            snapshotStore: store,
+            refreshService: MockRefreshService(snapshot: snapshot),
+            staleAfterInterval: 60,
+            now: { currentDate },
+            sleep: { nanoseconds in await sleeper.wait(nanoseconds: nanoseconds) }
+        )
+
+        await sleeper.waitForCall(1)
+        currentDate = refreshedAt.addingTimeInterval(-3_600)
+        await sleeper.release(call: 1)
+        await sleeper.waitForCall(2)
+
+        let firstDelay = await sleeper.delay(forCall: 1)
+        let secondDelay = await sleeper.delay(forCall: 2)
+        XCTAssertEqual(firstDelay, 60_000_000_000)
+        XCTAssertEqual(secondDelay, 60_000_000_000)
+        XCTAssertEqual(appState.status, .success)
+        XCTAssertTrue(appState.hasScheduledFreshnessTask)
+
+        currentDate = refreshedAt.addingTimeInterval(60)
+        await sleeper.release(call: 2)
+        for _ in 0..<100 where appState.status != .stale {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(appState.status, .stale)
+        XCTAssertFalse(appState.hasScheduledFreshnessTask)
+    }
+
+    func testRestoredFreshnessUsesPersistedLastSuccessAsSingleAuthority() {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.lastSuccessAuthority.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let currentDate = Date(timeIntervalSince1970: 10_000)
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 72,
+            fiveHourQuotaPercent: 69,
+            refreshedAt: currentDate.addingTimeInterval(-1_000),
+            dataSource: .real
+        )
+        store.saveState(
+            PersistedAppState(
+                snapshot: snapshot,
+                status: .success,
+                lastSuccessAt: currentDate.addingTimeInterval(-10),
+                lastAttemptAt: nil,
+                failureCount: 0,
+                savedAt: currentDate
+            )
+        )
+
+        let appState = AppState(
+            snapshotStore: store,
+            refreshService: MockRefreshService(snapshot: snapshot),
+            staleAfterInterval: 60,
+            now: { currentDate }
+        )
+
+        XCTAssertEqual(appState.status, .success)
+        XCTAssertFalse(appState.isDataStale)
+        XCTAssertTrue(appState.hasScheduledFreshnessTask)
+    }
+
+    func testQuotaResetBoundaryPublishesExpiredProjectionAndRequestsRefresh() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.quotaResetBoundary.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let baseDate = Date(timeIntervalSince1970: 20_000)
+        let resetAt = baseDate.addingTimeInterval(10)
+        var currentDate = baseDate
+        let initial = QuotaSnapshot(
+            weeklyQuotaPercent: 42,
+            fiveHourQuotaPercent: 69,
+            refreshedAt: baseDate,
+            dataSource: .real,
+            quotaWindows: [
+                QuotaWindow(
+                    limitId: "codex",
+                    windowId: "secondary",
+                    kind: .weekly,
+                    durationMinutes: 10_080,
+                    remainingPercent: 42,
+                    resetAt: resetAt
+                )
+            ]
+        )
+        let refreshed = QuotaSnapshot(
+            weeklyQuotaPercent: 100,
+            fiveHourQuotaPercent: 69,
+            refreshedAt: resetAt,
+            dataSource: .real
+        )
+        store.saveSnapshot(initial)
+        let refreshService = BlockingRefreshService(snapshot: refreshed)
+        let sleepGate = AppStateTemporalSleepGate()
+        let appState = AppState(
+            snapshotStore: store,
+            refreshService: refreshService,
+            now: { currentDate },
+            sleep: { nanoseconds in
+                if nanoseconds <= 30_000_000_000 {
+                    await sleepGate.wait()
+                } else {
+                    try await Task.sleep(nanoseconds: nanoseconds)
+                }
+            }
+        )
+
+        await sleepGate.waitUntilSleeping()
+        currentDate = resetAt
+        await sleepGate.release()
+        await refreshService.waitForStart()
+
+        XCTAssertEqual(appState.status, .refreshing)
+        XCTAssertEqual(
+            StatusPopoverFormatting.weeklyQuotaMenuTitle(
+                snapshot: appState.snapshot,
+                status: appState.status,
+                now: currentDate
+            ),
+            "--%"
+        )
+
+        await refreshService.release()
+        for _ in 0..<100 where appState.snapshot != refreshed {
+            await Task.yield()
+        }
+
+        let refreshCount = await refreshService.callCount()
+        XCTAssertEqual(refreshCount, 1)
+        XCTAssertEqual(appState.snapshot, refreshed)
+        XCTAssertEqual(appState.status, .success)
+    }
+
+    func testTemporalDelayConversionClampsExtremeAndInvalidValuesWithoutOverflow() {
+        let maximumNanoseconds = (UInt64.max / 1_000_000_000) * 1_000_000_000
+
+        XCTAssertEqual(AppState.nanoseconds(for: .greatestFiniteMagnitude), maximumNanoseconds)
+        XCTAssertEqual(AppState.nanoseconds(for: .infinity), maximumNanoseconds)
+        XCTAssertEqual(AppState.nanoseconds(for: .nan), 1)
+        XCTAssertEqual(AppState.nanoseconds(for: 0), 1)
+        XCTAssertEqual(AppState.nanoseconds(for: 0.25), 250_000_000)
     }
 
     func testEnvelopeWrappedOldSnapshotMigratesBeforeReturning() throws {
@@ -1356,6 +1575,54 @@ private actor BlockingRefreshService: QuotaRefreshing {
     func release() {
         continuation?.resume()
         continuation = nil
+    }
+}
+
+private actor AppStateTemporalSleepGate {
+    private var sleeper: CheckedContinuation<Void, Never>?
+    private var started: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        started?.resume()
+        started = nil
+        await withCheckedContinuation { sleeper = $0 }
+    }
+
+    func waitUntilSleeping() async {
+        if sleeper != nil { return }
+        await withCheckedContinuation { started = $0 }
+    }
+
+    func release() {
+        sleeper?.resume()
+        sleeper = nil
+    }
+}
+
+private actor AppStateTemporalSequenceSleep {
+    private var delays: [UInt64] = []
+    private var continuations: [Int: CheckedContinuation<Void, Never>] = [:]
+    private var callWaiters: [Int: CheckedContinuation<Void, Never>] = [:]
+
+    func wait(nanoseconds: UInt64) async {
+        delays.append(nanoseconds)
+        let call = delays.count
+        callWaiters.removeValue(forKey: call)?.resume()
+        await withCheckedContinuation { continuations[call] = $0 }
+    }
+
+    func waitForCall(_ call: Int) async {
+        if delays.count >= call { return }
+        await withCheckedContinuation { callWaiters[call] = $0 }
+    }
+
+    func delay(forCall call: Int) -> UInt64? {
+        guard delays.indices.contains(call - 1) else { return nil }
+        return delays[call - 1]
+    }
+
+    func release(call: Int) {
+        continuations.removeValue(forKey: call)?.resume()
     }
 }
 

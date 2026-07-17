@@ -33,6 +33,136 @@ struct ResetCreditDetailSnapshot: Codable, Equatable, Identifiable {
     }
 }
 
+/// Shared wall-clock semantics for persisted quota timestamps.
+///
+/// Dates describe server-visible instants, while tasks only provide a wake-up
+/// hint. Callers must re-evaluate these rules with a fresh `now` whenever a
+/// task wakes or the system clock changes.
+enum QuotaTemporalSemantics {
+    static let defaultStaleAfterInterval: TimeInterval = 20 * 60
+
+    struct Freshness: Equatable {
+        let isFresh: Bool
+        let recheckAfter: TimeInterval?
+    }
+
+    struct Transition: Equatable {
+        enum Kind: Equatable {
+            case freshness
+            case quotaRecovery
+            case resetCreditExpiry
+            case displayOnly
+        }
+
+        let date: Date
+        let kind: Kind
+
+        var requiresRefresh: Bool {
+            kind == .quotaRecovery || kind == .resetCreditExpiry
+        }
+    }
+
+    static func isPending(deadline: Date, at now: Date) -> Bool {
+        now < deadline
+    }
+
+    static func freshness(
+        lastSuccessAt: Date,
+        now: Date,
+        staleAfterInterval: TimeInterval
+    ) -> Freshness {
+        guard staleAfterInterval.isFinite, staleAfterInterval > 0 else {
+            return Freshness(isFresh: false, recheckAfter: nil)
+        }
+
+        // A wall-clock rollback must not produce a negative age or make the
+        // one-shot scheduler disappear. Recheck after one full freshness
+        // interval; a system-clock notification also requests fresh data.
+        let age = max(0, now.timeIntervalSince(lastSuccessAt))
+        guard age.isFinite, age < staleAfterInterval else {
+            return Freshness(isFresh: false, recheckAfter: nil)
+        }
+
+        return Freshness(
+            isFresh: true,
+            recheckAfter: staleAfterInterval - age
+        )
+    }
+
+    static func isAvailableResetCredit(
+        _ detail: ResetCreditDetailSnapshot,
+        at now: Date
+    ) -> Bool {
+        detail.status
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() == "available" &&
+        detail.expiresAt.map { isPending(deadline: $0, at: now) } == true
+    }
+
+    static func upcomingTransitions(
+        snapshot: QuotaSnapshot,
+        status: QuotaRefreshStatus,
+        lastSuccessAt: Date?,
+        now: Date,
+        staleAfterInterval: TimeInterval = defaultStaleAfterInterval
+    ) -> [Transition] {
+        guard snapshot.dataSource == .real else { return [] }
+        var transitions: [Transition] = []
+
+        if status == .success, let lastSuccessAt {
+            let freshness = freshness(
+                lastSuccessAt: lastSuccessAt,
+                now: now,
+                staleAfterInterval: staleAfterInterval
+            )
+            if let recheckAfter = freshness.recheckAfter {
+                transitions.append(
+                    Transition(
+                        date: now.addingTimeInterval(recheckAfter),
+                        kind: .freshness
+                    )
+                )
+            }
+        }
+
+        func append(_ date: Date?, kind: Transition.Kind) {
+            guard let date, isPending(deadline: date, at: now) else { return }
+            transitions.append(Transition(date: date, kind: kind))
+        }
+
+        for window in snapshot.quotaWindows where window.state.isCurrent {
+            append(window.resetAt, kind: .quotaRecovery)
+        }
+        if snapshot.fiveHourQuotaState.isCurrent {
+            append(snapshot.fiveHourResetAt, kind: .quotaRecovery)
+        }
+        for bank in snapshot.resetBanks {
+            append(bank.resetAt, kind: .quotaRecovery)
+        }
+        for detail in snapshot.resetCreditDetails
+            where isAvailableResetCredit(detail, at: now) {
+            append(detail.expiresAt, kind: .resetCreditExpiry)
+        }
+        for entry in snapshot.resetCreditTimeEntries {
+            append(entry.date, kind: .displayOnly)
+        }
+
+        return transitions.sorted { lhs, rhs in
+            if lhs.date != rhs.date { return lhs.date < rhs.date }
+            return transitionRank(lhs.kind) < transitionRank(rhs.kind)
+        }
+    }
+
+    private static func transitionRank(_ kind: Transition.Kind) -> Int {
+        switch kind {
+        case .freshness: return 0
+        case .quotaRecovery: return 1
+        case .resetCreditExpiry: return 2
+        case .displayOnly: return 3
+        }
+    }
+}
+
 struct ResetCreditTimeSnapshot: Codable, Equatable, Identifiable {
     let label: String
     let date: Date

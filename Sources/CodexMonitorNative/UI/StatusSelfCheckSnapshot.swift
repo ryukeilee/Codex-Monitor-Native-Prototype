@@ -100,7 +100,7 @@ struct StatusSelfCheckSnapshot: Equatable {
             locale: locale,
             timeZone: timeZone
         )
-        return "\(state.statusText) · 保存 \(savedAt)"
+        return "\(state.statusText(now: now)) · 保存 \(savedAt)"
     }
 
     private static func normalized(_ value: String?) -> String? {

@@ -1186,6 +1186,122 @@ final class StatusPopoverFormattingTests: XCTestCase {
         )
     }
 
+    func testRecoveryBoundaryUsesStrictDeadlineWithoutEarlyRounding() {
+        let now = makeDate("2026-06-19T12:40:00Z")
+
+        XCTAssertEqual(
+            StatusPopoverFormatting.relativeRecoveryLine(
+                for: now.addingTimeInterval(0.25),
+                now: now
+            ),
+            "少于1分"
+        )
+        XCTAssertEqual(
+            StatusPopoverFormatting.relativeRecoveryLine(for: now, now: now),
+            "已恢复"
+        )
+        XCTAssertEqual(
+            StatusPopoverFormatting.relativeRecoveryLine(
+                for: now.addingTimeInterval(-0.25),
+                now: now
+            ),
+            "已恢复"
+        )
+    }
+
+    func testQuotaWindowLosesTrustAtResetBoundaryAcrossSharedPresentation() {
+        let now = makeDate("2026-06-19T12:40:00Z")
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 42,
+            fiveHourQuotaPercent: 64,
+            refreshedAt: now.addingTimeInterval(-60),
+            dataSource: .real,
+            quotaWindows: [
+                QuotaWindow(
+                    limitId: "codex",
+                    windowId: "secondary",
+                    kind: .weekly,
+                    durationMinutes: 10_080,
+                    remainingPercent: 42,
+                    resetAt: now
+                )
+            ]
+        )
+
+        let weekly = StatusPopoverFormatting.quotaWindowDisplayItems(
+            snapshot: snapshot,
+            status: .success,
+            now: now,
+            calendar: Calendar(identifier: .gregorian).setting(timeZone: TimeZone(secondsFromGMT: 0)!),
+            locale: Locale(identifier: "en_US"),
+            timeZone: TimeZone(secondsFromGMT: 0)!
+        ).first { $0.kind == .weekly }
+
+        XCTAssertNil(weekly?.trustedPercent)
+        XCTAssertEqual(weekly?.percentText, "--")
+        XCTAssertEqual(weekly?.resetRemainingText, "已恢复")
+        XCTAssertEqual(weekly?.stateText, "已恢复，待刷新")
+        XCTAssertEqual(
+            StatusPopoverFormatting.weeklyQuotaMenuTitle(
+                snapshot: snapshot,
+                status: .success,
+                now: now
+            ),
+            "--%"
+        )
+    }
+
+    func testDetailedResetCreditsHideExpiredBoundaryAndNonAvailableRows() {
+        let now = makeDate("2026-06-19T12:40:00Z")
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 52,
+            fiveHourQuotaPercent: 37,
+            resetAvailableCount: 4,
+            resetCreditDetailsState: .detailed,
+            resetCreditDetails: [
+                ResetCreditDetailSnapshot(
+                    ordinal: 1,
+                    status: "available",
+                    grantedAt: nil,
+                    expiresAt: now.addingTimeInterval(-1)
+                ),
+                ResetCreditDetailSnapshot(
+                    ordinal: 2,
+                    status: " AVAILABLE ",
+                    grantedAt: nil,
+                    expiresAt: now
+                ),
+                ResetCreditDetailSnapshot(
+                    ordinal: 3,
+                    status: "available",
+                    grantedAt: nil,
+                    expiresAt: now.addingTimeInterval(60)
+                ),
+                ResetCreditDetailSnapshot(
+                    ordinal: 4,
+                    status: "redeemed",
+                    grantedAt: nil,
+                    expiresAt: now.addingTimeInterval(120)
+                )
+            ],
+            refreshedAt: now.addingTimeInterval(-60),
+            dataSource: .real
+        )
+
+        let summary = StatusPopoverFormatting.resetCreditsSummary(
+            snapshot: snapshot,
+            status: .success,
+            now: now,
+            calendar: Calendar(identifier: .gregorian).setting(timeZone: TimeZone(secondsFromGMT: 0)!),
+            locale: Locale(identifier: "en_US"),
+            timeZone: TimeZone(secondsFromGMT: 0)!
+        )
+
+        XCTAssertEqual(summary?.featuredCreditItem?.id, "reset-credit-3")
+        XCTAssertTrue(summary?.additionalCreditItems.isEmpty ?? false)
+        XCTAssertEqual(summary?.featuredCreditItem?.remainingText, "剩余 1分")
+    }
+
     private func makeDate(_ iso8601: String) -> Date {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]

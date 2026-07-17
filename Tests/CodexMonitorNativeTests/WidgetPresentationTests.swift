@@ -146,6 +146,129 @@ final class WidgetPresentationTests: XCTestCase {
         XCTAssertNil(expired.footerText)
     }
 
+    func testPresentationHidesDetailedResetCreditFooterAtExactExpiry() {
+        let now = Date(timeIntervalSince1970: 1_720_000_000)
+        let expiresAt = now.addingTimeInterval(60)
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 71,
+            fiveHourQuotaPercent: 64,
+            resetAvailableCount: 1,
+            resetCreditDetailsState: .detailed,
+            resetCreditDetails: [
+                ResetCreditDetailSnapshot(
+                    ordinal: 1,
+                    status: "available",
+                    grantedAt: now.addingTimeInterval(-1_000),
+                    expiresAt: expiresAt
+                )
+            ],
+            refreshedAt: now,
+            dataSource: .real
+        )
+        let state = WidgetDisplayState.make(
+            snapshot: snapshot,
+            status: .success,
+            lastSuccessAt: now,
+            lastAttemptAt: now,
+            effectiveFiveHourResetAt: nil,
+            savedAt: now
+        )
+
+        XCTAssertNotNil(WidgetPresentation(state: state, family: .small, now: now).footerText)
+        XCTAssertNil(
+            WidgetPresentation(
+                state: state,
+                family: .small,
+                now: expiresAt
+            ).footerText
+        )
+    }
+
+    func testWidgetProjectsPersistedSuccessToStaleWithoutAppProcess() {
+        let now = Date(timeIntervalSince1970: 1_720_000_000)
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 71,
+            fiveHourQuotaPercent: 64,
+            refreshedAt: now,
+            dataSource: .real
+        )
+        let state = WidgetDisplayState.make(
+            snapshot: snapshot,
+            status: .success,
+            lastSuccessAt: now,
+            lastAttemptAt: now,
+            effectiveFiveHourResetAt: nil,
+            savedAt: now
+        )
+        let staleDate = now.addingTimeInterval(
+            QuotaTemporalSemantics.defaultStaleAfterInterval
+        )
+
+        XCTAssertEqual(state.effectiveStatus(at: now), .success)
+        XCTAssertEqual(state.effectiveStatus(at: staleDate), .stale)
+        XCTAssertEqual(
+            WidgetPresentation(state: state, family: .small, now: staleDate)
+                .primaryQuota?.caption,
+            "已过期"
+        )
+    }
+
+    func testWidgetNextTemporalTransitionUsesEarliestStrictDeadline() {
+        let now = Date(timeIntervalSince1970: 1_720_000_000)
+        let creditExpiry = now.addingTimeInterval(30)
+        let quotaReset = now.addingTimeInterval(60)
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 71,
+            fiveHourQuotaPercent: 64,
+            resetCreditDetailsState: .detailed,
+            resetCreditDetails: [
+                ResetCreditDetailSnapshot(
+                    ordinal: 1,
+                    status: "available",
+                    grantedAt: now,
+                    expiresAt: creditExpiry
+                )
+            ],
+            refreshedAt: now,
+            dataSource: .real,
+            quotaWindows: [
+                QuotaWindow(
+                    limitId: "codex",
+                    windowId: "primary",
+                    kind: .fiveHour,
+                    durationMinutes: 300,
+                    remainingPercent: 64,
+                    resetAt: quotaReset
+                )
+            ]
+        )
+        let state = WidgetDisplayState.make(
+            snapshot: snapshot,
+            status: .success,
+            lastSuccessAt: now,
+            lastAttemptAt: now,
+            effectiveFiveHourResetAt: quotaReset,
+            savedAt: now
+        )
+
+        XCTAssertEqual(state.nextTemporalTransition(after: now), creditExpiry)
+        XCTAssertEqual(state.nextTemporalTransition(after: creditExpiry), quotaReset)
+        XCTAssertEqual(
+            state.timelineEntryDates(startingAt: now),
+            [
+                now,
+                creditExpiry,
+                quotaReset,
+                now.addingTimeInterval(QuotaTemporalSemantics.defaultStaleAfterInterval)
+            ]
+        )
+
+        let expiredFiveHour = state.quotaItems(now: quotaReset)
+            .first { $0.kind == .fiveHour }
+        XCTAssertNil(expiredFiveHour?.progress)
+        XCTAssertEqual(expiredFiveHour?.percentText, "--")
+    }
+
     private func quota(
         id: String,
         label: String,

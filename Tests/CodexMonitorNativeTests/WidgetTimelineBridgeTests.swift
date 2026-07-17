@@ -342,13 +342,17 @@ final class WidgetTimelineBridgeTests: XCTestCase {
 
         XCTAssertEqual(
             state.earliestResetCreditLine(
+                now: now,
                 locale: Locale(identifier: "en_US_POSIX"),
                 timeZone: TimeZone(secondsFromGMT: 0)!
             ),
             "最早重置 7/3 21:51"
         )
-        XCTAssertEqual(state.resetCreditFooterText, state.resetCreditFooterLine)
-        XCTAssertEqual(state.resetCreditFooterText, state.earliestResetCreditLine())
+        XCTAssertEqual(state.resetCreditFooterText(now: now), state.resetCreditFooterLine)
+        XCTAssertEqual(
+            state.resetCreditFooterText(now: now),
+            state.earliestResetCreditLine(now: now)
+        )
     }
 
     func testWidgetEarliestResetCreditLineHidesWhenNoAvailableExpiryExists() {
@@ -414,8 +418,11 @@ final class WidgetTimelineBridgeTests: XCTestCase {
 
         let decoded = WidgetDisplayStateStore.load(fileManager: fileManager)
 
-        XCTAssertEqual(decoded.resetCreditFooterLine, decoded.earliestResetCreditLine())
-        XCTAssertEqual(decoded.resetCreditFooterText, decoded.resetCreditFooterLine)
+        XCTAssertEqual(
+            decoded.resetCreditFooterLine,
+            decoded.earliestResetCreditLine(now: now)
+        )
+        XCTAssertEqual(decoded.resetCreditFooterText(now: now), decoded.resetCreditFooterLine)
     }
 
     func testWidgetStateCorruptionIsIsolatedAndFallsBackToPlaceholder() throws {
@@ -792,6 +799,39 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         _ = bridge
     }
 
+    func testTemporalReconciliationReloadsEquivalentWidgetStateWithoutRewritingIt() {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.widgetTemporalReload.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let now = Date(timeIntervalSince1970: 1_720_000_000)
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 72,
+            fiveHourQuotaPercent: 69,
+            refreshedAt: now,
+            dataSource: .real
+        )
+        store.saveSnapshot(snapshot)
+        let appState = AppState(
+            snapshotStore: store,
+            refreshService: WidgetBridgeMockRefreshService(snapshot: snapshot),
+            now: { now }
+        )
+        var savedStates: [WidgetDisplayState] = []
+        var reloadCount = 0
+        let bridge = WidgetTimelineBridge(
+            appState: appState,
+            saveState: { savedStates.append($0) },
+            reloadTimelines: { reloadCount += 1 }
+        )
+        savedStates.removeAll()
+        reloadCount = 0
+
+        appState.reconcileTemporalState()
+
+        XCTAssertTrue(savedStates.isEmpty)
+        XCTAssertEqual(reloadCount, 1)
+        _ = bridge
+    }
+
     func testManualRefreshWritesFinalSuccessStateForWidget() async {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.widgetSuccess.\(UUID().uuidString)")!
         let store = SnapshotStore(defaults: defaults, key: "snapshot")
@@ -852,8 +892,8 @@ final class WidgetTimelineBridgeTests: XCTestCase {
     func testManualRefreshWritesResetCreditLineForWidgetWhenDetailsExist() async {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.widgetResetDetails.\(UUID().uuidString)")!
         let store = SnapshotStore(defaults: defaults, key: "snapshot")
-        let now = Date()
-        let resetCreditBase = Date(timeIntervalSince1970: 1_720_000_000)
+        let now = Date(timeIntervalSince1970: 1_720_000_000)
+        let resetCreditBase = now
         let initial = QuotaSnapshot(
             weeklyQuotaPercent: 72,
             fiveHourQuotaPercent: 69,
@@ -879,7 +919,11 @@ final class WidgetTimelineBridgeTests: XCTestCase {
             refreshedAt: now,
             dataSource: .real
         )
-        let appState = AppState(snapshotStore: store, refreshService: WidgetBridgeMockRefreshService(snapshot: refreshed))
+        let appState = AppState(
+            snapshotStore: store,
+            refreshService: WidgetBridgeMockRefreshService(snapshot: refreshed),
+            now: { now }
+        )
 
         var savedStates: [WidgetDisplayState] = []
         let finalStateSaved = expectation(description: "Widget bridge saved reset credit details")
@@ -902,13 +946,17 @@ final class WidgetTimelineBridgeTests: XCTestCase {
 
         XCTAssertEqual(
             savedStates.last?.earliestResetCreditLine(
+                now: now,
                 locale: Locale(identifier: "en_US_POSIX"),
                 timeZone: TimeZone(secondsFromGMT: 0)!
             ),
             "最早重置 7/3 21:51"
         )
         XCTAssertNotNil(savedStates.last?.resetCreditFooterLine)
-        XCTAssertEqual(savedStates.last?.resetCreditFooterText, savedStates.last?.resetCreditFooterLine)
+        XCTAssertEqual(
+            savedStates.last?.resetCreditFooterText(now: now),
+            savedStates.last?.resetCreditFooterLine
+        )
         _ = bridge
     }
 

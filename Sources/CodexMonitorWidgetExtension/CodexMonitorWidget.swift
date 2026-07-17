@@ -23,9 +23,13 @@ struct CodexMonitorWidgetProvider: TimelineProvider {
         completion: @escaping (Timeline<CodexMonitorWidgetEntry>) -> Void
     ) {
         let now = Date.now
-        let entry = CodexMonitorWidgetEntry(date: now, state: WidgetDisplayStateStore.load())
-        let nextRefresh = Calendar.current.date(byAdding: .minute, value: 5, to: now) ?? now.addingTimeInterval(300)
-        completion(Timeline(entries: [entry], policy: .after(nextRefresh)))
+        let state = WidgetDisplayStateStore.load()
+        let entries = state.timelineEntryDates(startingAt: now).map {
+            CodexMonitorWidgetEntry(date: $0, state: state)
+        }
+        let periodicRefresh = Calendar.current.date(byAdding: .minute, value: 5, to: now)
+            ?? now.addingTimeInterval(300)
+        completion(Timeline(entries: entries, policy: .after(periodicRefresh)))
     }
 }
 
@@ -58,6 +62,10 @@ struct CodexMonitorWidgetView: View {
             family: isSmall ? .small : .medium,
             now: entry.date
         )
+    }
+
+    private var effectiveStatus: QuotaRefreshStatus {
+        entry.state.effectiveStatus(at: entry.date)
     }
 
     var body: some View {
@@ -99,7 +107,7 @@ struct CodexMonitorWidgetView: View {
             )
 
             metricColumn(
-                top: ("刷新状态", entry.state.statusText, nil),
+                top: ("刷新状态", entry.state.statusText(now: entry.date), nil),
                 bottom: ("更新时间", updatedShortText),
                 alignment: .leading,
                 topValueTone: .subdued
@@ -391,7 +399,7 @@ struct CodexMonitorWidgetView: View {
                 .frame(width: 6, height: 6)
                 .shadow(color: statusColor.opacity(0.8), radius: 4)
 
-            Text(entry.state.statusText)
+            Text(entry.state.statusText(now: entry.date))
                 .font(.system(size: 10, weight: .semibold, design: .rounded))
                 .foregroundStyle(.white.opacity(0.88))
                 .lineLimit(1)
@@ -567,7 +575,7 @@ struct CodexMonitorWidgetView: View {
     }
 
     private var statusColor: Color {
-        switch entry.state.status {
+        switch effectiveStatus {
         case .success:
             return .green
         case .refreshing:

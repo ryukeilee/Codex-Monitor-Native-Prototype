@@ -114,7 +114,10 @@ struct WidgetDisplayState: Codable, Equatable {
             lastSuccessAt: lastSuccessAt,
             lastAttemptAt: lastAttemptAt,
             effectiveFiveHourResetAt: effectiveFiveHourResetAt,
-            resetCreditFooterLine: resetCreditFooterLine ?? Self.makeResetCreditFooterLine(for: snapshot),
+            resetCreditFooterLine: resetCreditFooterLine ?? Self.makeResetCreditFooterLine(
+                for: snapshot,
+                now: savedAt
+            ),
             savedAt: savedAt
         )
     }
@@ -140,14 +143,18 @@ struct WidgetDisplayState: Codable, Equatable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let snapshot = try container.decode(QuotaSnapshot.self, forKey: .snapshot)
+        let savedAt = try container.decode(Date.self, forKey: .savedAt)
         self.init(
             snapshot: snapshot,
             status: try container.decode(QuotaRefreshStatus.self, forKey: .status),
             lastSuccessAt: try container.decodeIfPresent(Date.self, forKey: .lastSuccessAt),
             lastAttemptAt: try container.decodeIfPresent(Date.self, forKey: .lastAttemptAt),
             effectiveFiveHourResetAt: try container.decodeIfPresent(Date.self, forKey: .effectiveFiveHourResetAt),
-            resetCreditFooterLine: try container.decodeIfPresent(String.self, forKey: .resetCreditFooterLine) ?? Self.makeResetCreditFooterLine(for: snapshot),
-            savedAt: try container.decode(Date.self, forKey: .savedAt)
+            resetCreditFooterLine: try container.decodeIfPresent(String.self, forKey: .resetCreditFooterLine) ?? Self.makeResetCreditFooterLine(
+                for: snapshot,
+                now: savedAt
+            ),
+            savedAt: savedAt
         )
     }
 
@@ -162,13 +169,31 @@ struct WidgetDisplayState: Codable, Equatable {
     )
 
     var statusText: String {
-        StatusPopoverFormatting.titleSummary(for: status)
+        statusText(now: .now)
+    }
+
+    func effectiveStatus(at now: Date) -> QuotaRefreshStatus {
+        guard status == .success,
+              snapshot.dataSource == .real else {
+            return status
+        }
+        let freshnessReference = lastSuccessAt ?? snapshot.refreshedAt
+
+        return QuotaTemporalSemantics.freshness(
+            lastSuccessAt: freshnessReference,
+            now: now,
+            staleAfterInterval: QuotaTemporalSemantics.defaultStaleAfterInterval
+        ).isFresh ? .success : .stale
+    }
+
+    func statusText(now: Date) -> String {
+        StatusPopoverFormatting.titleSummary(for: effectiveStatus(at: now))
     }
 
     func quotaItems(now: Date = .now) -> [StatusPopoverFormatting.QuotaWindowDisplayItem] {
         StatusPopoverFormatting.quotaWindowDisplayItems(
             snapshot: snapshot,
-            status: status,
+            status: effectiveStatus(at: now),
             now: now
         )
     }
@@ -179,34 +204,70 @@ struct WidgetDisplayState: Codable, Equatable {
     ) -> StatusPopoverFormatting.QuotaWindowSelection {
         StatusPopoverFormatting.quotaWindowSelection(
             snapshot: snapshot,
-            status: status,
+            status: effectiveStatus(at: now),
             capacity: capacity,
             now: now
         )
     }
 
     var fiveHourQuotaText: String {
-        StatusPopoverFormatting.quotaValueText(for: .fiveHour, snapshot: snapshot, status: status)
+        StatusPopoverFormatting.quotaValueText(
+            for: .fiveHour,
+            snapshot: snapshot,
+            status: effectiveStatus(at: .now)
+        )
     }
 
     var fiveHourQuotaDisplay: StatusPopoverFormatting.QuotaValueDisplay {
-        StatusPopoverFormatting.quotaValueDisplay(for: .fiveHour, snapshot: snapshot, status: status)
+        StatusPopoverFormatting.quotaValueDisplay(
+            for: .fiveHour,
+            snapshot: snapshot,
+            status: effectiveStatus(at: .now)
+        )
     }
 
     var weeklyQuotaText: String {
-        StatusPopoverFormatting.quotaValueText(for: .weekly, snapshot: snapshot, status: status)
+        StatusPopoverFormatting.quotaValueText(
+            for: .weekly,
+            snapshot: snapshot,
+            status: effectiveStatus(at: .now)
+        )
     }
 
     var weeklyQuotaDisplay: StatusPopoverFormatting.QuotaValueDisplay {
-        StatusPopoverFormatting.quotaValueDisplay(for: .weekly, snapshot: snapshot, status: status)
+        StatusPopoverFormatting.quotaValueDisplay(
+            for: .weekly,
+            snapshot: snapshot,
+            status: effectiveStatus(at: .now)
+        )
     }
 
     func recoveryDetails(now: Date = .now) -> StatusPopoverFormatting.RecoveryDetails {
         StatusPopoverFormatting.recoveryDetails(
             resetAt: effectiveFiveHourResetAt,
-            status: status,
+            status: effectiveStatus(at: now),
             now: now
         )
+    }
+
+    func nextTemporalTransition(after now: Date) -> Date? {
+        temporalTransitionDates(after: now).first
+    }
+
+    func temporalTransitionDates(after now: Date) -> [Date] {
+        var seen = Set<Date>()
+        return QuotaTemporalSemantics.upcomingTransitions(
+            snapshot: snapshot,
+            status: status,
+            lastSuccessAt: lastSuccessAt ?? (snapshot.dataSource == .real ? snapshot.refreshedAt : nil),
+            now: now
+        )
+        .map(\.date)
+        .filter { seen.insert($0).inserted }
+    }
+
+    func timelineEntryDates(startingAt now: Date) -> [Date] {
+        [now] + temporalTransitionDates(after: now)
     }
 
     func updatedLine(now: Date = .now) -> String {
@@ -217,19 +278,8 @@ struct WidgetDisplayState: Codable, Equatable {
         )
     }
 
-    var earliestResetCreditExpiresAt: Date? {
-        snapshot.resetCreditDetails
-            .filter { normalizedResetCreditStatus($0.status) == "available" }
-            .compactMap(\.expiresAt)
-            .min()
-    }
-
-    private func normalizedResetCreditStatus(_ status: String) -> String {
-        status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    }
-
     var resetCreditFooterText: String? {
-        resetCreditFooterLine ?? earliestResetCreditLine()
+        resetCreditFooterText(now: .now)
     }
 
     func resetCreditFooterText(
@@ -238,9 +288,8 @@ struct WidgetDisplayState: Codable, Equatable {
         timeZone: TimeZone = .autoupdatingCurrent
     ) -> String? {
         let earliestExpiry = snapshot.resetCreditDetails
-            .filter { normalizedResetCreditStatus($0.status) == "available" }
+            .filter { QuotaTemporalSemantics.isAvailableResetCredit($0, at: now) }
             .compactMap(\.expiresAt)
-            .filter { snapshot.resetCreditDetailsState != .unavailable || $0 > now }
             .min()
 
         guard let earliestExpiry else {
@@ -255,15 +304,21 @@ struct WidgetDisplayState: Codable, Equatable {
     }
 
     func earliestResetCreditLine(
+        now: Date = .now,
         locale: Locale = .autoupdatingCurrent,
         timeZone: TimeZone = .autoupdatingCurrent
     ) -> String? {
-        guard let earliestResetCreditExpiresAt else {
+        let earliestExpiry = snapshot.resetCreditDetails
+            .filter { QuotaTemporalSemantics.isAvailableResetCredit($0, at: now) }
+            .compactMap(\.expiresAt)
+            .min()
+
+        guard let earliestExpiry else {
             return nil
         }
 
         return resetCreditLine(
-            expiresAt: earliestResetCreditExpiresAt,
+            expiresAt: earliestExpiry,
             locale: locale,
             timeZone: timeZone
         )
@@ -282,9 +337,12 @@ struct WidgetDisplayState: Codable, Equatable {
         return "\(prefix) \(formatter.string(from: expiresAt))"
     }
 
-    private static func makeResetCreditFooterLine(for snapshot: QuotaSnapshot) -> String? {
+    private static func makeResetCreditFooterLine(
+        for snapshot: QuotaSnapshot,
+        now: Date
+    ) -> String? {
         let earliestExpiry = snapshot.resetCreditDetails
-            .filter { $0.status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "available" }
+            .filter { QuotaTemporalSemantics.isAvailableResetCredit($0, at: now) }
             .compactMap(\.expiresAt)
             .min()
 
