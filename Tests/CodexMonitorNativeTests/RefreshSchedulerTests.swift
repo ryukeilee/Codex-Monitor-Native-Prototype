@@ -126,4 +126,23 @@ final class RefreshSchedulerTests: XCTestCase {
         XCTAssertTrue(scheduler.hasScheduledTimer)
         scheduler.stop()
     }
+
+    func testOverlappingPauseReasonsRequireIndependentRecovery() {
+        let scheduler = RefreshScheduler(interval: 1) {}
+
+        scheduler.start()
+        scheduler.pause(for: .systemSleep)
+        scheduler.pause(for: .networkUnavailable)
+        XCTAssertTrue(scheduler.isPaused)
+        XCTAssertFalse(scheduler.hasScheduledTimer)
+
+        scheduler.resume(for: .systemSleep)
+        XCTAssertTrue(scheduler.isPaused)
+        XCTAssertFalse(scheduler.hasScheduledTimer)
+
+        scheduler.resume(for: .networkUnavailable)
+        XCTAssertFalse(scheduler.isPaused)
+        XCTAssertTrue(scheduler.hasScheduledTimer)
+        scheduler.stop()
+    }
 }

@@ -290,6 +290,8 @@ enum StatusPopoverFormatting {
             return "真实链路：Codex 版本不兼容\(suffix)"
         case .appServerStartFailed:
             return "真实链路：Codex app-server 启动失败\(suffix)"
+        case .networkUnavailable:
+            return "真实链路：网络连接不可用\(suffix)"
         case .codexUnavailable:
             return "真实链路：Codex 不可用\(suffix)"
         case .requestTimedOut:

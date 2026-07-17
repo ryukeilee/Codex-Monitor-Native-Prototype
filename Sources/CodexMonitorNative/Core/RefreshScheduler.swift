@@ -2,11 +2,19 @@ import Foundation
 
 @MainActor
 final class RefreshScheduler {
+    enum PauseReason: Hashable {
+        case unspecified
+        case systemSleep
+        case networkUnavailable
+    }
+
     private var interval: TimeInterval
     private let onTick: @MainActor () -> Void
     private let timerResource = RefreshSchedulerTimerResource()
-    private(set) var isPaused: Bool = false
+    private var pauseReasons: Set<PauseReason> = []
     private var isRunning: Bool = false
+
+    var isPaused: Bool { !pauseReasons.isEmpty }
 
     /// Exposed for lifecycle verification without leaking the timer itself.
     var hasScheduledTimer: Bool {
@@ -21,7 +29,7 @@ final class RefreshScheduler {
     func start() {
         stop()
         isRunning = true
-        isPaused = false
+        pauseReasons.removeAll()
         AppLogger.refresh.info("Starting refresh scheduler with interval \(self.interval, format: .fixed(precision: 0)) seconds")
         scheduleTimer()
     }
@@ -31,7 +39,7 @@ final class RefreshScheduler {
             AppLogger.refresh.info("Stopping refresh scheduler")
         }
         isRunning = false
-        isPaused = false
+        pauseReasons.removeAll()
         timerResource.invalidate()
     }
 
@@ -44,19 +52,20 @@ final class RefreshScheduler {
         scheduleTimer()
     }
 
-    /// Pause the scheduler during sleep. Fires are silently dropped.
-    func pause() {
-        guard isRunning, !isPaused else { return }
-        isPaused = true
-        AppLogger.system.info("Refresh scheduler paused (system sleep)")
+    /// Pauses for one lifecycle reason. Overlapping reasons must each resume
+    /// before the timer is recreated.
+    func pause(for reason: PauseReason = .unspecified) {
+        guard isRunning, pauseReasons.insert(reason).inserted else { return }
+        AppLogger.system.info("Refresh scheduler paused (reason=\(String(describing: reason), privacy: .public))")
         timerResource.invalidate()
     }
 
-    /// Resume after wake. Resets the timer from now.
-    func resume() {
-        guard isRunning, isPaused else { return }
-        isPaused = false
-        AppLogger.system.info("Refresh scheduler resumed (system wake)")
+    /// Clears one pause reason and resets the timer from now once all blockers
+    /// have cleared.
+    func resume(for reason: PauseReason = .unspecified) {
+        guard isRunning, pauseReasons.remove(reason) != nil else { return }
+        guard !isPaused else { return }
+        AppLogger.system.info("Refresh scheduler resumed")
         scheduleTimer()
     }
 

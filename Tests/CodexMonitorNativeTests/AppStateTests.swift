@@ -1604,6 +1604,154 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(intervals, [600, 300])
         XCTAssertEqual(appState.backoffInterval, 300)
     }
+
+    func testOfflineRefreshesDoNotCallProviderOrEscalateBackoff() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.offlineBackoff.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let initial = QuotaSnapshot(
+            weeklyQuotaPercent: 72,
+            fiveHourQuotaPercent: 69,
+            refreshedAt: .distantPast,
+            dataSource: .real
+        )
+        let recovered = QuotaSnapshot(
+            weeklyQuotaPercent: 84,
+            fiveHourQuotaPercent: 73,
+            refreshedAt: .now,
+            dataSource: .real
+        )
+        store.saveSnapshot(initial)
+        let service = SequenceRefreshService(results: [
+            .failure(MockRefreshError.simulatedFailure),
+            .failure(MockRefreshError.simulatedFailure),
+            .success(recovered)
+        ])
+        let appState = AppState(snapshotStore: store, refreshService: service)
+
+        await appState.refreshNow(trigger: .manual)
+        await appState.refreshNow(trigger: .scheduled)
+        let lastRealAttempt = appState.lastAttemptAt
+        let callCountBeforeOffline = await service.callCount()
+        XCTAssertEqual(appState.failureCount, 2)
+        XCTAssertEqual(appState.backoffInterval, 600)
+        XCTAssertEqual(callCountBeforeOffline, 2)
+
+        appState.updateNetworkReachability(false)
+        await appState.refreshNow(trigger: .manual)
+        await appState.refreshNow(trigger: .scheduled)
+
+        let callCountWhileOffline = await service.callCount()
+        XCTAssertEqual(callCountWhileOffline, 2)
+        XCTAssertEqual(appState.snapshot, initial)
+        XCTAssertEqual(appState.status, .networkFailed)
+        XCTAssertEqual(appState.failureCount, 2)
+        XCTAssertEqual(appState.backoffInterval, 600)
+        XCTAssertEqual(appState.lastAttemptAt, lastRealAttempt)
+        XCTAssertEqual(store.loadState()?.snapshot, initial)
+        XCTAssertEqual(store.loadState()?.status, .networkFailed)
+        XCTAssertEqual(store.loadState()?.failureCount, 2)
+        XCTAssertEqual(
+            appState.realQuotaHealth,
+            RealQuotaHealthDiagnostic(kind: .networkUnavailable, isUsingCachedSnapshot: true)
+        )
+
+        appState.updateNetworkReachability(true)
+        await appState.refreshNow(trigger: .networkRestored)
+
+        let callCountAfterRecovery = await service.callCount()
+        XCTAssertEqual(callCountAfterRecovery, 3)
+        XCTAssertEqual(appState.snapshot, recovered)
+        XCTAssertEqual(appState.status, .success)
+        XCTAssertEqual(appState.failureCount, 0)
+        XCTAssertEqual(appState.backoffInterval, 300)
+    }
+
+    func testDisconnectInvalidatesActiveResultAndRecoveryUsesSingleFlightTrailingRequest() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.disconnectSingleFlight.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let initial = QuotaSnapshot(
+            weeklyQuotaPercent: 70,
+            fiveHourQuotaPercent: 60,
+            refreshedAt: .now,
+            dataSource: .real
+        )
+        let obsolete = QuotaSnapshot(
+            weeklyQuotaPercent: 10,
+            fiveHourQuotaPercent: 20,
+            refreshedAt: .now.addingTimeInterval(1),
+            dataSource: .real
+        )
+        let recovered = QuotaSnapshot(
+            weeklyQuotaPercent: 90,
+            fiveHourQuotaPercent: 80,
+            refreshedAt: .now.addingTimeInterval(2),
+            dataSource: .real
+        )
+        store.saveSnapshot(initial)
+        let service = QueueingResultRefreshService(results: [.success(obsolete), .success(recovered)])
+        let appState = AppState(snapshotStore: store, refreshService: service)
+
+        let originalRequest = Task { await appState.refreshNow(trigger: .manual) }
+        await service.waitForCall(1)
+        appState.updateNetworkReachability(false)
+        await originalRequest.value
+
+        XCTAssertEqual(appState.snapshot, initial)
+        XCTAssertEqual(appState.status, .networkFailed)
+        XCTAssertEqual(appState.failureCount, 0)
+        XCTAssertEqual(
+            appState.realQuotaHealth,
+            RealQuotaHealthDiagnostic(kind: .networkUnavailable, isUsingCachedSnapshot: true)
+        )
+
+        appState.updateNetworkReachability(true)
+        appState.refresh(trigger: .networkRestored)
+        await assertCallCount(1, for: service)
+        await service.release(call: 1)
+        await service.waitForCall(2)
+
+        XCTAssertEqual(appState.snapshot, initial)
+        XCTAssertEqual(appState.status, .refreshing)
+        await service.release(call: 2)
+        await service.waitForCompletion(2)
+        await Task.yield()
+
+        await assertCallCount(2, for: service)
+        await assertMaxConcurrentCalls(1, for: service)
+        XCTAssertEqual(appState.snapshot, recovered)
+        XCTAssertEqual(appState.status, .success)
+        XCTAssertEqual(appState.failureCount, 0)
+        XCTAssertEqual(store.loadState()?.snapshot, recovered)
+    }
+
+    func testUnknownInitialReachabilityDefersRequestsUntilFirstReachablePath() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.unknownNetwork.\(UUID().uuidString)")!
+        let refreshed = QuotaSnapshot(
+            weeklyQuotaPercent: 81,
+            fiveHourQuotaPercent: 71,
+            refreshedAt: .now,
+            dataSource: .real
+        )
+        let service = SequenceRefreshService(results: [.success(refreshed)])
+        let appState = AppState(
+            snapshotStore: SnapshotStore(defaults: defaults, key: "snapshot"),
+            refreshService: service,
+            initialNetworkReachability: nil
+        )
+
+        await appState.refreshNow(trigger: .manual)
+        let callCountWhileUnknown = await service.callCount()
+        XCTAssertEqual(callCountWhileUnknown, 0)
+        XCTAssertEqual(appState.status, .noSnapshot)
+
+        appState.updateNetworkReachability(true)
+        await appState.refreshNow(trigger: .networkRestored)
+
+        let callCountAfterReachable = await service.callCount()
+        XCTAssertEqual(callCountAfterReachable, 1)
+        XCTAssertEqual(appState.snapshot, refreshed)
+        XCTAssertEqual(appState.status, .success)
+    }
 }
 
 private struct MockRefreshService: QuotaRefreshing {
@@ -1786,17 +1934,23 @@ private actor QueueingResultRefreshService: QuotaRefreshing {
 
 private actor SequenceRefreshService: QuotaRefreshing {
     private var results: [Result<QuotaSnapshot, Error>]
+    private var callCountValue = 0
 
     init(results: [Result<QuotaSnapshot, Error>]) {
         self.results = results
     }
 
     func refresh(basedOn currentSnapshot: QuotaSnapshot) async throws -> QuotaSnapshot {
+        callCountValue += 1
         guard !results.isEmpty else {
             throw MockRefreshError.simulatedFailure
         }
 
         let result = results.removeFirst()
         return try result.get()
+    }
+
+    func callCount() -> Int {
+        callCountValue
     }
 }

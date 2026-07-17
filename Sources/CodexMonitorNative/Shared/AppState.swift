@@ -56,6 +56,8 @@ final class AppState: ObservableObject {
         case manual
         case scheduled
         case wake
+        case networkRestored
+        case networkChanged
         case temporalBoundary
         case systemClockChange
     }
@@ -101,6 +103,7 @@ final class AppState: ObservableObject {
     private var activeRefresh: ActiveRefresh?
     private var pendingRefresh: PendingRefresh?
     private var lastSettledStatus: QuotaRefreshStatus = .noSnapshot
+    private(set) var networkIsReachable: Bool?
 
     var isRefreshing: Bool { status == .refreshing }
     var isUsingCachedSnapshot: Bool { realQuotaHealth.isUsingCachedSnapshot }
@@ -121,12 +124,14 @@ final class AppState: ObservableObject {
         now: @escaping () -> Date = { .now },
         sleep: @escaping @Sendable (UInt64) async throws -> Void = { nanoseconds in
             try await Task.sleep(nanoseconds: nanoseconds)
-        }
+        },
+        initialNetworkReachability: Bool? = true
     ) {
         self.snapshotStore = snapshotStore
         self.staleAfterInterval = staleAfterInterval
         self.now = now
         self.sleep = sleep
+        self.networkIsReachable = initialNetworkReachability
         self.refreshAction = { snapshot in
             try await refreshService.refresh(basedOn: snapshot)
         }
@@ -238,10 +243,49 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// Updates physical network availability without treating an offline period
+    /// as another failed server request. An in-flight result is invalidated so a
+    /// response from the old path cannot overwrite the offline state or a later
+    /// recovery refresh.
+    func updateNetworkReachability(_ isReachable: Bool) {
+        guard networkIsReachable != isReachable else { return }
+        networkIsReachable = isReachable
+        guard !isReachable else { return }
+
+        taskResources.refreshTask?.cancel()
+        pendingRefresh?.resumeWaiters()
+        pendingRefresh = nil
+        if var activeRefresh {
+            activeRefresh.isInvalidated = true
+            activeRefresh.resumeWaiters()
+            self.activeRefresh = activeRefresh
+        }
+
+        if let real = latestRealSnapshot {
+            snapshot = real
+        }
+        status = .networkFailed
+        lastErrorSummary = "网络连接不可用"
+        realQuotaHealth = RealQuotaHealthDiagnostic(
+            kind: .networkUnavailable,
+            isUsingCachedSnapshot: latestRealSnapshot != nil
+        )
+        let referenceDate = now()
+        commitState(at: referenceDate)
+        scheduleTemporalCheck(referenceDate: referenceDate)
+        AppLogger.refresh.info("Network unavailable; paused real refresh requests")
+    }
+
     private func enqueueRefresh(
         trigger: RefreshTrigger,
         waiter: CheckedContinuation<Void, Never>? = nil
     ) {
+        guard networkIsReachable == true else {
+            waiter?.resume()
+            AppLogger.refresh.info("Skipped \(self.triggerName(for: trigger), privacy: .public) refresh while network is unavailable or unresolved")
+            return
+        }
+
         guard activeRefresh == nil else {
             if pendingRefresh == nil {
                 pendingRefresh = PendingRefresh(trigger: trigger)
@@ -771,6 +815,8 @@ final class AppState: ObservableObject {
         case .manual: return "manual"
         case .scheduled: return "scheduled"
         case .wake: return "wake"
+        case .networkRestored: return "network-restored"
+        case .networkChanged: return "network-changed"
         case .temporalBoundary: return "temporal-boundary"
         case .systemClockChange: return "system-clock-change"
         }

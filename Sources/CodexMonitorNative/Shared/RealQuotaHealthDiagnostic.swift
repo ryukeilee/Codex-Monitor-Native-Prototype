@@ -9,6 +9,7 @@ struct RealQuotaHealthDiagnostic: Equatable, Sendable {
         case executableNotRunnable
         case versionIncompatible
         case appServerStartFailed
+        case networkUnavailable
         case codexUnavailable
         case requestTimedOut
         case loginRequired

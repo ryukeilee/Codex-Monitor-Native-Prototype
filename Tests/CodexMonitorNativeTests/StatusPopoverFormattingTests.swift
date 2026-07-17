@@ -208,6 +208,14 @@ final class StatusPopoverFormattingTests: XCTestCase {
         XCTAssertEqual(formatted, "真实链路：响应不可解析，当前无可用快照")
     }
 
+    func testRealQuotaHealthLineShowsPhysicalNetworkFailureWithCachedSnapshot() {
+        let formatted = StatusPopoverFormatting.realQuotaHealthLine(
+            RealQuotaHealthDiagnostic(kind: .networkUnavailable, isUsingCachedSnapshot: true)
+        )
+
+        XCTAssertEqual(formatted, "真实链路：网络连接不可用，显示上次成功数据")
+    }
+
     func testRealQuotaHealthLineDistinguishesIncompatibleVersionWithCachedSnapshot() {
         let formatted = StatusPopoverFormatting.realQuotaHealthLine(
             RealQuotaHealthDiagnostic(kind: .versionIncompatible, isUsingCachedSnapshot: true)

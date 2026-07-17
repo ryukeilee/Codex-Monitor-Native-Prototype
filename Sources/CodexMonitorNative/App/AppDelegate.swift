@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var popoverController: PopoverController?
     private var refreshScheduler: RefreshScheduler?
     private var sleepWakeObserver: SleepWakeObserver?
+    private var networkReachabilityObserver: NetworkReachabilityObserver?
     private var systemClockObserver: SystemClockObserver?
     private var widgetTimelineBridge: WidgetTimelineBridge?
 
@@ -17,7 +18,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let snapshotStore = SnapshotStore()
         let refreshService = QuotaRefreshService()
-        let state = AppState(snapshotStore: snapshotStore, refreshService: refreshService)
+        let state = AppState(
+            snapshotStore: snapshotStore,
+            refreshService: refreshService,
+            initialNetworkReachability: nil
+        )
         let launchAtLoginManager = LaunchAtLoginManager()
         let popoverController = PopoverController(appState: state, launchAtLoginManager: launchAtLoginManager)
         let statusBarController = StatusBarController(appState: state)
@@ -37,16 +42,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         scheduler.start()
+        scheduler.pause(for: .networkUnavailable)
 
-        // Sleep/wake: pause timer on sleep, delayed refresh on wake
+        let networkObserver = NetworkReachabilityObserver { [weak scheduler, weak state] change in
+            switch change {
+            case .becameReachable:
+                state?.updateNetworkReachability(true)
+                scheduler?.resume(for: .networkUnavailable)
+                state?.refresh(trigger: .networkRestored)
+            case .becameUnreachable:
+                scheduler?.pause(for: .networkUnavailable)
+                state?.updateNetworkReachability(false)
+            case .connectionChanged:
+                state?.refresh(trigger: .networkChanged)
+            }
+        }
+        networkObserver.start()
+
+        // Sleep/wake: pause independently from reachability. After the wake
+        // stabilization delay, restarting the path monitor produces one fresh
+        // availability decision and, when reachable, one controlled refresh.
         let observer = SleepWakeObserver(
             wakeDelaySeconds: 5,
-            onSleep: { [weak scheduler] in
-                scheduler?.pause()
+            onSleep: { [weak scheduler, weak networkObserver] in
+                scheduler?.pause(for: .systemSleep)
+                networkObserver?.stop()
             },
-            onWake: { [weak scheduler, weak state] in
-                scheduler?.resume()
-                state?.refresh(trigger: .wake)
+            onWake: { [weak scheduler, weak networkObserver] in
+                scheduler?.resume(for: .systemSleep)
+                networkObserver?.start()
             }
         )
         observer.start()
@@ -62,17 +86,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         clockObserver.start()
 
-        // Initial refresh after a short delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak state] in
-            state?.refresh(trigger: .manual)
-        }
-
         self.appState = state
         self.launchAtLoginManager = launchAtLoginManager
         self.popoverController = popoverController
         self.statusBarController = statusBarController
         self.refreshScheduler = scheduler
         self.sleepWakeObserver = observer
+        self.networkReachabilityObserver = networkObserver
         self.systemClockObserver = clockObserver
         self.widgetTimelineBridge = widgetTimelineBridge
     }
@@ -81,6 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AppLogger.lifecycle.info("Application will terminate")
         refreshScheduler?.stop()
         sleepWakeObserver?.stop()
+        networkReachabilityObserver?.stop()
         systemClockObserver?.stop()
         appState?.shutdown()
     }
