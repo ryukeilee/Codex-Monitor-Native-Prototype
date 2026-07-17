@@ -84,6 +84,54 @@ enum RealQuotaError: LocalizedError, Equatable {
     }
 }
 
+private enum RateLimitResponseSchema {
+    static let legacyContainerKeys = ["rateLimits", "rate_limits"]
+    static let dynamicContainerKeys = ["rateLimitsByLimitId", "rate_limits_by_limit_id"]
+    static let resetCreditsKeys = ["rateLimitResetCredits", "rate_limit_reset_credits"]
+    static let containerKeys = legacyContainerKeys + dynamicContainerKeys
+
+    static let usedPercentKeys = ["usedPercent", "used_percent"]
+    static let remainingPercentKeys = ["remainingPercent", "remaining_percent"]
+    static let durationKeys = [
+        "windowDurationMins",
+        "window_duration_mins",
+        "windowDurationMinutes",
+        "window_duration_minutes",
+        "durationMinutes",
+        "duration_minutes"
+    ]
+    static let resetAtKeys = [
+        "resetAt",
+        "reset_at",
+        "resetsAt",
+        "resets_at",
+        "nextResetAt",
+        "next_reset_at",
+        "windowResetAt",
+        "window_reset_at"
+    ]
+    static let windowSignalKeys = Set(
+        usedPercentKeys + remainingPercentKeys + durationKeys + resetAtKeys
+    )
+    static let knownNonWindowKeys: Set<String> = [
+        "credits",
+        "individualLimit",
+        "individual_limit",
+        "limitId",
+        "limit_id",
+        "limitName",
+        "limit_name",
+        "planType",
+        "plan_type",
+        "rateLimitReachedType",
+        "rate_limit_reached_type"
+    ]
+}
+
+private enum ConflictingSchemaValue {
+    case marker
+}
+
 protocol CodexRPCCancellable: Sendable {
     func cancel()
 }
@@ -495,14 +543,24 @@ actor CodexRPCClient {
 
     private func handleRateLimitsResponse(_ result: CodexAppServerJSONValue) {
         guard case .object(let object) = result,
-              let legacyRateLimits = object["rateLimits"],
-              case .object = legacyRateLimits,
               let response = result.foundationObject() else {
             complete(.failure(RealQuotaError.responseInvalid))
             return
         }
 
-        guard let snapshot = RealQuotaProvider.parseRateLimits(response: response) else {
+        let hasSupportedContainer = RateLimitResponseSchema.containerKeys.contains { key in
+            guard let value = object[key], case .object = value else { return false }
+            return true
+        }
+        guard hasSupportedContainer else {
+            complete(.failure(RealQuotaError.responseInvalid))
+            return
+        }
+
+        guard let snapshot = RealQuotaProvider.parseRateLimits(response: response),
+              snapshot.quotaWindows.contains(where: {
+                  $0.state.isCurrent && $0.kind != .unknown
+              }) else {
             complete(.failure(RealQuotaError.noUsableRateLimits))
             return
         }
@@ -700,13 +758,29 @@ struct RealQuotaProvider: RealQuotaRefreshing {
         let state: QuotaFieldState
     }
 
+    private enum ParsedWindowDuration {
+        case missing
+        case valid(Int)
+        case invalid
+
+        var value: Int? {
+            guard case .valid(let value) = self else { return nil }
+            return value
+        }
+
+        var isMissing: Bool {
+            if case .missing = self { return true }
+            return false
+        }
+    }
+
     private struct ParsedQuotaWindow {
         let limitId: String
         let windowId: String
         let kind: QuotaWindowKind
         let durationMinutes: Int?
         let field: ParsedQuotaField
-        let resetAt: Date?
+        let resetMetadata: ParsedResetMetadata
     }
 
     private let codexPath: String?
@@ -728,15 +802,27 @@ struct RealQuotaProvider: RealQuotaRefreshing {
     // MARK: - Response Parsing (with field-level validation)
 
     static func parseRateLimits(response: [String: Any]) -> QuotaSnapshot? {
-        var rateLimitsByLimitId = response["rateLimitsByLimitId"] as? [String: Any] ?? [:]
-        if let legacyRateLimits = response["rateLimits"] as? [String: Any] {
-            var canonicalBucket = legacyRateLimits
-            if let dynamicCanonicalBucket = rateLimitsByLimitId["codex"] as? [String: Any] {
-                for (key, value) in dynamicCanonicalBucket {
-                    canonicalBucket[key] = value
+        var rateLimitsByLimitId = mergedObjectValues(
+            in: response,
+            keys: RateLimitResponseSchema.dynamicContainerKeys
+        ) ?? [:]
+        if let legacyRateLimits = mergedObjectValues(
+            in: response,
+            keys: RateLimitResponseSchema.legacyContainerKeys
+        ) {
+            if let dynamicCanonicalValue = rateLimitsByLimitId["codex"] {
+                if let dynamicCanonicalBucket = dynamicCanonicalValue as? [String: Any] {
+                    var canonicalBucket = legacyRateLimits
+                    // The multi-bucket view is the canonical source when both
+                    // schemas coexist; the legacy object is fallback-only.
+                    for (key, value) in dynamicCanonicalBucket {
+                        canonicalBucket[key] = value
+                    }
+                    rateLimitsByLimitId["codex"] = canonicalBucket
                 }
+            } else {
+                rateLimitsByLimitId["codex"] = legacyRateLimits
             }
-            rateLimitsByLimitId["codex"] = canonicalBucket
         }
 
         let codexBucket = rateLimitsByLimitId["codex"] as? [String: Any] ?? [:]
@@ -745,14 +831,13 @@ struct RealQuotaProvider: RealQuotaRefreshing {
         let codexOtherBucket = rateLimitsByLimitId["codex_other"] as? [String: Any]
         let fallbackSecondary = codexOtherBucket?["primary"] as? [String: Any]
 
-        guard primary != nil || canonicalSecondary != nil || fallbackSecondary != nil else {
-            AppLogger.codexRPC.error("No usable quota windows in rate limits response")
-            return nil
-        }
-
-        let primaryOmitsDuration = primary.map { parseWindowDuration($0) == nil } ?? false
-        let canonicalSecondaryOmitsDuration = canonicalSecondary.map { parseWindowDuration($0) == nil } ?? false
-        let fallbackSecondaryOmitsDuration = fallbackSecondary.map { parseWindowDuration($0) == nil } ?? false
+        let primaryOmitsDuration = primary.map { parseWindowDuration($0).isMissing } ?? false
+        let canonicalSecondaryOmitsDuration = canonicalSecondary.map {
+            parseWindowDuration($0).isMissing
+        } ?? false
+        let fallbackSecondaryOmitsDuration = fallbackSecondary.map {
+            parseWindowDuration($0).isMissing
+        } ?? false
         let retainsLegacyDualMapping = primaryOmitsDuration
             && ((canonicalSecondary != nil && canonicalSecondaryOmitsDuration)
                 || (canonicalSecondary == nil && fallbackSecondary != nil && fallbackSecondaryOmitsDuration))
@@ -760,13 +845,17 @@ struct RealQuotaProvider: RealQuotaRefreshing {
         let parsedWindows = rateLimitsByLimitId.keys.sorted().flatMap { limitId -> [ParsedQuotaWindow] in
             guard let bucket = rateLimitsByLimitId[limitId] as? [String: Any] else { return [] }
             return bucket.keys.sorted().compactMap { windowId in
-                guard let window = bucket[windowId] as? [String: Any] else { return nil }
-                let durationMinutes = parseWindowDuration(window)
+                guard let window = bucket[windowId] as? [String: Any],
+                      isQuotaWindowCandidate(windowId: windowId, window: window) else {
+                    return nil
+                }
+                let parsedDuration = parseWindowDuration(window)
+                let durationMinutes = parsedDuration.value
                 let kind = classifyWindow(
                     limitId: limitId,
                     windowId: windowId,
                     durationMinutes: durationMinutes,
-                    retainsLegacyDualMapping: retainsLegacyDualMapping
+                    retainsLegacyDualMapping: retainsLegacyDualMapping && parsedDuration.isMissing
                 )
                 return ParsedQuotaWindow(
                     limitId: limitId,
@@ -774,34 +863,36 @@ struct RealQuotaProvider: RealQuotaRefreshing {
                     kind: kind,
                     durationMinutes: durationMinutes,
                     field: parseQuotaField(window, label: "\(limitId).\(windowId)"),
-                    resetAt: parseResetMetadata(from: window).resetAt
+                    resetMetadata: parseResetMetadata(from: window)
                 )
             }
         }
 
-        let fiveHourWindow = preferredWindow(
-            kind: .fiveHour,
-            limitId: "codex",
-            windowId: "primary",
-            in: parsedWindows
-        )
-        let canonicalWeeklyWindow = parsedWindows.first { $0.limitId == "codex" && $0.windowId == "secondary" && $0.kind == .weekly }
-        let fallbackWeeklyWindow = parsedWindows.first { $0.limitId == "codex_other" && $0.windowId == "primary" && $0.kind == .weekly }
-        let fiveHour = fiveHourWindow?.field ?? ParsedQuotaField(remaining: 0, state: .unavailable)
-        let canonicalWeekly = canonicalWeeklyWindow?.field ?? ParsedQuotaField(remaining: 0, state: .unavailable)
-        let fallbackWeekly = fallbackWeeklyWindow?.field ?? ParsedQuotaField(remaining: 0, state: .unavailable)
-        let weekly: ParsedQuotaField
-        let usesFallbackWeeklySource: Bool
-        if canonicalWeekly.state == .live || fallbackWeekly.state != .live {
-            weekly = canonicalWeekly
-            usesFallbackWeeklySource = false
-        } else {
-            weekly = fallbackWeekly
-            usesFallbackWeeklySource = true
+        guard !parsedWindows.isEmpty else {
+            AppLogger.codexRPC.error("No quota windows in rate limits response")
+            return nil
         }
 
-        let fiveHourResetAt = fiveHourWindow?.resetAt
-        let resetCredits = parseResetCredits(from: response["rateLimitResetCredits"])
+        let fiveHourWindow = preferredWindow(
+            kind: .fiveHour,
+            preferredIdentities: [("codex", "primary")],
+            in: parsedWindows
+        )
+        let weeklyWindow = preferredWindow(
+            kind: .weekly,
+            preferredIdentities: [("codex", "secondary"), ("codex_other", "primary")],
+            in: parsedWindows
+        )
+        let fiveHour = fiveHourWindow?.field ?? ParsedQuotaField(remaining: 0, state: .unavailable)
+        let weekly = weeklyWindow?.field ?? ParsedQuotaField(remaining: 0, state: .unavailable)
+        let usesFallbackWeeklySource = weeklyWindow?.limitId == "codex_other"
+            && weeklyWindow?.windowId == "primary"
+
+        let fiveHourResetAt = fiveHourWindow?.resetMetadata.resetAt
+        let resetCredits = parseResetCredits(from: mergedObjectValues(
+            in: response,
+            keys: RateLimitResponseSchema.resetCreditsKeys
+        ))
 
         if fiveHour.state == .live || weekly.state == .live {
             AppLogger.codexRPC.info("Parsed real quota: weekly=\(weekly.remaining)% [\(weekly.state.rawValue, privacy: .public)] fiveHour=\(fiveHour.remaining)% [\(fiveHour.state.rawValue, privacy: .public)]")
@@ -823,9 +914,8 @@ struct RealQuotaProvider: RealQuotaRefreshing {
             resetCreditRawFields: [],
             fiveHourResetAt: fiveHourResetAt,
             resetBanks: parseResetBanks(
-                from: rateLimitsByLimitId,
-                usesFallbackWeeklySource: usesFallbackWeeklySource,
-                retainsLegacyDualMapping: retainsLegacyDualMapping
+                from: parsedWindows,
+                usesFallbackWeeklySource: usesFallbackWeeklySource
             ),
             refreshedAt: .now,
             dataSource: .real,
@@ -838,10 +928,79 @@ struct RealQuotaProvider: RealQuotaRefreshing {
                     durationMinutes: $0.durationMinutes,
                     remainingPercent: $0.field.remaining,
                     state: $0.field.state,
-                    resetAt: $0.resetAt
+                    resetAt: $0.resetMetadata.resetAt
                 )
             }
         )
+    }
+
+    private static func mergedObjectValues(
+        in object: [String: Any],
+        keys: [String]
+    ) -> [String: Any]? {
+        var merged: [String: Any] = [:]
+        var foundObject = false
+
+        for key in keys {
+            guard let value = object[key] as? [String: Any] else { continue }
+            if foundObject {
+                merged = mergeAliasedObjects(merged, value)
+            } else {
+                merged = value
+                foundObject = true
+            }
+        }
+
+        return foundObject ? merged : nil
+    }
+
+    private static func mergeAliasedObjects(
+        _ lhs: [String: Any],
+        _ rhs: [String: Any]
+    ) -> [String: Any] {
+        var merged = lhs
+        for (key, rhsValue) in rhs {
+            guard let lhsValue = merged[key] else {
+                merged[key] = rhsValue
+                continue
+            }
+            merged[key] = mergeAliasedValues(lhsValue, rhsValue)
+        }
+        return merged
+    }
+
+    private static func mergeAliasedValues(_ lhs: Any, _ rhs: Any) -> Any {
+        if lhs is ConflictingSchemaValue || rhs is ConflictingSchemaValue {
+            return ConflictingSchemaValue.marker
+        }
+        if lhs is NSNull { return rhs }
+        if rhs is NSNull { return lhs }
+        if let lhsObject = lhs as? [String: Any],
+           let rhsObject = rhs as? [String: Any] {
+            return mergeAliasedObjects(lhsObject, rhsObject)
+        }
+        if isBooleanJSONValue(lhs) != isBooleanJSONValue(rhs) {
+            return ConflictingSchemaValue.marker
+        }
+        if let lhsObject = lhs as? NSObject,
+           let rhsObject = rhs as? NSObject,
+           lhsObject.isEqual(rhsObject) {
+            return lhs
+        }
+        return ConflictingSchemaValue.marker
+    }
+
+    private static func isQuotaWindowCandidate(
+        windowId: String,
+        window: [String: Any]
+    ) -> Bool {
+        guard !RateLimitResponseSchema.knownNonWindowKeys.contains(windowId) else {
+            return false
+        }
+        if windowId == "primary" || windowId == "secondary" {
+            return true
+        }
+        return !RateLimitResponseSchema.windowSignalKeys.isDisjoint(with: window.keys)
     }
 
     private static func classifyWindow(
@@ -870,29 +1029,55 @@ struct RealQuotaProvider: RealQuotaRefreshing {
 
     private static func preferredWindow(
         kind: QuotaWindowKind,
-        limitId: String,
-        windowId: String,
+        preferredIdentities: [(limitId: String, windowId: String)],
         in windows: [ParsedQuotaWindow]
     ) -> ParsedQuotaWindow? {
-        if let exact = windows.first(where: { $0.kind == kind && $0.limitId == limitId && $0.windowId == windowId }) {
-            return exact
+        let candidates = windows.filter { $0.kind == kind }
+        for identity in preferredIdentities {
+            if let exactLive = candidates.first(where: {
+                $0.limitId == identity.limitId
+                    && $0.windowId == identity.windowId
+                    && $0.field.state.isCurrent
+            }) {
+                return exactLive
+            }
         }
-        return windows.first(where: { $0.kind == kind })
+        if let live = candidates.first(where: { $0.field.state.isCurrent }) {
+            return live
+        }
+        for identity in preferredIdentities {
+            if let exact = candidates.first(where: {
+                $0.limitId == identity.limitId && $0.windowId == identity.windowId
+            }) {
+                return exact
+            }
+        }
+        return candidates.first
     }
 
-    private static func parseWindowDuration(_ window: [String: Any]) -> Int? {
-        let rawValue = window["windowDurationMins"] ?? window["windowDurationMinutes"] ?? window["durationMinutes"]
-        guard !isBooleanJSONValue(rawValue) else { return nil }
-        if let value = rawValue as? NSNumber {
-            return value.intValue
+    private static func parseWindowDuration(_ window: [String: Any]) -> ParsedWindowDuration {
+        var values: [Int] = []
+        var hasInvalidValue = false
+        var hasNonNullField = false
+
+        for key in RateLimitResponseSchema.durationKeys {
+            guard let rawValue = window[key] else { continue }
+            guard !(rawValue is NSNull) else { continue }
+            hasNonNullField = true
+            guard let value = parseInteger(rawValue), value > 0 else {
+                hasInvalidValue = true
+                continue
+            }
+            values.append(value)
         }
-        if let value = rawValue as? Int {
-            return value
+
+        guard hasNonNullField else { return .missing }
+        guard !hasInvalidValue,
+              let duration = values.first,
+              values.allSatisfy({ $0 == duration }) else {
+            return .invalid
         }
-        if let value = rawValue as? String {
-            return Int(value.trimmingCharacters(in: .whitespacesAndNewlines))
-        }
-        return nil
+        return .valid(duration)
     }
 
     private static func parseQuotaField(
@@ -904,21 +1089,51 @@ struct RealQuotaProvider: RealQuotaRefreshing {
             return ParsedQuotaField(remaining: 0, state: .unavailable)
         }
 
-        guard let rawUsedPercent = window["usedPercent"],
-              let usedPercent = parsePercentage(rawUsedPercent),
-              usedPercent.isFinite else {
-            AppLogger.codexRPC.error("\(label) usedPercent is missing, non-numeric, or non-finite")
+        var remainingCandidates: [Double] = []
+        var hasRecognizedField = false
+        var hasInvalidValue = false
+
+        for key in RateLimitResponseSchema.usedPercentKeys {
+            guard let rawValue = window[key] else { continue }
+            hasRecognizedField = true
+            guard !(rawValue is NSNull),
+                  let usedPercent = parsePercentage(rawValue),
+                  usedPercent.isFinite,
+                  (0...100).contains(usedPercent) else {
+                if !(rawValue is NSNull) {
+                    hasInvalidValue = true
+                }
+                continue
+            }
+            remainingCandidates.append(100.0 - usedPercent)
+        }
+
+        for key in RateLimitResponseSchema.remainingPercentKeys {
+            guard let rawValue = window[key] else { continue }
+            hasRecognizedField = true
+            guard !(rawValue is NSNull),
+                  let remainingPercent = parsePercentage(rawValue),
+                  remainingPercent.isFinite,
+                  (0...100).contains(remainingPercent) else {
+                if !(rawValue is NSNull) {
+                    hasInvalidValue = true
+                }
+                continue
+            }
+            remainingCandidates.append(remainingPercent)
+        }
+
+        guard hasRecognizedField,
+              !hasInvalidValue,
+              let rawRemaining = remainingCandidates.first,
+              remainingCandidates.allSatisfy({ abs($0 - rawRemaining) < 0.000_001 }) else {
+            AppLogger.codexRPC.error("\(label) quota percentage is missing, invalid, or conflicting")
             return ParsedQuotaField(remaining: 0, state: .invalid)
         }
 
-        guard (0...100).contains(usedPercent) else {
-            AppLogger.codexRPC.error("\(label) usedPercent out of range: \(usedPercent, privacy: .public)")
-            return ParsedQuotaField(remaining: 0, state: .invalid)
-        }
-
-        let remaining = Int((100.0 - usedPercent).rounded())
+        let remaining = Int(rawRemaining.rounded())
         guard (0...100).contains(remaining) else {
-            AppLogger.codexRPC.error("Computed \(label) remaining value out of range: \(remaining)")
+            AppLogger.codexRPC.error("\(label) computed remaining percentage is invalid")
             return ParsedQuotaField(remaining: 0, state: .invalid)
         }
 
@@ -942,58 +1157,60 @@ struct RealQuotaProvider: RealQuotaRefreshing {
         return nil
     }
 
+    private static func parseInteger(_ rawValue: Any) -> Int? {
+        guard !isBooleanJSONValue(rawValue) else { return nil }
+        if let number = rawValue as? NSNumber {
+            switch String(cString: number.objCType) {
+            case "c", "s", "i", "l", "q":
+                return Int(exactly: number.int64Value)
+            case "C", "S", "I", "L", "Q":
+                return Int(exactly: number.uint64Value)
+            default:
+                break
+            }
+
+            let value = number.doubleValue
+            guard value.isFinite,
+                  value.rounded() == value,
+                  let integer = Int(exactly: value) else {
+                return nil
+            }
+            return integer
+        }
+        if let value = rawValue as? String {
+            return Int(value.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return nil
+    }
+
     private static func parseResetBanks(
-        from rateLimitsByLimitId: [String: Any],
-        usesFallbackWeeklySource: Bool,
-        retainsLegacyDualMapping: Bool
+        from windows: [ParsedQuotaWindow],
+        usesFallbackWeeklySource: Bool
     ) -> [ResetBankSnapshot] {
-        var banks: [ResetBankSnapshot] = []
-
-        for limitId in rateLimitsByLimitId.keys.sorted() {
-            guard let bucket = rateLimitsByLimitId[limitId] as? [String: Any] else {
-                continue
-            }
-
-            for windowId in bucket.keys.sorted() {
-                if shouldSkipResetBank(
-                    limitId: limitId,
-                    windowId: windowId,
+        let banks = windows.compactMap { window -> ResetBankSnapshot? in
+            guard window.field.state.isCurrent,
+                  !shouldSkipResetBank(
+                    limitId: window.limitId,
+                    windowId: window.windowId,
                     usesFallbackWeeklySource: usesFallbackWeeklySource
-                ) {
-                    continue
-                }
-
-                guard let window = bucket[windowId] as? [String: Any],
-                      let usedPercent = window["usedPercent"].flatMap(parsePercentage),
-                      usedPercent.isFinite,
-                      usedPercent >= 0,
-                      usedPercent <= 100 else {
-                    AppLogger.codexRPC.debug("Skipping reset bank \(limitId, privacy: .public).\(windowId, privacy: .public): missing or invalid usedPercent")
-                    continue
-                }
-
-                let remainingPercent = Int((100.0 - usedPercent).rounded())
-                let reset = parseResetMetadata(from: window)
-                let durationMinutes = parseWindowDuration(window)
-                let kind = classifyWindow(
-                    limitId: limitId,
-                    windowId: windowId,
-                    durationMinutes: durationMinutes,
-                    retainsLegacyDualMapping: retainsLegacyDualMapping
-                )
-                banks.append(
-                    ResetBankSnapshot(
-                        limitId: limitId,
-                        windowId: windowId,
-                        displayName: resetBankDisplayName(limitId: limitId, windowId: windowId, kind: kind),
-                        remainingPercent: remainingPercent,
-                        resetAt: reset.resetAt,
-                        resetTimeStatus: reset.status,
-                        windowKind: kind,
-                        durationMinutes: durationMinutes
-                    )
-                )
+                  ) else {
+                return nil
             }
+
+            return ResetBankSnapshot(
+                limitId: window.limitId,
+                windowId: window.windowId,
+                displayName: resetBankDisplayName(
+                    limitId: window.limitId,
+                    windowId: window.windowId,
+                    kind: window.kind
+                ),
+                remainingPercent: window.field.remaining,
+                resetAt: window.resetMetadata.resetAt,
+                resetTimeStatus: window.resetMetadata.status,
+                windowKind: window.kind,
+                durationMinutes: window.durationMinutes
+            )
         }
 
         return banks
@@ -1051,31 +1268,31 @@ struct RealQuotaProvider: RealQuotaRefreshing {
 
     private static func parseResetMetadata(from window: [String: Any]) -> ParsedResetMetadata {
         var hasCandidateField = false
-        var parsedDate: Date?
+        var hasInvalidValue = false
+        var parsedDates: [Date] = []
 
-        for key in ["resetAt", "resetsAt", "nextResetAt", "windowResetAt"] {
+        for key in RateLimitResponseSchema.resetAtKeys {
             guard let rawValue = window[key] else {
                 continue
             }
 
             hasCandidateField = true
-            if parsedDate == nil {
-                parsedDate = parseDate(rawValue)
+            guard !(rawValue is NSNull) else { continue }
+            if let parsedDate = parseDate(rawValue) {
+                parsedDates.append(parsedDate)
+            } else {
+                hasInvalidValue = true
             }
         }
 
-        let status: ResetBankResetTimeStatus
-        if parsedDate != nil {
-            status = .actual
-        } else if !hasCandidateField {
-            status = .unexposed
-        } else {
-            status = .parseFailed
+        if !hasInvalidValue,
+           let resetAt = parsedDates.first,
+           parsedDates.allSatisfy({ $0 == resetAt }) {
+            return ParsedResetMetadata(resetAt: resetAt, status: .actual)
         }
-
         return ParsedResetMetadata(
-            resetAt: parsedDate,
-            status: status
+            resetAt: nil,
+            status: hasCandidateField ? .parseFailed : .unexposed
         )
     }
 
@@ -1084,20 +1301,23 @@ struct RealQuotaProvider: RealQuotaRefreshing {
             return ParsedResetCredits(availableCount: nil)
         }
 
-        var availableCount: Int?
-
-        let rawAvailableCount = container["availableCount"] ?? container["available_count"]
-        if isBooleanJSONValue(rawAvailableCount) {
-            availableCount = nil
-        } else if let count = rawAvailableCount as? Int {
-            availableCount = count
-        } else if let number = rawAvailableCount as? NSNumber {
-            availableCount = number.intValue
-        } else if let string = rawAvailableCount as? String, let count = Int(string) {
-            availableCount = count
+        var counts: [Int] = []
+        var hasInvalidValue = false
+        for key in ["availableCount", "available_count"] {
+            guard let rawValue = container[key], !(rawValue is NSNull) else { continue }
+            guard let count = parseInteger(rawValue), count >= 0 else {
+                hasInvalidValue = true
+                continue
+            }
+            counts.append(count)
         }
 
-        return ParsedResetCredits(availableCount: availableCount)
+        guard !hasInvalidValue,
+              let count = counts.first,
+              counts.allSatisfy({ $0 == count }) else {
+            return ParsedResetCredits(availableCount: nil)
+        }
+        return ParsedResetCredits(availableCount: count)
     }
 
     private static func parseDate(_ rawValue: Any) -> Date? {

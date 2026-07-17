@@ -589,7 +589,7 @@ final class RealQuotaProviderTests: XCTestCase {
         XCTAssertEqual(transport.shutdownCount, 1)
     }
 
-    func testRPCClientRequiresSchemaRateLimitsFieldBeforeMappingDynamicBuckets() async {
+    func testRPCClientAcceptsDynamicBucketsWhenLegacyRateLimitsFieldIsMissing() async throws {
         let transport = ControlledRPCTransport()
         let client = CodexRPCClient(
             transport: transport,
@@ -600,9 +600,100 @@ final class RealQuotaProviderTests: XCTestCase {
         await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
         transport.emitStdout(Self.initializeResponse)
         await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
-        transport.emitStdout(Data("{\"id\":2,\"result\":{\"rateLimitsByLimitId\":{\"codex\":{\"primary\":{\"usedPercent\":50}}}}}\n".utf8))
+        transport.emitStdout(Data("{\"id\":2,\"result\":{\"rateLimitsByLimitId\":{\"codex\":{\"primary\":{\"windowDurationMins\":300,\"usedPercent\":50},\"secondary\":{\"windowDurationMins\":10080,\"usedPercent\":25}}}}}\n".utf8))
+
+        let snapshot = try await task.value
+        XCTAssertEqual(snapshot.fiveHourQuotaPercent, 50)
+        XCTAssertEqual(snapshot.fiveHourQuotaState, .live)
+        XCTAssertEqual(snapshot.weeklyQuotaPercent, 75)
+        XCTAssertEqual(snapshot.weeklyQuotaState, .live)
+    }
+
+    func testRPCClientAcceptsRenamedTopLevelContainer() async throws {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.initializeResponse)
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":2,\"result\":{\"rate_limits_by_limit_id\":{\"codex_v2\":{\"weekly\":{\"duration_minutes\":10080,\"remaining_percent\":64}}}}}\n".utf8))
+
+        let snapshot = try await task.value
+        XCTAssertEqual(snapshot.weeklyQuotaPercent, 64)
+        XCTAssertEqual(snapshot.weeklyQuotaState, .live)
+        XCTAssertEqual(snapshot.fiveHourQuotaState, .unavailable)
+    }
+
+    func testRPCClientRejectsObjectWithoutSupportedRateLimitsContainer() async {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.initializeResponse)
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":2,\"result\":{\"futureField\":{}}}\n".utf8))
 
         await assertFailure(.responseInvalid, from: task)
+    }
+
+    func testRPCClientRejectsResponseWhenEveryQuotaWindowIsMalformed() async {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.initializeResponse)
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":2,\"result\":{\"rateLimits\":{},\"rateLimitsByLimitId\":{\"codex\":{\"primary\":{\"windowDurationMins\":300,\"usedPercent\":\"bad\"},\"secondary\":{\"windowDurationMins\":10080}}}}}\n".utf8))
+
+        await assertFailure(.noUsableRateLimits, from: task)
+    }
+
+    func testRPCClientRejectsUnknownOnlyWindowAsNoUsableRateLimits() async {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.initializeResponse)
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":2,\"result\":{\"rateLimitsByLimitId\":{\"future_limit\":{\"future_window\":{\"windowDurationMins\":1234,\"usedPercent\":10}}}}}\n".utf8))
+
+        await assertFailure(.noUsableRateLimits, from: task)
+    }
+
+    func testRPCClientAcceptsValidWindowWhenSiblingWindowIsMalformed() async throws {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.initializeResponse)
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":2,\"result\":{\"rateLimits\":{},\"rateLimitsByLimitId\":{\"codex\":{\"primary\":{\"windowDurationMins\":300,\"usedPercent\":\"bad\"},\"secondary\":{\"windowDurationMins\":10080,\"usedPercent\":35}}}}}\n".utf8))
+
+        let snapshot = try await task.value
+        XCTAssertEqual(snapshot.fiveHourQuotaPercent, 0)
+        XCTAssertEqual(snapshot.fiveHourQuotaState, .invalid)
+        XCTAssertEqual(snapshot.weeklyQuotaPercent, 65)
+        XCTAssertEqual(snapshot.weeklyQuotaState, .live)
     }
 
     func testRPCClientMapsRequiredLegacyRateLimitsWhenDynamicBucketsAreNull() async throws {
@@ -661,6 +752,308 @@ final class RealQuotaProviderTests: XCTestCase {
         XCTAssertEqual(snapshot.fiveHourQuotaPercent, 60)
         XCTAssertEqual(snapshot.weeklyQuotaPercent, 80)
         XCTAssertEqual(snapshot.quotaWindows.map(\.id), ["codex.primary", "codex.secondary"])
+    }
+
+    func testParseRateLimitsTreatsDynamicCodexBucketAsAuthoritativeOverLegacyMirror() throws {
+        let response: [String: Any] = [
+            "rateLimits": [
+                "primary": ["windowDurationMins": 300, "usedPercent": 10],
+                "secondary": ["windowDurationMins": 10_080, "usedPercent": 20]
+            ],
+            "rateLimitsByLimitId": [
+                "codex": [
+                    "primary": ["windowDurationMins": 300, "usedPercent": 40],
+                    "secondary": ["windowDurationMins": 10_080, "usedPercent": 50]
+                ]
+            ]
+        ]
+
+        let snapshot = try XCTUnwrap(RealQuotaProvider.parseRateLimits(response: response))
+
+        XCTAssertEqual(snapshot.fiveHourQuotaPercent, 60)
+        XCTAssertEqual(snapshot.weeklyQuotaPercent, 50)
+        XCTAssertEqual(snapshot.quotaWindows.map(\.id), ["codex.primary", "codex.secondary"])
+    }
+
+    func testParseRateLimitsDeepMergesComplementaryContainerAliases() throws {
+        let response: [String: Any] = [
+            "rateLimitsByLimitId": [
+                "codex": [
+                    "primary": ["windowDurationMins": 300, "usedPercent": 20]
+                ]
+            ],
+            "rate_limits_by_limit_id": [
+                "codex": [
+                    "secondary": ["windowDurationMins": 10_080, "usedPercent": 35]
+                ]
+            ]
+        ]
+
+        let snapshot = try XCTUnwrap(RealQuotaProvider.parseRateLimits(response: response))
+
+        XCTAssertEqual(snapshot.fiveHourQuotaPercent, 80)
+        XCTAssertEqual(snapshot.weeklyQuotaPercent, 65)
+        XCTAssertEqual(snapshot.quotaWindows.map(\.id), ["codex.primary", "codex.secondary"])
+    }
+
+    func testParseRateLimitsMarksConflictingContainerAliasesInvalid() throws {
+        let response: [String: Any] = [
+            "rateLimitsByLimitId": [
+                "codex": [
+                    "primary": ["windowDurationMins": 300, "usedPercent": 20]
+                ]
+            ],
+            "rate_limits_by_limit_id": [
+                "codex": [
+                    "primary": ["windowDurationMins": 300, "usedPercent": 30],
+                    "secondary": ["windowDurationMins": 10_080, "usedPercent": 35]
+                ]
+            ]
+        ]
+
+        let snapshot = try XCTUnwrap(RealQuotaProvider.parseRateLimits(response: response))
+
+        XCTAssertEqual(snapshot.fiveHourQuotaPercent, 0)
+        XCTAssertEqual(snapshot.fiveHourQuotaState, .invalid)
+        XCTAssertEqual(snapshot.weeklyQuotaPercent, 65)
+        XCTAssertEqual(snapshot.weeklyQuotaState, .live)
+    }
+
+    func testParseRateLimitsNeverTreatsBooleanAndNumericAliasesAsEqual() throws {
+        let response: [String: Any] = [
+            "rateLimitsByLimitId": [
+                "codex": [
+                    "primary": ["windowDurationMins": 300, "usedPercent": 1]
+                ]
+            ],
+            "rate_limits_by_limit_id": [
+                "codex": [
+                    "primary": ["windowDurationMins": 300, "usedPercent": true],
+                    "secondary": ["windowDurationMins": 10_080, "usedPercent": 35]
+                ]
+            ]
+        ]
+
+        let snapshot = try XCTUnwrap(RealQuotaProvider.parseRateLimits(response: response))
+
+        XCTAssertEqual(snapshot.fiveHourQuotaPercent, 0)
+        XCTAssertEqual(snapshot.fiveHourQuotaState, .invalid)
+        XCTAssertEqual(snapshot.weeklyQuotaPercent, 65)
+        XCTAssertEqual(snapshot.weeklyQuotaState, .live)
+    }
+
+    func testParseRateLimitsIgnoresAddedTopLevelAndSnapshotMetadataFields() throws {
+        let response: [String: Any] = [
+            "futureTopLevelField": ["opaque": 99],
+            "rateLimitsByLimitId": [
+                "codex": [
+                    "credits": ["hasCredits": true, "unlimited": false],
+                    "individualLimit": ["remainingPercent": 17],
+                    "newMetadata": ["opaque": 88],
+                    "primary": [
+                        "windowDurationMins": 300,
+                        "usedPercent": 20,
+                        "futureWindowField": "ignored"
+                    ]
+                ]
+            ]
+        ]
+
+        let snapshot = try XCTUnwrap(RealQuotaProvider.parseRateLimits(response: response))
+
+        XCTAssertEqual(snapshot.fiveHourQuotaPercent, 80)
+        XCTAssertEqual(snapshot.fiveHourQuotaState, .live)
+        XCTAssertEqual(snapshot.quotaWindows.map(\.id), ["codex.primary"])
+    }
+
+    func testParseRateLimitsSupportsRenamedContainersFieldsAndWindowIDs() throws {
+        let response: [String: Any] = [
+            "rate_limit_reset_credits": ["available_count": "3"],
+            "rate_limits_by_limit_id": [
+                "codex_v2": [
+                    "short_term": [
+                        "window_duration_mins": "300",
+                        "used_percent": "20",
+                        "reset_at": "2026-06-19T14:10:00Z"
+                    ],
+                    "long_term": [
+                        "duration_minutes": 10_080,
+                        "remaining_percent": 65
+                    ],
+                    "future": [
+                        "window_duration_minutes": 1_234,
+                        "remainingPercent": 42
+                    ]
+                ]
+            ]
+        ]
+
+        let snapshot = try XCTUnwrap(RealQuotaProvider.parseRateLimits(response: response))
+
+        XCTAssertEqual(snapshot.fiveHourQuotaPercent, 80)
+        XCTAssertEqual(snapshot.fiveHourQuotaState, .live)
+        XCTAssertEqual(snapshot.weeklyQuotaPercent, 65)
+        XCTAssertEqual(snapshot.weeklyQuotaState, .live)
+        XCTAssertEqual(snapshot.resetAvailableCount, 3)
+        XCTAssertNotNil(snapshot.fiveHourResetAt)
+        XCTAssertEqual(
+            snapshot.quotaWindows.first(where: { $0.windowId == "future" })?.kind,
+            .unknown
+        )
+        XCTAssertEqual(
+            snapshot.quotaWindows.first(where: { $0.windowId == "future" })?.remainingPercent,
+            42
+        )
+    }
+
+    func testParseRateLimitsMarksMissingPercentageInvalidWithoutSynthesizingQuota() throws {
+        let response: [String: Any] = [
+            "rateLimitsByLimitId": [
+                "codex": [
+                    "primary": ["windowDurationMins": 300],
+                    "secondary": ["windowDurationMins": 10_080, "usedPercent": 35]
+                ]
+            ]
+        ]
+
+        let snapshot = try XCTUnwrap(RealQuotaProvider.parseRateLimits(response: response))
+
+        XCTAssertEqual(snapshot.fiveHourQuotaPercent, 0)
+        XCTAssertEqual(snapshot.fiveHourQuotaState, .invalid)
+        XCTAssertEqual(snapshot.weeklyQuotaPercent, 65)
+        XCTAssertEqual(snapshot.weeklyQuotaState, .live)
+        XCTAssertNotEqual(snapshot.fiveHourQuotaPercent, 100)
+    }
+
+    func testParseRateLimitsRejectsConflictingAliasesAndDoesNotGuessDuration() throws {
+        let response: [String: Any] = [
+            "rateLimitsByLimitId": [
+                "codex": [
+                    "primary": [
+                        "windowDurationMins": 300,
+                        "usedPercent": 20,
+                        "remainingPercent": 20
+                    ],
+                    "secondary": ["windowDurationMins": 10_080, "usedPercent": 35],
+                    "conflictingDuration": [
+                        "windowDurationMins": 300,
+                        "durationMinutes": 10_080,
+                        "usedPercent": 10
+                    ]
+                ]
+            ]
+        ]
+
+        let snapshot = try XCTUnwrap(RealQuotaProvider.parseRateLimits(response: response))
+
+        XCTAssertEqual(snapshot.fiveHourQuotaPercent, 0)
+        XCTAssertEqual(snapshot.fiveHourQuotaState, .invalid)
+        XCTAssertEqual(snapshot.weeklyQuotaPercent, 65)
+        XCTAssertEqual(snapshot.weeklyQuotaState, .live)
+        XCTAssertEqual(
+            snapshot.quotaWindows.first(where: { $0.windowId == "conflictingDuration" })?.kind,
+            .unknown
+        )
+    }
+
+    func testParseRateLimitsDoesNotApplyLegacyMappingToConflictingCanonicalDurations() throws {
+        let response: [String: Any] = [
+            "rateLimitsByLimitId": [
+                "codex": [
+                    "primary": [
+                        "windowDurationMins": 300,
+                        "durationMinutes": 10_080,
+                        "usedPercent": 20
+                    ],
+                    "secondary": [
+                        "windowDurationMins": 10_080,
+                        "durationMinutes": 300,
+                        "usedPercent": 35
+                    ]
+                ]
+            ]
+        ]
+
+        let snapshot = try XCTUnwrap(RealQuotaProvider.parseRateLimits(response: response))
+
+        XCTAssertEqual(snapshot.fiveHourQuotaState, .unavailable)
+        XCTAssertEqual(snapshot.weeklyQuotaState, .unavailable)
+        XCTAssertEqual(snapshot.quotaWindows.map(\.kind), [.unknown, .unknown])
+        XCTAssertTrue(snapshot.quotaWindows.allSatisfy { $0.state == .live })
+    }
+
+    func testParseRateLimitsSafelyRejectsOutOfRangeIntegerMetadata() throws {
+        let response: [String: Any] = [
+            "rateLimitResetCredits": ["availableCount": Double.greatestFiniteMagnitude],
+            "rateLimitsByLimitId": [
+                "codex": [
+                    "primary": [
+                        "windowDurationMins": Double.greatestFiniteMagnitude,
+                        "usedPercent": 20
+                    ],
+                    "secondary": ["windowDurationMins": 10_080, "usedPercent": 35]
+                ]
+            ]
+        ]
+
+        let snapshot = try XCTUnwrap(RealQuotaProvider.parseRateLimits(response: response))
+
+        XCTAssertNil(snapshot.resetAvailableCount)
+        XCTAssertEqual(
+            snapshot.quotaWindows.first(where: { $0.windowId == "primary" })?.kind,
+            .unknown
+        )
+        XCTAssertEqual(snapshot.fiveHourQuotaState, .unavailable)
+        XCTAssertEqual(snapshot.weeklyQuotaPercent, 65)
+    }
+
+    func testParseRateLimitsPreservesIntegerMetadataBeyondDoublePrecision() throws {
+        let exactInteger = Int64(9_007_199_254_740_993)
+        let response: [String: Any] = [
+            "rateLimitResetCredits": ["availableCount": NSNumber(value: exactInteger)],
+            "rateLimitsByLimitId": [
+                "codex": [
+                    "primary": [
+                        "windowDurationMins": NSNumber(value: exactInteger),
+                        "usedPercent": 20
+                    ],
+                    "secondary": ["windowDurationMins": 10_080, "usedPercent": 35]
+                ]
+            ]
+        ]
+
+        let snapshot = try XCTUnwrap(RealQuotaProvider.parseRateLimits(response: response))
+
+        XCTAssertEqual(snapshot.resetAvailableCount, Int(exactInteger))
+        XCTAssertEqual(
+            snapshot.quotaWindows.first(where: { $0.windowId == "primary" })?.durationMinutes,
+            Int(exactInteger)
+        )
+        XCTAssertEqual(snapshot.weeklyQuotaPercent, 65)
+    }
+
+    func testParseRateLimitsPreservesUnknownOnlyWindowWithoutPromotingCoreQuota() throws {
+        let response: [String: Any] = [
+            "rateLimitsByLimitId": [
+                "future_limit": [
+                    "future_window": [
+                        "windowDurationMins": 1_234,
+                        "usedPercent": 10
+                    ]
+                ]
+            ]
+        ]
+
+        let snapshot = try XCTUnwrap(RealQuotaProvider.parseRateLimits(response: response))
+
+        XCTAssertEqual(snapshot.weeklyQuotaPercent, 0)
+        XCTAssertEqual(snapshot.weeklyQuotaState, .unavailable)
+        XCTAssertEqual(snapshot.fiveHourQuotaPercent, 0)
+        XCTAssertEqual(snapshot.fiveHourQuotaState, .unavailable)
+        XCTAssertEqual(snapshot.quotaWindows.count, 1)
+        XCTAssertEqual(snapshot.quotaWindows[0].kind, .unknown)
+        XCTAssertEqual(snapshot.quotaWindows[0].remainingPercent, 90)
+        XCTAssertEqual(snapshot.quotaWindows[0].state, .live)
     }
 
     func testParseRateLimitsNeverCoercesJSONBooleansIntoNumericFields() throws {
