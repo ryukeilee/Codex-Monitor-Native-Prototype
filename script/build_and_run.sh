@@ -49,6 +49,7 @@ WIDGET_ENTITLEMENTS="$ROOT_DIR/Assets/CodexMonitorWidgetExtension.entitlements"
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 INSTALL_APP_PATH="${INSTALL_APP_PATH:-/Applications/$APP_NAME.app}"
 INSTALL_STAGING_PATH="${INSTALL_APP_PATH}.incoming.$$"
+INSTANCE_OWNER_PATH="${HOME}/Library/Application Support/CodexMonitorNative/InstanceArbitration/v1/owner.json"
 
 usage() {
   echo "用法：$0 [run|--verify|--debug|--logs|--telemetry]"
@@ -113,6 +114,90 @@ stop_running_app() {
 
 read_plist_value() {
   /usr/bin/plutil -extract "$1" raw -o - "$2"
+}
+
+read_instance_owner_record() {
+  local protocol_version instance_id pid started_at activation_count
+
+  [[ -f "$INSTANCE_OWNER_PATH" ]] || return 1
+  protocol_version="$(/usr/bin/plutil -extract protocolVersion raw -o - "$INSTANCE_OWNER_PATH" 2>/dev/null)" || return 1
+  instance_id="$(/usr/bin/plutil -extract instanceID raw -o - "$INSTANCE_OWNER_PATH" 2>/dev/null)" || return 1
+  pid="$(/usr/bin/plutil -extract pid raw -o - "$INSTANCE_OWNER_PATH" 2>/dev/null)" || return 1
+  started_at="$(/usr/bin/plutil -extract startedAt raw -o - "$INSTANCE_OWNER_PATH" 2>/dev/null)" || return 1
+  activation_count="$(/usr/bin/plutil -extract activationCount raw -o - "$INSTANCE_OWNER_PATH" 2>/dev/null)" || return 1
+
+  [[ "$protocol_version" == "1" && -n "$instance_id" && "$pid" =~ ^[0-9]+$ && -n "$started_at" && "$activation_count" =~ ^[0-9]+$ ]] || return 1
+
+  INSTANCE_OWNER_PROTOCOL_VERSION="$protocol_version"
+  INSTANCE_OWNER_ID="$instance_id"
+  INSTANCE_OWNER_PID="$pid"
+  INSTANCE_OWNER_STARTED_AT="$started_at"
+  INSTANCE_OWNER_ACTIVATION_COUNT="$activation_count"
+}
+
+running_app_pids() {
+  pgrep -x "$APP_NAME" || true
+}
+
+verify_cross_copy_instance_arbitration() {
+  local installed_binary="$INSTALL_APP_PATH/Contents/MacOS/$APP_NAME"
+  local owner_pid owner_instance_id owner_activation_count running_pids running_command
+  local arbitration_ready=0
+
+  [[ "$APP_BUNDLE" != "$INSTALL_APP_PATH" ]] || fail_step "校验单实例仲裁" \
+    "安装路径与 dist 挑战副本相同，无法验证跨副本仲裁。" \
+    "设置不同的 INSTALL_APP_PATH 后重试 ./script/build_and_run.sh --verify"
+
+  for _ in {1..25}; do
+    if read_instance_owner_record; then
+      arbitration_ready=1
+      break
+    fi
+    sleep 0.2
+  done
+  [[ "$arbitration_ready" -eq 1 ]] || fail_step "校验单实例仲裁" \
+    "未读取到有效 owner 记录：${INSTANCE_OWNER_PATH}。" \
+    "确认已安装版成功启动并创建 InstanceArbitration/v1/owner.json 后重试"
+
+  owner_pid="$INSTANCE_OWNER_PID"
+  owner_instance_id="$INSTANCE_OWNER_ID"
+  owner_activation_count="$INSTANCE_OWNER_ACTIVATION_COUNT"
+  [[ "$owner_pid" == "$1" ]] || fail_step "校验单实例仲裁" \
+    "owner 记录 PID 为 ${owner_pid}，与已安装实例 PID ${1} 不一致。" \
+    "确认旧副本均已退出后重试 ./script/build_and_run.sh --verify"
+
+  open_app "$APP_BUNDLE"
+
+  for _ in {1..25}; do
+    if read_instance_owner_record; then
+      running_pids="$(running_app_pids)"
+      if [[ "$running_pids" == "$owner_pid" \
+        && "$INSTANCE_OWNER_PID" == "$owner_pid" \
+        && "$INSTANCE_OWNER_ID" == "$owner_instance_id" \
+        && (( 10#$INSTANCE_OWNER_ACTIVATION_COUNT > 10#$owner_activation_count )) ]]; then
+        break
+      fi
+    fi
+    sleep 0.2
+  done
+
+  running_pids="$(running_app_pids)"
+  [[ "$running_pids" == "$owner_pid" ]] || fail_step "校验单实例仲裁" \
+    "启动 dist 挑战副本后运行 PID 为 ${running_pids:-无}，预期唯一已安装实例 PID 为 ${owner_pid}。" \
+    "检查挑战副本是否在激活 owner 后退出，再重试 ./script/build_and_run.sh --verify"
+  [[ "$INSTANCE_OWNER_PID" == "$owner_pid" && "$INSTANCE_OWNER_ID" == "$owner_instance_id" ]] || fail_step "校验单实例仲裁" \
+    "owner 记录在挑战后发生了 PID 或 instanceID 切换。" \
+    "检查跨副本仲裁是否保留原 owner，再重试 ./script/build_and_run.sh --verify"
+  (( 10#$INSTANCE_OWNER_ACTIVATION_COUNT > 10#$owner_activation_count )) || fail_step "校验单实例仲裁" \
+    "owner activationCount 未增长（启动前 ${owner_activation_count}，当前 ${INSTANCE_OWNER_ACTIVATION_COUNT}）。" \
+    "检查挑战副本是否向 owner 发送 showPopover 激活请求后重试"
+
+  running_command="$(ps -p "$owner_pid" -o command= | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  [[ "$running_command" == "$installed_binary" || "$running_command" == "$installed_binary "* ]] || fail_step "校验单实例仲裁" \
+    "仲裁后的 owner 路径为 ${running_command}，预期为 ${installed_binary}。" \
+    "确认已安装版仍为 owner 后重试 ./script/build_and_run.sh --verify"
+
+  echo "  单实例仲裁：已安装 owner PID $owner_pid 保持，activationCount ${owner_activation_count} -> ${INSTANCE_OWNER_ACTIVATION_COUNT}"
 }
 
 cleanup_install_stage() {
@@ -273,7 +358,7 @@ fi
 open_app() {
   local app_path="${1:-$APP_BUNDLE}"
   if ! /usr/bin/open -n "$app_path"; then
-    fail_step "启动应用" "open 无法启动 $app_path。" \
+    fail_step "启动应用" "open 无法启动 ${app_path}。" \
       "确认应用包存在且签名有效后重试 ./script/build_and_run.sh --verify"
   fi
 }
@@ -314,9 +399,9 @@ verify_installed_app() {
 
   [[ -d "$INSTALL_APP_PATH" ]] || fail_step "校验安装路径" "安装包不存在：${INSTALL_APP_PATH}。" \
     "重新执行 ./script/build_and_run.sh --verify"
-  [[ -x "$installed_binary" ]] || fail_step "校验安装路径" "安装包缺少可执行文件：$installed_binary。" \
+  [[ -x "$installed_binary" ]] || fail_step "校验安装路径" "安装包缺少可执行文件：${installed_binary}。" \
     "重新执行 ./script/build_and_run.sh --verify"
-  [[ -f "$installed_info" ]] || fail_step "校验安装版本" "安装包缺少 Info.plist：$installed_info。" \
+  [[ -f "$installed_info" ]] || fail_step "校验安装版本" "安装包缺少 Info.plist：${installed_info}。" \
     "重新执行 ./script/build_and_run.sh --verify"
 
   if ! installed_identifier="$(read_plist_value CFBundleIdentifier "$installed_info")" \
@@ -325,17 +410,22 @@ verify_installed_app() {
     fail_step "校验安装版本" "无法读取安装包版本信息。" \
       "执行 /usr/bin/plutil -p $installed_info 检查安装包后重试"
   fi
-  [[ "$installed_identifier" == "$BUNDLE_ID" ]] || fail_step "校验安装版本" "Bundle ID 不匹配：$installed_identifier。" \
+  [[ "$installed_identifier" == "$BUNDLE_ID" ]] || fail_step "校验安装版本" "Bundle ID 不匹配：${installed_identifier}。" \
     "确认 INSTALL_APP_PATH 指向本项目构建的应用后重试 ./script/build_and_run.sh --verify"
   [[ "$installed_version" == "$APP_MARKETING_VERSION" && "$installed_build" == "$APP_BUILD_VERSION" ]] || fail_step "校验安装版本" \
     "安装版本为 ${installed_version} (${installed_build})，预期为 ${APP_MARKETING_VERSION} (${APP_BUILD_VERSION})。" \
     "使用 APP_MARKETING_VERSION=$APP_MARKETING_VERSION APP_BUILD_VERSION=$APP_BUILD_VERSION 重试 ./script/build_and_run.sh --verify"
 
   open_app "$INSTALL_APP_PATH"
-  local running_pid=""
+  local running_pid="" running_pids=""
   for _ in {1..25}; do
-    running_pid="$(pgrep -x "$APP_NAME" | head -n 1 || true)"
-    [[ -n "$running_pid" ]] && break
+    if read_instance_owner_record; then
+      running_pids="$(running_app_pids)"
+      if [[ "$running_pids" == "$INSTANCE_OWNER_PID" ]]; then
+        running_pid="$INSTANCE_OWNER_PID"
+        break
+      fi
+    fi
     sleep 0.2
   done
   [[ -n "$running_pid" ]] || fail_step "校验运行实例" "启动后未找到 $APP_NAME 进程。" \
@@ -344,11 +434,11 @@ verify_installed_app() {
   local running_command
   running_command="$(ps -p "$running_pid" -o command= | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
   [[ "$running_command" == "$installed_binary" || "$running_command" == "$installed_binary "* ]] || fail_step "校验运行路径" \
-    "运行进程路径为 $running_command，预期为 $installed_binary。" \
+    "运行进程路径为 ${running_command}，预期为 ${installed_binary}。" \
     "执行 pkill -TERM -x $APP_NAME 后重试 ./script/build_and_run.sh --verify"
 
   if [[ -d "$installed_widget" ]]; then
-    [[ -f "$installed_widget_info" ]] || fail_step "校验 Widget 版本" "Widget 缺少 Info.plist：$installed_widget_info。" \
+    [[ -f "$installed_widget_info" ]] || fail_step "校验 Widget 版本" "Widget 缺少 Info.plist：${installed_widget_info}。" \
       "重新执行 ./script/build_and_run.sh --verify"
     if ! widget_version="$(read_plist_value CFBundleShortVersionString "$installed_widget_info")" \
       || ! widget_build="$(read_plist_value CFBundleVersion "$installed_widget_info")" \
@@ -359,7 +449,7 @@ verify_installed_app() {
     [[ "$widget_version" == "$installed_version" && "$widget_build" == "$installed_build" ]] || fail_step "校验 Widget 版本" \
       "Widget 版本为 $widget_version ($widget_build)，与应用 $installed_version ($installed_build) 不一致。" \
       "重新执行 ./script/build_and_run.sh --verify"
-    [[ "$widget_parent" == "$BUNDLE_ID" ]] || fail_step "校验 Widget 宿主绑定" "Widget 宿主 Bundle ID 为 $widget_parent。" \
+    [[ "$widget_parent" == "$BUNDLE_ID" ]] || fail_step "校验 Widget 宿主绑定" "Widget 宿主 Bundle ID 为 ${widget_parent}。" \
       "确认 Widget Info.plist 的 WKAppBundleIdentifier 后重试"
     if ! /usr/bin/pluginkit -a "$installed_widget" >/dev/null 2>&1; then
       fail_step "注册 Widget" "pluginkit 无法注册安装包中的 Widget。" \
@@ -370,10 +460,12 @@ verify_installed_app() {
     if [[ -z "$registered_paths" ]] || ! while IFS= read -r registered_path; do
       [[ "$registered_path" == "$installed_widget" ]] || exit 1
     done <<< "$registered_paths"; then
-      fail_step "校验 Widget 绑定" "pluginkit 未指向当前安装路径：$installed_widget。" \
-        "执行 /usr/bin/pluginkit -a $installed_widget，再运行 ./script/build_and_run.sh --verify"
+      fail_step "校验 Widget 绑定" "pluginkit 未指向当前安装路径：${installed_widget}。" \
+        "执行 /usr/bin/pluginkit -a ${installed_widget}，再运行 ./script/build_and_run.sh --verify"
     fi
   fi
+
+  verify_cross_copy_instance_arbitration "$running_pid"
 
   echo "安装验收通过："
   echo "  安装路径：$INSTALL_APP_PATH"

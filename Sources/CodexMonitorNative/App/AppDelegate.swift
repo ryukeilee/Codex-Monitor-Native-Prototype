@@ -2,6 +2,10 @@ import AppKit
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private let singleInstanceCoordinator = SingleInstanceCoordinator()
+    private var isPrimaryInstance = false
+    private var isTerminating = false
+    private var shouldShowPopoverAfterLaunch = false
     private var appState: AppState?
     private var launchAtLoginManager: LaunchAtLoginManager?
     private var statusBarController: StatusBarController?
@@ -13,7 +17,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var authBoundaryObserver: CodexAuthBoundaryObserver?
     private var widgetTimelineBridge: WidgetTimelineBridge?
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        let claim = singleInstanceCoordinator.claim { [weak self] action in
+            self?.handleForwardedActivation(action) ?? false
+        }
+        switch claim {
+        case .owner:
+            isPrimaryInstance = true
+            AppLogger.lifecycle.info("Acquired global single-instance ownership")
+        case .secondary(let forwardedActivation):
+            AppLogger.lifecycle.info("Existing instance owns the app; forwarded activation=\(forwardedActivation, privacy: .public)")
+            NSApp.terminate(nil)
+        case .failed(let reason):
+            AppLogger.lifecycle.error("Single-instance arbitration failed closed: \(reason, privacy: .public)")
+            NSApp.terminate(nil)
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard isPrimaryInstance else { return }
         NSApp.setActivationPolicy(.accessory)
         AppLogger.lifecycle.info("App ready; launching in accessory mode")
 
@@ -108,16 +130,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.systemClockObserver = clockObserver
         self.authBoundaryObserver = authBoundaryObserver
         self.widgetTimelineBridge = widgetTimelineBridge
+
+        if shouldShowPopoverAfterLaunch {
+            shouldShowPopoverAfterLaunch = false
+            showPopoverAndActivate()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         AppLogger.lifecycle.info("Application will terminate")
+        isTerminating = true
+        singleInstanceCoordinator.prepareForShutdown()
         refreshScheduler?.stop()
         sleepWakeObserver?.stop()
         networkReachabilityObserver?.stop()
         systemClockObserver?.stop()
         authBoundaryObserver?.stop()
         appState?.shutdown()
+        singleInstanceCoordinator.release()
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        isTerminating = true
+        singleInstanceCoordinator.prepareForShutdown()
+        return .terminateNow
+    }
+
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows flag: Bool
+    ) -> Bool {
+        guard isPrimaryInstance else { return false }
+        showPopoverAndActivate()
+        return true
     }
 
     @objc
@@ -129,5 +174,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         AppLogger.popover.info("Status item clicked")
         popoverController?.toggle(relativeTo: button)
+    }
+
+    private func handleForwardedActivation(_ action: SingleInstanceActivationAction) -> Bool {
+        guard isPrimaryInstance, !isTerminating, action == .showPopover else { return false }
+        guard statusBarController != nil, popoverController != nil else {
+            shouldShowPopoverAfterLaunch = true
+            return true
+        }
+        return showPopoverAndActivate()
+    }
+
+    @discardableResult
+    private func showPopoverAndActivate() -> Bool {
+        guard let button = statusBarController?.statusButton else {
+            shouldShowPopoverAfterLaunch = true
+            return false
+        }
+        NSApp.activate()
+        popoverController?.show(relativeTo: button)
+        return popoverController != nil
     }
 }

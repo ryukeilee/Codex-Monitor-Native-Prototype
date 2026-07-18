@@ -309,6 +309,10 @@ final class StatusPopoverBehaviorTests: XCTestCase {
             XCTAssertTrue(controller.isPopoverShown)
             XCTAssertEqual(controller.activeEventMonitorCount, 3)
 
+            controller.show(relativeTo: button)
+            XCTAssertTrue(controller.isPopoverShown)
+            XCTAssertEqual(controller.activeEventMonitorCount, 3)
+
             controller.toggle(relativeTo: button)
             await Task.yield()
             XCTAssertFalse(controller.isPopoverShown)

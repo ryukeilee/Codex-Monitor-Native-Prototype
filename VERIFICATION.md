@@ -7,22 +7,22 @@
 
 ## Commands Run
 
-本轮发布前收口实际执行：
+本轮单实例收口实际执行：
 
 ```bash
 swift build -c debug
 swift test
 ./script/build_and_run.sh --verify
-ps -p <pid> -o pid=,ppid=,%cpu=,rss=,etime=,comm=
-pgrep -P <pid>
-lsof -p <pid>
-leaks <pid>
+/usr/bin/open -n /Applications/CodexMonitorNative.app  # 与 dist 副本合计并发 6 次
+/usr/bin/open -n dist/CodexMonitorNative.app
+pgrep -x CodexMonitorNative
+ps -p <owner-pid> -o pid=,ppid=,command=
 ```
 
 说明：
 
-- `./script/build_and_run.sh --verify` 仍是统一安装验收入口：它会关闭旧实例、构建并签名 app 与 Widget、覆盖安装到 `/Applications/CodexMonitorNative.app`，启动最终安装包，并核对运行进程路径/版本及 `pluginkit` 的 Widget 路径。
-- `swift test` 本轮执行 247 个测试，0 失败；`swift build -c debug` 与统一安装验收均通过。
+- `./script/build_and_run.sh --verify` 仍是统一安装验收入口：它会关闭旧实例、构建并签名 app 与 Widget、覆盖安装到 `/Applications/CodexMonitorNative.app`，启动最终安装包，核对运行进程路径/版本及 `pluginkit` 的 Widget 路径，并从 `dist` 启动挑战副本验证原 owner 保持唯一。
+- `swift test` 本轮执行 361 个测试，0 失败；`swift build -c debug` 与统一安装验收均通过。
 - 本轮没有重新执行 `swift build -c release` 或 `./script/build_and_run.sh --telemetry`，因此它们不计入当前自动验证证据。
 
 ## Automated Evidence
@@ -30,6 +30,10 @@ leaks <pid>
 以下内容有当前代码、测试或本轮命令结果作为直接证据：
 
 - App 可以通过 SwiftPM 成功构建；统一安装验收已确认运行进程来自 `/Applications/CodexMonitorNative.app`，版本为 `0.1.0 (1)`，Widget 注册路径属于同一安装包且版本一致。
+- 主应用在任何状态栏、刷新、持久化或 Widget bridge 初始化前，先在固定的每用户命名空间取得永久 `owner.lock` 的非阻塞 `flock`；锁文件使用 `O_CLOEXEC`，owner 崩溃或被杀后由内核释放，后继实例不依赖 PID 判活或删除锁文件。
+- 后启动副本不会创建 `AppState`、状态栏、scheduler、系统 observer、真实 RPC 或 Widget bridge。它通过带 `instanceID`、期限和 ACK 的原子文件信箱，请求现有 owner 在 MainActor 上幂等显示 Popover；只有 handler 已接收且 owner 仍可服务时才写 ACK，然后 challenger 退出。
+- 关停分两阶段：先停止接受激活请求，继续持锁并清理 scheduler、observer 与 AppState，最后释放租约；这避免退出中的旧 owner 与接管的新 owner 同时刷新或写状态。
+- 统一安装验收中，安装版 owner PID `20804` 与 instanceID 保持不变，`dist` challenger 退出，`activationCount` 从 `0` 增至 `1`。随后同时发起安装版与 `dist` 共 6 个 challenger，最终仍只有 PID `20804`，路径仍为安装版，`activationCount` 精确增至 `7`。
 - 菜单栏 App 以 `LSUIElement = true` 方式打包，无常规主窗口。
 - 菜单栏标题策略只显示可信周额度百分比或 `--%`，不会用 5 小时、月或未知窗口替代周额度。
 - Popover 包含：
@@ -82,12 +86,14 @@ leaks <pid>
 - 动态投影稳定排序、known-kind 去重、legacy fallback 边界、未知/缓存/无效字段过滤与 reset 一致性
 - Popover only-weekly、only-unknown、5 小时 + 周 + 月、多窗口行数，以及滚动视口与嵌套披露的纯交互信号
 - Popover `Command-R` / `Command-Q` 的真实 `NSWindow` 键盘路由，以及刷新中禁用态对重复快捷键的拦截
+- 首个 owner、8 个后启动请求的 ACK、非 owner 不处理动作、持锁但未 ready 时 fail closed、释放后接管、永久锁 inode 不变、陈旧元数据恢复、symlink 锁拒绝、关停前停止 ACK、遗留临时信箱清理、v1 请求兼容解码与过期请求不执行
+- 重复 `show` 不会把已经显示的 Popover 关闭或重复安装事件 monitor；关闭过渡中的转发请求会在 `popoverDidClose` 后重新显示
 - Widget 纯呈现层的 only-monthly、only-unknown、primary 选择、overflow、中心数值、进度与 footer 文案
 - 旧 Widget persisted payload 解码与 envelope 向后兼容
 
 ## Manual Verification Still Required
 
-以下行为目前没有把“真实桌面交互结果”自动化，因此发布前仍需人工确认：
+以下行为目前没有把“真实桌面交互结果”自动化；第 7 项已于本轮实际检查并记录，其余项目发布前仍需人工确认：
 
 ### 1. Full-Screen Space
 
@@ -195,6 +201,22 @@ CODEX_MONITOR_FORCE_REFRESH_FAILURE=1 ./script/build_and_run.sh
 - 刷新、退出、关闭均有稳定键盘路径；刷新期间不可重复触发，关闭后没有残留焦点。
 - 辅助功能导航顺序只包含有意义的状态与控件，不停留在装饰图形上。
 
+### 7. Cross-Copy Activation Visual Check
+
+步骤：
+
+1. 保持 `/Applications/CodexMonitorNative.app` 正在运行并关闭 Popover。
+2. 执行 `/usr/bin/open -n dist/CodexMonitorNative.app`。
+3. 确认现有安装版的 Popover 被显示，菜单栏没有新增第二个图标。
+4. 在 Popover 已显示时重复执行该命令，确认面板保持显示而不是被 toggle 关闭。
+
+预期结果：
+
+- 后启动副本退出，现有 owner 被唤起且 Popover 可见。
+- 始终只有一个菜单栏图标；重复唤起是幂等的。
+
+本轮结果（2026-07-18）：已完成。统一验收先由 `dist` challenger 显示安装版 owner 的 Popover，随后并发启动安装版与 `dist` 共 6 个 challenger；最终 Accessibility 只报告一个 CodexMonitorNative Popover，桌面截图只显示一个 `100%` 菜单栏状态项，Popover 在重复唤起后仍保持显示。
+
 ## Release Gate
 
 发布前至少应满足：
@@ -202,4 +224,5 @@ CODEX_MONITOR_FORCE_REFRESH_FAILURE=1 ./script/build_and_run.sh
 - `swift test` 通过
 - `swift build -c debug` 通过
 - `./script/build_and_run.sh --verify` 通过
+- Cross-Copy Activation Visual Check 已有人实际检查并记录结果
 - 上述人工验证项中，Full-Screen Space 与 Real Sleep / Wake 已有人实际检查并记录结果

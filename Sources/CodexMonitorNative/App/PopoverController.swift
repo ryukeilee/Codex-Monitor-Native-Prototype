@@ -115,6 +115,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     private nonisolated(unsafe) let eventMonitors: PopoverEventMonitorResources
     private var lifecycle = PopoverLifecycleState()
     private var layoutUpdateTask: Task<Void, Never>?
+    private weak var pendingShowButton: NSStatusBarButton?
 
     var isPopoverShown: Bool { popover.isShown }
     var activeEventMonitorCount: Int { eventMonitors.activeCount }
@@ -163,17 +164,35 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         if popover.isShown {
             closePopover()
         } else {
-            AppLogger.popover.info("Showing popover")
-            let presentationToken = lifecycle.beginPresentation()
-            // Re-read the login item status right before presenting the popover
-            // so the checkbox reflects system state instead of a stale cached value.
-            launchAtLoginManager.refreshStatus()
-            presentationState.setPanelActive(true)
-            updateContentSize(for: button)
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-            popover.contentViewController?.view.window?.becomeKey()
-            installOutsideClickMonitors(for: presentationToken)
+            show(relativeTo: button)
         }
+    }
+
+    func show(relativeTo button: NSStatusBarButton) {
+        guard !popover.isShown else {
+            if lifecycle.activePresentationToken != nil {
+                popover.contentViewController?.view.window?.makeKey()
+            } else {
+                // A forwarded launch can arrive after close started but before
+                // AppKit posts popoverDidClose. Reopen after that transition
+                // instead of acknowledging an activation that will disappear.
+                pendingShowButton = button
+                popover.performClose(nil)
+            }
+            return
+        }
+
+        pendingShowButton = nil
+        AppLogger.popover.info("Showing popover")
+        let presentationToken = lifecycle.beginPresentation()
+        // Re-read the login item status right before presenting the popover
+        // so the checkbox reflects system state instead of a stale cached value.
+        launchAtLoginManager.refreshStatus()
+        presentationState.setPanelActive(true)
+        updateContentSize(for: button)
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        popover.contentViewController?.view.window?.becomeKey()
+        installOutsideClickMonitors(for: presentationToken)
     }
 
     private func updateContentSize(for button: NSStatusBarButton? = nil) {
@@ -344,7 +363,12 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     }
 
     func popoverDidClose(_ notification: Notification) {
-        guard let presentationToken = lifecycle.consumeClosingPresentationToken() else { return }
-        finishPresentation(presentationToken)
+        if let presentationToken = lifecycle.consumeClosingPresentationToken() {
+            finishPresentation(presentationToken)
+        }
+        if let pendingShowButton {
+            self.pendingShowButton = nil
+            show(relativeTo: pendingShowButton)
+        }
     }
 }
