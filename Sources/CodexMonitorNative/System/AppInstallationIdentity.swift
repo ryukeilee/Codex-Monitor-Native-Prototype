@@ -191,7 +191,7 @@ struct SystemAppInstallationIdentityProvider: AppInstallationIdentityProviding {
         var signingInformation: CFDictionary?
         guard SecCodeCopySigningInformation(
             staticCode,
-            SecCSFlags(rawValue: kSecCSSigningInformation),
+            SecCSFlags(rawValue: kSecCSSigningInformation | kSecCSRequirementInformation),
             &signingInformation
         ) == errSecSuccess,
               let information = signingInformation as? [String: Any],

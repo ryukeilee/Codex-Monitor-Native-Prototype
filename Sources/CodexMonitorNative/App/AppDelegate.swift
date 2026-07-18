@@ -119,22 +119,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             allowsAutomaticReconciliation: allowsAutomaticLoginItemReconciliation
         )
         launchAtLoginManager.reconcileAtLaunch()
-        let popoverController = PopoverController(appState: state, launchAtLoginManager: launchAtLoginManager)
+
+        let scheduler = RefreshScheduler { [weak state] trigger in
+            guard let state else { return }
+            await state.refreshNow(trigger: trigger)
+        }
+        state.onRefreshSchedulingStateChanged = { [weak scheduler] schedulingState in
+            scheduler?.updateSchedule(with: schedulingState)
+        }
+        state.onRefreshRequested = { [weak scheduler] trigger in
+            scheduler?.requestRefresh(trigger)
+        }
+        scheduler.updateSchedule(with: state.refreshSchedulingState)
+
+        let popoverController = PopoverController(
+            appState: state,
+            launchAtLoginManager: launchAtLoginManager,
+            onRefresh: { [weak scheduler] in
+                scheduler?.requestRefresh(.manual)
+            }
+        )
         let statusBarController = StatusBarController(appState: state)
         let widgetTimelineBridge = WidgetTimelineBridge(appState: state)
         AppLogger.statusBar.info("Status bar controller created")
 
         statusBarController.setTarget(self, action: #selector(togglePopover(_:)))
-
-        // Scheduler with dynamic backoff
-        let scheduler = RefreshScheduler(interval: 300) { [weak state] in
-            state?.refresh(trigger: .scheduled)
-        }
-
-        // Wire backoff changes from AppState → Scheduler
-        state.onBackoffChanged = { [weak scheduler] newInterval in
-            scheduler?.updateInterval(newInterval)
-        }
 
         scheduler.start()
         scheduler.pause(for: .networkUnavailable)
@@ -144,19 +153,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .becameReachable:
                 state?.updateNetworkReachability(true)
                 scheduler?.resume(for: .networkUnavailable)
-                state?.refresh(trigger: .networkRestored)
+                scheduler?.requestRefresh(.networkRestored)
             case .becameUnreachable:
                 scheduler?.pause(for: .networkUnavailable)
                 state?.updateNetworkReachability(false)
             case .connectionChanged:
-                state?.refresh(trigger: .networkChanged)
+                scheduler?.requestRefresh(.networkChanged)
             }
         }
         networkObserver.start()
 
         // Sleep/wake: pause independently from reachability. After the wake
-        // stabilization delay, restarting the path monitor produces one fresh
-        // availability decision and, when reachable, one controlled refresh.
+        // stabilization delay, both the explicit wake and the renewed path
+        // availability decision enter the same coalescing scheduler.
         let observer = SleepWakeObserver(
             wakeDelaySeconds: 5,
             onSleep: { [weak scheduler, weak networkObserver] in
@@ -166,6 +175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onWake: { [weak scheduler, weak networkObserver] in
                 scheduler?.resume(for: .systemSleep)
                 networkObserver?.start()
+                scheduler?.requestRefresh(.wake)
             }
         )
         observer.start()
@@ -173,10 +183,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Wall-clock and presentation-environment changes can invalidate an
         // already scheduled deadline. Reconcile immediately; only a true
         // clock adjustment needs a new server request.
-        let clockObserver = SystemClockObserver { [weak state] changes in
+        let clockObserver = SystemClockObserver { [weak scheduler, weak state] changes in
             state?.reconcileTemporalState()
             if changes.contains(.clock) {
-                state?.refresh(trigger: .systemClockChange)
+                scheduler?.requestRefresh(.systemClockChange)
             }
         }
         clockObserver.start()

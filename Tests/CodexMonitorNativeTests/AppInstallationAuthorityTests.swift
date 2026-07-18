@@ -1119,6 +1119,19 @@ final class AppInstallationAuthorityTests: XCTestCase {
         XCTAssertNotEqual(resigned.codeIdentityDigest, first.codeIdentityDigest)
     }
 
+    func testSystemIdentityReadsCertificateBackedSignatureFromSystemApp() throws {
+        let systemAppURL = URL(
+            fileURLWithPath: "/System/Applications/Utilities/Terminal.app",
+            isDirectory: true
+        )
+        let provider = SystemAppInstallationIdentityProvider()
+
+        let identity = try XCTUnwrap(provider.identity(for: systemAppURL))
+
+        XCTAssertEqual(identity.signatureKind, .certificateBacked)
+        XCTAssertNotNil(identity.signingAnchorDigest)
+    }
+
     private func makeBundle(
         at bundleURL: URL,
         executableContents: Data,

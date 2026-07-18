@@ -52,7 +52,7 @@ struct AppStateEvent: Equatable {
 
 @MainActor
 final class AppState: ObservableObject {
-    enum RefreshTrigger {
+    enum RefreshTrigger: Equatable {
         case manual
         case scheduled
         case wake
@@ -90,6 +90,16 @@ final class AppState: ObservableObject {
     /// Called when the backoff interval changes so the scheduler can adapt.
     var onBackoffChanged: (@MainActor (TimeInterval) -> Void)?
 
+    /// Publishes the immutable inputs used by the adaptive scheduler after a
+    /// state transition. AppState remains the owner of RPC execution,
+    /// persistence, account-bound cache validation, and failure classification.
+    var onRefreshSchedulingStateChanged: (@MainActor (RefreshSchedulingState) -> Void)?
+
+    /// Optional product-level ingress for refresh intents. `refreshNow` keeps
+    /// bypassing this hook so the scheduler can delegate the actual request
+    /// back to AppState without recursion.
+    var onRefreshRequested: (@MainActor (RefreshTrigger) -> Void)?
+
     // MARK: - Private
 
     private let snapshotStore: SnapshotStore
@@ -114,6 +124,17 @@ final class AppState: ObservableObject {
     var hasScheduledFreshnessTask: Bool { taskResources.freshnessTask != nil }
     var hasScheduledTemporalTask: Bool { taskResources.freshnessTask != nil }
     var hasManagedRefreshTask: Bool { taskResources.refreshTask != nil }
+
+    var refreshSchedulingState: RefreshSchedulingState {
+        RefreshSchedulingState(
+            snapshot: snapshot,
+            status: status,
+            lastSuccessAt: lastSuccessAt,
+            lastAttemptAt: lastAttemptAt,
+            failureCount: failureCount,
+            backoffInterval: backoffInterval
+        )
+    }
 
     var isDataStale: Bool {
         isDataStale(at: now())
@@ -291,7 +312,11 @@ final class AppState: ObservableObject {
     // MARK: - Refresh
 
     func refresh(trigger: RefreshTrigger) {
-        enqueueRefresh(trigger: trigger)
+        if let onRefreshRequested {
+            onRefreshRequested(trigger)
+        } else {
+            enqueueRefresh(trigger: trigger)
+        }
     }
 
     func refreshNow(trigger: RefreshTrigger) async {
@@ -946,6 +971,7 @@ final class AppState: ObservableObject {
         )
         snapshotStore.saveState(event.persistedState)
         stateEvent = event
+        onRefreshSchedulingStateChanged?(refreshSchedulingState)
     }
 
     private func enterRefreshingState(attemptedAt: Date?) {

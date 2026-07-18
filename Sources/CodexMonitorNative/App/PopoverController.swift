@@ -122,7 +122,11 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     var activeEventMonitorCount: Int { eventMonitors.activeCount }
     var hasPendingLayoutUpdate: Bool { layoutUpdateTask != nil }
 
-    init(appState: AppState, launchAtLoginManager: LaunchAtLoginManager) {
+    init(
+        appState: AppState,
+        launchAtLoginManager: LaunchAtLoginManager,
+        onRefresh: (@MainActor () -> Void)? = nil
+    ) {
         let popover = NSPopover()
         let presentationState = PopoverPresentationState(isPanelActive: false)
         popover.behavior = .applicationDefined
@@ -135,14 +139,16 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         self.eventMonitors = PopoverEventMonitorResources(removeMonitor: NSEvent.removeMonitor)
         super.init()
 
+        let refreshAction = onRefresh ?? {
+            appState.refresh(trigger: .manual)
+        }
+
         var hostingController: NSHostingController<StatusPopoverView>?
         let rootView = StatusPopoverView(
             appState: appState,
             launchAtLoginManager: launchAtLoginManager,
             presentationState: presentationState,
-            onRefresh: {
-                appState.refresh(trigger: .manual)
-            },
+            onRefresh: refreshAction,
             onQuit: {
                 NSApp.terminate(nil)
             },
