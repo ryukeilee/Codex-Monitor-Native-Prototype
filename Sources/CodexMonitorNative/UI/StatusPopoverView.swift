@@ -158,7 +158,7 @@ struct StatusPopoverView: View {
 
     private var launchAtLoginBinding: Binding<Bool> {
         Binding(
-            get: { launchAtLoginManager.shouldLaunchAtLogin },
+            get: { launchAtLoginManager.toggleValue },
             set: { newValue in
                 AppLogger.settings.info("Launch at login toggle changed from UI to \(newValue, privacy: .public)")
                 launchAtLoginManager.setLaunchAtLogin(newValue)
@@ -260,7 +260,7 @@ struct StatusPopoverView: View {
             .accessibilityValue(
                 StatusPopoverAccessibilityContract.launchAtLoginValue(
                     isUpdating: launchAtLoginManager.isUpdating,
-                    isEnabled: launchAtLoginManager.shouldLaunchAtLogin
+                    statusInfo: launchAtLoginManager.statusInfo
                 )
             )
             .accessibilityHint("开启或关闭登录时自动启动")

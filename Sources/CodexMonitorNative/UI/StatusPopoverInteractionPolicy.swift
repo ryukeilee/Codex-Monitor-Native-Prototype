@@ -47,11 +47,14 @@ enum StatusPopoverAccessibilityContract {
     static let resetCreditsDisclosureIdentifier = "reset-credits-disclosure"
     static let resetCreditFieldsDisclosureIdentifier = "reset-credit-fields-disclosure"
 
-    static func launchAtLoginValue(isUpdating: Bool, isEnabled: Bool) -> String {
+    static func launchAtLoginValue(
+        isUpdating: Bool,
+        statusInfo: LaunchAtLoginManager.StatusInfo
+    ) -> String {
         if isUpdating {
             return "正在更新"
         }
-        return isEnabled ? "已开启" : "已关闭"
+        return statusInfo.message
     }
 
     static func refreshValue(for status: QuotaRefreshStatus) -> String {

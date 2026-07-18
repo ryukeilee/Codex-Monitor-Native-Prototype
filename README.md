@@ -150,13 +150,46 @@ swift test
 BUILD_CONFIGURATION=release ./script/build_and_run.sh
 ```
 
-`--verify` 是本机安装验收的唯一入口：它会构建主应用和 Widget、关闭旧实例、覆盖安装到 `/Applications/CodexMonitorNative.app`，启动该安装包，并校验运行进程的实际路径/版本以及 `pluginkit` 的 Widget 路径。安装目录不可写时，可用 `INSTALL_APP_PATH="$HOME/Applications/CodexMonitorNative.app"` 指定用户目录后重试；Widget 注册失败时，脚本会输出对应的 `pluginkit` 修复命令。
+`--verify` 是本机安装验收的唯一入口：它会构建主应用和 Widget，先在安装目录旁创建唯一 staging 并校验版本、主应用与 Widget 签名及预期 App Group entitlements，再关闭旧实例并以可回滚 backup 覆盖安装。只有启动、运行路径、版本、`pluginkit` Widget 路径及跨副本验收全部通过后才删除 backup；中途失败会恢复原安装，并在原安装此前正在运行时尽可能重新启动。回滚前必须以可判错的 `pgrep`/`ps` 门禁证明所有验收进程均已退出；枚举、身份查询或 TERM/KILL 收敛失败时禁止移动当前 target 或恢复旧 App，并保留当前安装、唯一 backup 与受控工作目录。如果回滚本身因权限或文件系统错误无法完成，脚本同样不会删除唯一 backup，而会输出精确人工恢复路径。它还会验证三段顺序：安装版 owner 拒绝带开发绕过的直接 challenger、已运行的开发 owner 向首选安装移交、无开发绕过的旧 `dist` 副本用关联 token 重定向到首选安装。
+
+`INSTALL_APP_PATH` 必须是规范化绝对路径，最终名称精确为 `CodexMonitorNative.app`；脚本拒绝根目录、用户主目录、仓库根、普通目录、其他 Bundle ID、目标别名以及无法安全解析的父路径。安装目录不可写时，可用 `INSTALL_APP_PATH="$HOME/Applications/CodexMonitorNative.app"` 指定用户目录。默认 `CODESIGN_IDENTITY=-` 使用本机 ad-hoc 签名；这只证明本地产物完整性及已签入的 entitlements，不等于证书/描述文件有效，也不证明 WidgetKit 已实际加载 extension。实际运行路径由脚本的 `ps`、唯一进程和 owner record 门禁证明。需要证书签名时应显式传入唯一的 `CODESIGN_IDENTITY`，并另查 provisioning 与系统运行日志。
 
 ### 手动指定安装路径
 
 ```bash
 BUILD_CONFIGURATION=release ./script/build_and_run.sh --verify
 INSTALL_APP_PATH="$HOME/Applications/CodexMonitorNative.app" ./script/build_and_run.sh --verify
+```
+
+安装路径负向门禁可在不触发构建的情况下执行；以下命令只清理自己创建的临时目录：
+
+```bash
+path_safety_root="$(mktemp -d /tmp/codex-monitor-path-safety.XXXXXX)"
+cleanup_path_safety() { rm -rf "$path_safety_root"; }
+trap cleanup_path_safety EXIT
+mkdir "$path_safety_root/CodexMonitorNative.app"
+touch "$path_safety_root/sentinel" "$path_safety_root/CodexMonitorNative.app/sentinel"
+for unsafe_path in \
+  /CodexMonitorNative.app \
+  "$HOME/CodexMonitorNative.app" \
+  "$PWD/CodexMonitorNative.app" \
+  "$path_safety_root/CodexMonitorNative.app"; do
+  if INSTALL_APP_PATH="$unsafe_path" ./script/build_and_run.sh --verify; then
+    echo "危险路径被错误接受：$unsafe_path" >&2
+    exit 1
+  fi
+done
+test -f "$path_safety_root/sentinel"
+test -f "$path_safety_root/CodexMonitorNative.app/sentinel"
+```
+
+完整替换流程可先隔离到临时父目录；这仍会构建、启动 App 并更新本机 Widget 注册，只是不会替换 `/Applications` 中的安装包：
+
+```bash
+isolated_install_root="$(mktemp -d /tmp/codex-monitor-install.XXXXXX)"
+cleanup_isolated_install() { rm -rf "$isolated_install_root"; }
+trap cleanup_isolated_install EXIT
+INSTALL_APP_PATH="$isolated_install_root/CodexMonitorNative.app" ./script/build_and_run.sh --verify
 ```
 
 ### 手动验证真实/失败路径

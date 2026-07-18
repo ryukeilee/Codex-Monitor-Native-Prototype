@@ -116,6 +116,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     private var lifecycle = PopoverLifecycleState()
     private var layoutUpdateTask: Task<Void, Never>?
     private weak var pendingShowButton: NSStatusBarButton?
+    private(set) var isTornDown = false
 
     var isPopoverShown: Bool { popover.isShown }
     var activeEventMonitorCount: Int { eventMonitors.activeCount }
@@ -161,6 +162,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     }
 
     func toggle(relativeTo button: NSStatusBarButton) {
+        guard !isTornDown else { return }
         if popover.isShown {
             closePopover()
         } else {
@@ -169,6 +171,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     }
 
     func show(relativeTo button: NSStatusBarButton) {
+        guard !isTornDown else { return }
         guard !popover.isShown else {
             if lifecycle.activePresentationToken != nil {
                 popover.contentViewController?.view.window?.makeKey()
@@ -195,6 +198,27 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         installOutsideClickMonitors(for: presentationToken)
     }
 
+    func teardown() {
+        guard !isTornDown else { return }
+        isTornDown = true
+        pendingShowButton = nil
+        popover.delegate = nil
+
+        if let presentationToken = lifecycle.activePresentationToken {
+            finishPresentation(presentationToken)
+        } else {
+            cancelPendingLayoutUpdate()
+            presentationState.setPanelActive(false)
+            eventMonitors.removeAll()
+        }
+
+        if popover.isShown {
+            popover.performClose(nil)
+        }
+        popover.contentViewController = nil
+        AppLogger.popover.info("Removed popover and event monitors during owner shutdown")
+    }
+
     private func updateContentSize(for button: NSStatusBarButton? = nil) {
         guard let hostingController = popover.contentViewController as? NSHostingController<StatusPopoverView> else {
             return
@@ -212,6 +236,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
     }
 
     private func scheduleLayoutUpdate() {
+        guard !isTornDown else { return }
         guard popover.isShown else { return }
         guard let presentationToken = lifecycle.activePresentationToken else { return }
         guard let layoutToken = lifecycle.beginLayoutUpdate() else { return }
@@ -366,7 +391,7 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         if let presentationToken = lifecycle.consumeClosingPresentationToken() {
             finishPresentation(presentationToken)
         }
-        if let pendingShowButton {
+        if !isTornDown, let pendingShowButton {
             self.pendingShowButton = nil
             show(relativeTo: pendingShowButton)
         }

@@ -5,6 +5,7 @@ import Combine
 final class StatusBarController {
     let statusItem: NSStatusItem
     private var cancellables = Set<AnyCancellable>()
+    private(set) var isTornDown = false
 
     var statusButton: NSStatusBarButton? {
         statusItem.button
@@ -24,6 +25,7 @@ final class StatusBarController {
     }
 
     func setTarget(_ target: AnyObject, action: Selector) {
+        guard !isTornDown else { return }
         guard let button = statusItem.button else {
             AppLogger.statusBar.error("Failed to assign target because status button was nil")
             return
@@ -33,6 +35,17 @@ final class StatusBarController {
         button.action = action
         button.sendAction(on: [.leftMouseUp])
         AppLogger.statusBar.info("Assigned click target to status item")
+    }
+
+    func teardown() {
+        guard !isTornDown else { return }
+        isTornDown = true
+        cancellables.removeAll()
+        statusItem.button?.target = nil
+        statusItem.button?.action = nil
+        statusItem.isVisible = false
+        NSStatusBar.system.removeStatusItem(statusItem)
+        AppLogger.statusBar.info("Removed status item during owner shutdown")
     }
 
     private func configureButton() {

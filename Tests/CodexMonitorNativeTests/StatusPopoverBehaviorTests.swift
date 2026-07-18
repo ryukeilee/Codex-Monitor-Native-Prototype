@@ -17,9 +17,7 @@ final class StatusPopoverBehaviorTests: XCTestCase {
         )
         defer { appState.shutdown() }
 
-        let launchManager = LaunchAtLoginManager(
-            loginItemManager: SnapshotLoginItemManager(status: .enabled)
-        )
+        let launchManager = makeSnapshotLaunchAtLoginManager(defaults: defaults)
         var refreshCount = 0
         var quitCount = 0
         let hostingView = NSHostingView(
@@ -153,16 +151,23 @@ final class StatusPopoverBehaviorTests: XCTestCase {
 
     func testAccessibilityContractPublishesStableControlState() {
         XCTAssertEqual(
-            StatusPopoverAccessibilityContract.launchAtLoginValue(isUpdating: false, isEnabled: false),
-            "已关闭"
+            StatusPopoverAccessibilityContract.launchAtLoginValue(isUpdating: false, statusInfo: .notRegistered),
+            "未启用"
         )
         XCTAssertEqual(
-            StatusPopoverAccessibilityContract.launchAtLoginValue(isUpdating: false, isEnabled: true),
-            "已开启"
+            StatusPopoverAccessibilityContract.launchAtLoginValue(isUpdating: false, statusInfo: .enabled),
+            "已启用"
         )
         XCTAssertEqual(
-            StatusPopoverAccessibilityContract.launchAtLoginValue(isUpdating: true, isEnabled: true),
+            StatusPopoverAccessibilityContract.launchAtLoginValue(isUpdating: true, statusInfo: .enabled),
             "正在更新"
+        )
+        XCTAssertEqual(
+            StatusPopoverAccessibilityContract.launchAtLoginValue(
+                isUpdating: false,
+                statusInfo: .requiresApproval
+            ),
+            "需在系统设置中批准"
         )
         XCTAssertEqual(StatusPopoverAccessibilityContract.refreshValue(for: .success), "可刷新")
         XCTAssertEqual(StatusPopoverAccessibilityContract.refreshValue(for: .refreshing), "正在刷新")
@@ -295,9 +300,7 @@ final class StatusPopoverBehaviorTests: XCTestCase {
             refreshService: SuspendedSnapshotRefreshService()
         )
         defer { appState.shutdown() }
-        let launchManager = LaunchAtLoginManager(
-            loginItemManager: SnapshotLoginItemManager(status: .enabled)
-        )
+        let launchManager = makeSnapshotLaunchAtLoginManager(defaults: defaults)
         let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         defer { NSStatusBar.system.removeStatusItem(statusItem) }
         let button = try XCTUnwrap(statusItem.button)
@@ -319,6 +322,40 @@ final class StatusPopoverBehaviorTests: XCTestCase {
             XCTAssertEqual(controller.activeEventMonitorCount, 0)
             XCTAssertFalse(controller.hasPendingLayoutUpdate)
         }
+    }
+
+    func testPopoverTeardownClosesPresentationRemovesMonitorsAndPreventsReopen() async throws {
+        _ = NSApplication.shared
+        let suiteName = "CodexMonitorNativeTests.popoverTeardown.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let appState = AppState(
+            snapshotStore: SnapshotStore(defaults: defaults, key: "snapshot"),
+            refreshService: SuspendedSnapshotRefreshService()
+        )
+        defer { appState.shutdown() }
+        let launchManager = makeSnapshotLaunchAtLoginManager(defaults: defaults)
+        let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        defer { NSStatusBar.system.removeStatusItem(statusItem) }
+        let button = try XCTUnwrap(statusItem.button)
+        let controller = PopoverController(appState: appState, launchAtLoginManager: launchManager)
+
+        controller.show(relativeTo: button)
+        XCTAssertTrue(controller.isPopoverShown)
+        XCTAssertEqual(controller.activeEventMonitorCount, 3)
+
+        controller.teardown()
+        controller.teardown()
+        await Task.yield()
+
+        XCTAssertTrue(controller.isTornDown)
+        XCTAssertFalse(controller.isPopoverShown)
+        XCTAssertEqual(controller.activeEventMonitorCount, 0)
+        XCTAssertFalse(controller.hasPendingLayoutUpdate)
+
+        controller.show(relativeTo: button)
+        XCTAssertFalse(controller.isPopoverShown)
+        XCTAssertEqual(controller.activeEventMonitorCount, 0)
     }
 
     private func performCommandShortcut(_ character: String, keyCode: UInt16, in window: NSWindow) -> Bool {
@@ -352,4 +389,24 @@ private struct SnapshotLoginItemManager: LoginItemManaging {
     func register() throws {}
 
     func unregister() throws {}
+}
+
+@MainActor
+private func makeSnapshotLaunchAtLoginManager(defaults: UserDefaults) -> LaunchAtLoginManager {
+    let preferenceKey = "popover.launchAtLogin.preference"
+    let registrationIdentityKey = "popover.launchAtLogin.registrationIdentity"
+    let identity = AppInstallationIdentity(
+        bundlePath: "/Applications/CodexMonitorNative.app",
+        bundleIdentifier: "com.ryukeilee.CodexMonitorNativePrototype",
+        codeIdentityDigest: "popover-test"
+    )
+    defaults.set(true, forKey: preferenceKey)
+    defaults.set(try? JSONEncoder().encode(identity), forKey: registrationIdentityKey)
+    return LaunchAtLoginManager(
+        loginItemManager: SnapshotLoginItemManager(status: .enabled),
+        defaults: defaults,
+        preferenceKey: preferenceKey,
+        registrationIdentityKey: registrationIdentityKey,
+        currentInstallationIdentity: identity
+    )
 }

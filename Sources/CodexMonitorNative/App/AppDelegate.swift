@@ -1,11 +1,55 @@
 import AppKit
 
+enum ClaimedInstallationRevalidationDecision: Equatable {
+    case continueUsing(
+        identity: AppInstallationIdentity?,
+        shouldPersist: Bool,
+        allowsAutomaticLoginItemReconciliation: Bool
+    )
+    case redirect(AppInstallationIdentity)
+    case reject(String)
+}
+
+@MainActor
+enum ClaimedInstallationRevalidationPolicy {
+    static func decide(
+        claimedIdentity: AppInstallationIdentity?,
+        resolution: AppInstallationAuthority.Resolution
+    ) -> ClaimedInstallationRevalidationDecision {
+        switch resolution {
+        case let .useCurrent(identity, shouldPersist, allowsAutomaticReconciliation):
+            guard identity != claimedIdentity else {
+                return .continueUsing(
+                    identity: identity,
+                    shouldPersist: shouldPersist,
+                    allowsAutomaticLoginItemReconciliation: allowsAutomaticReconciliation
+                )
+            }
+            guard let identity else {
+                return .reject("App installation identity disappeared after ownership claim")
+            }
+            return .redirect(identity)
+
+        case .redirect(let preferredIdentity):
+            return .redirect(preferredIdentity)
+
+        case .reject(let reason):
+            return .reject(reason)
+        }
+    }
+}
+
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private let installationAuthority = AppInstallationAuthority()
     private let singleInstanceCoordinator = SingleInstanceCoordinator()
     private var isPrimaryInstance = false
     private var isTerminating = false
+    private var isRedirectingToPreferredInstallation = false
+    private var didStopOwnedServices = false
     private var shouldShowPopoverAfterLaunch = false
+    private var currentInstallationIdentity: AppInstallationIdentity?
+    private var allowsAutomaticLoginItemReconciliation = false
     private var appState: AppState?
     private var launchAtLoginManager: LaunchAtLoginManager?
     private var statusBarController: StatusBarController?
@@ -16,14 +60,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var systemClockObserver: SystemClockObserver?
     private var authBoundaryObserver: CodexAuthBoundaryObserver?
     private var widgetTimelineBridge: WidgetTimelineBridge?
+    private var preferredRedirectTimeoutTask: Task<Void, Never>?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
-        let claim = singleInstanceCoordinator.claim { [weak self] action in
-            self?.handleForwardedActivation(action) ?? false
+        switch installationAuthority.resolveCurrentInstallation() {
+        case let .useCurrent(identity, _, allowsAutomaticReconciliation):
+            currentInstallationIdentity = identity
+            allowsAutomaticLoginItemReconciliation = allowsAutomaticReconciliation
+
+        case .redirect(let preferredIdentity):
+            redirectToPreferredInstallation(preferredIdentity)
+            return
+
+        case .reject(let reason):
+            AppLogger.lifecycle.error("App installation validation failed closed: \(reason, privacy: .public)")
+            NSApp.terminate(nil)
+            return
         }
+
+        let claim = claimSingleInstanceOwnership()
         switch claim {
         case .owner:
-            isPrimaryInstance = true
+            // Close the resolve/claim race before this process becomes the
+            // authoritative owner or writes an installation preference. Never
+            // relabel this already-running process with a different on-disk code
+            // identity after a same-path cover install.
+            guard finalizeClaimedOwnership(
+                claimedIdentity: currentInstallationIdentity,
+                failureContext: "after ownership claim"
+            ) else { return }
             AppLogger.lifecycle.info("Acquired global single-instance ownership")
         case .secondary(let forwardedActivation):
             AppLogger.lifecycle.info("Existing instance owns the app; forwarded activation=\(forwardedActivation, privacy: .public)")
@@ -49,7 +114,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 CodexAuthIdentityReader.currentBoundary()
             }
         )
-        let launchAtLoginManager = LaunchAtLoginManager()
+        let launchAtLoginManager = LaunchAtLoginManager(
+            currentInstallationIdentity: currentInstallationIdentity,
+            allowsAutomaticReconciliation: allowsAutomaticLoginItemReconciliation
+        )
+        launchAtLoginManager.reconcileAtLaunch()
         let popoverController = PopoverController(appState: state, launchAtLoginManager: launchAtLoginManager)
         let statusBarController = StatusBarController(appState: state)
         let widgetTimelineBridge = WidgetTimelineBridge(appState: state)
@@ -140,13 +209,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         AppLogger.lifecycle.info("Application will terminate")
         isTerminating = true
-        singleInstanceCoordinator.prepareForShutdown()
-        refreshScheduler?.stop()
-        sleepWakeObserver?.stop()
-        networkReachabilityObserver?.stop()
-        systemClockObserver?.stop()
-        authBoundaryObserver?.stop()
-        appState?.shutdown()
+        stopOwnedServicesForShutdown()
         singleInstanceCoordinator.release()
     }
 
@@ -183,6 +246,275 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return true
         }
         return showPopoverAndActivate()
+    }
+
+    private func claimSingleInstanceOwnership() -> SingleInstanceClaimResult {
+        singleInstanceCoordinator.claim(
+            installationIdentity: currentInstallationIdentity,
+            shouldRelinquish: { [weak self] requestedIdentity in
+                self?.shouldRelinquishOwnership(to: requestedIdentity) ?? false
+            },
+            commitRelinquishment: { [weak self] in
+                self?.commitOwnershipRelinquishment() ?? false
+            },
+            didRelinquish: { [weak self] in
+                self?.finishOwnershipRelinquishment()
+            },
+            onActivation: { [weak self] action in
+                self?.handleForwardedActivation(action) ?? false
+            }
+        )
+    }
+
+    private func finalizeClaimedOwnership(
+        claimedIdentity: AppInstallationIdentity?,
+        failureContext: String
+    ) -> Bool {
+        let decision = ClaimedInstallationRevalidationPolicy.decide(
+            claimedIdentity: claimedIdentity,
+            resolution: installationAuthority.resolveCurrentInstallation()
+        )
+        switch decision {
+        case let .continueUsing(identity, shouldPersist, allowsAutomaticReconciliation):
+            currentInstallationIdentity = identity
+            allowsAutomaticLoginItemReconciliation = allowsAutomaticReconciliation
+            guard singleInstanceCoordinator.updateOwnedInstallationIdentity(identity) else {
+                singleInstanceCoordinator.release()
+                AppLogger.lifecycle.error("Failed to publish the verified owner installation identity \(failureContext, privacy: .public)")
+                NSApp.terminate(nil)
+                return false
+            }
+            if shouldPersist, let identity {
+                installationAuthority.persistPreferredInstallation(identity)
+            }
+            isPrimaryInstance = true
+            return true
+
+        case .redirect(let revalidatedIdentity):
+            singleInstanceCoordinator.release()
+            AppLogger.lifecycle.info("Installation identity changed \(failureContext, privacy: .public); restarting from the revalidated bundle")
+            redirectToPreferredInstallation(revalidatedIdentity)
+            return false
+
+        case .reject(let reason):
+            singleInstanceCoordinator.release()
+            AppLogger.lifecycle.error("App installation validation failed \(failureContext, privacy: .public): \(reason, privacy: .public)")
+            NSApp.terminate(nil)
+            return false
+        }
+    }
+
+    private func shouldRelinquishOwnership(
+        to requestedIdentity: AppInstallationIdentity
+    ) -> Bool {
+        guard isPrimaryInstance,
+              !isTerminating,
+              let currentIdentity = currentInstallationIdentity,
+              currentInstallationIdentity != requestedIdentity,
+              currentIdentity.signingAnchorDigest != nil,
+              currentIdentity.signingAnchorDigest == requestedIdentity.signingAnchorDigest,
+              let currentVersion = currentIdentity.version,
+              let requestedVersion = requestedIdentity.version,
+              requestedVersion.isNotOlder(than: currentVersion),
+              installationAuthority.revalidateRedirectTarget(requestedIdentity) else {
+            return false
+        }
+
+        if !currentVersion.isNotOlder(than: requestedVersion),
+           currentIdentity.hasCertificateBackedSignature,
+           requestedIdentity.hasCertificateBackedSignature {
+            // An explicitly launched, same-signer newer build must not be
+            // forced back to an already-running older copy solely by path rank.
+            return true
+        }
+
+        if installationAuthority.isValidMovedSuccessor(
+            requestedIdentity,
+            replacing: currentIdentity
+        ) {
+            return true
+        }
+
+        if installationAuthority.isRecordedPreferredInstallation(requestedIdentity) {
+            return true
+        }
+
+        switch installationAuthority.resolveCurrentInstallation() {
+        case .redirect(let preferredIdentity):
+            return preferredIdentity == requestedIdentity
+
+        case .useCurrent(let onDiskIdentity, _, _):
+            // A same-path cover install can replace the executable and signing
+            // envelope while the old process is still alive. The identity
+            // captured by that process remains the proof that it is stale.
+            return onDiskIdentity == requestedIdentity
+                && currentInstallationIdentity?.bundlePath == requestedIdentity.bundlePath
+                && currentInstallationIdentity != requestedIdentity
+
+        case .reject:
+            return false
+        }
+    }
+
+    private func commitOwnershipRelinquishment() -> Bool {
+        guard isPrimaryInstance, !isTerminating else { return false }
+        isPrimaryInstance = false
+        isTerminating = true
+        stopOwnedServicesForShutdown()
+        AppLogger.lifecycle.info("Stopped owner services before committed installation handoff")
+        return true
+    }
+
+    private func finishOwnershipRelinquishment() {
+        NSApp.setActivationPolicy(.prohibited)
+        AppLogger.lifecycle.info("Committed installation handoff released single-instance ownership")
+        NSApp.terminate(nil)
+    }
+
+    private func stopOwnedServicesForShutdown() {
+        guard !didStopOwnedServices else { return }
+        didStopOwnedServices = true
+        preferredRedirectTimeoutTask?.cancel()
+        preferredRedirectTimeoutTask = nil
+        popoverController?.teardown()
+        statusBarController?.teardown()
+        popoverController = nil
+        statusBarController = nil
+        singleInstanceCoordinator.prepareForShutdown()
+        refreshScheduler?.stop()
+        sleepWakeObserver?.stop()
+        networkReachabilityObserver?.stop()
+        systemClockObserver?.stop()
+        authBoundaryObserver?.stop()
+        appState?.shutdown()
+    }
+
+    private func redirectToPreferredInstallation(_ preferredIdentity: AppInstallationIdentity) {
+        guard !isRedirectingToPreferredInstallation else { return }
+        isRedirectingToPreferredInstallation = true
+        isTerminating = true
+        NSApp.setActivationPolicy(.prohibited)
+
+        guard installationAuthority.revalidateRedirectTarget(preferredIdentity) else {
+            AppLogger.lifecycle.error("Preferred app redirect target changed before launch; failing closed")
+            NSApp.terminate(nil)
+            return
+        }
+
+        let expectedURL = preferredIdentity.bundleURL
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        preferredRedirectTimeoutTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled,
+                  self?.isRedirectingToPreferredInstallation == true else {
+                return
+            }
+            self?.finishPreferredInstallationRedirect(
+                ownerConfirmed: false,
+                errorDescription: "launch confirmation timed out"
+            )
+        }
+
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        configuration.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(
+            at: preferredIdentity.bundleURL,
+            configuration: configuration
+        ) { [weak self] application, error in
+            let launchedURL = application?.bundleURL.map {
+                $0.resolvingSymlinksInPath().standardizedFileURL
+            }
+            let errorDescription = error?.localizedDescription
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                guard launchedURL == expectedURL, error == nil else {
+                    self.finishPreferredInstallationRedirect(
+                        ownerConfirmed: false,
+                        errorDescription: errorDescription ?? "unexpected launched path"
+                    )
+                    return
+                }
+                self.beginPreferredOwnerConfirmation(preferredIdentity)
+            }
+        }
+    }
+
+    private func beginPreferredOwnerConfirmation(
+        _ expectedIdentity: AppInstallationIdentity
+    ) {
+        preferredRedirectTimeoutTask?.cancel()
+        preferredRedirectTimeoutTask = Task { @MainActor [weak self] in
+            for _ in 0..<50 {
+                guard !Task.isCancelled,
+                      self?.isRedirectingToPreferredInstallation == true else {
+                    return
+                }
+                if self?.preferredInstallationOwnsSingleInstance(expectedIdentity) == true {
+                    self?.finishPreferredInstallationRedirect(
+                        ownerConfirmed: true,
+                        errorDescription: nil
+                    )
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            guard !Task.isCancelled else { return }
+            self?.finishPreferredInstallationRedirect(
+                ownerConfirmed: false,
+                errorDescription: "preferred process launched but never became the verified owner"
+            )
+        }
+    }
+
+    private func preferredInstallationOwnsSingleInstance(
+        _ expectedIdentity: AppInstallationIdentity
+    ) -> Bool {
+        guard installationAuthority.revalidateRedirectTarget(expectedIdentity),
+              let owner = singleInstanceCoordinator.stableOwnerRecordHoldingLock(),
+              owner.installationIdentity == expectedIdentity,
+              let runningOwner = NSRunningApplication(processIdentifier: owner.pid),
+              !runningOwner.isTerminated,
+              runningOwner.bundleIdentifier == expectedIdentity.bundleIdentifier,
+              runningOwner.bundleURL?.resolvingSymlinksInPath().standardizedFileURL
+                == expectedIdentity.bundleURL.resolvingSymlinksInPath().standardizedFileURL else {
+            return false
+        }
+        return true
+    }
+
+    private func finishPreferredInstallationRedirect(
+        ownerConfirmed: Bool,
+        errorDescription: String?
+    ) {
+        guard isRedirectingToPreferredInstallation else { return }
+        isRedirectingToPreferredInstallation = false
+        preferredRedirectTimeoutTask?.cancel()
+        preferredRedirectTimeoutTask = nil
+
+        if ownerConfirmed {
+            if let token = redirectVerificationToken {
+                AppLogger.lifecycle.info("Verified redirect to the recorded preferred app installation token=\(token, privacy: .public)")
+            } else {
+                AppLogger.lifecycle.info("Verified redirect to the recorded preferred app installation")
+            }
+        } else {
+            AppLogger.lifecycle.error(
+                "Preferred app redirect failed closed: \(errorDescription ?? "unexpected launched path", privacy: .public)"
+            )
+        }
+        NSApp.terminate(nil)
+    }
+
+    private var redirectVerificationToken: String? {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let index = arguments.firstIndex(of: "--codex-monitor-redirect-verification-token"),
+              arguments.indices.contains(index + 1),
+              UUID(uuidString: arguments[index + 1]) != nil else {
+            return nil
+        }
+        return arguments[index + 1]
     }
 
     @discardableResult
