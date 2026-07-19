@@ -269,6 +269,241 @@ final class WidgetPresentationTests: XCTestCase {
         XCTAssertEqual(expiredFiveHour?.percentText, "--")
     }
 
+    func testWidgetTimelinePlanAddsCalendarDayEntriesAroundSemanticTransitions() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = calendar.date(from: DateComponents(
+            year: 2024,
+            month: 7,
+            day: 3,
+            hour: 23,
+            minute: 50
+        ))!
+        let creditExpiry = now.addingTimeInterval(5 * 60)
+        let midnight = calendar.date(from: DateComponents(
+            year: 2024,
+            month: 7,
+            day: 4
+        ))!
+        let quotaReset = now.addingTimeInterval(15 * 60)
+        let staleDate = now.addingTimeInterval(
+            QuotaTemporalSemantics.defaultStaleAfterInterval
+        )
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 71,
+            fiveHourQuotaPercent: 64,
+            resetCreditDetailsState: .detailed,
+            resetCreditDetails: [
+                ResetCreditDetailSnapshot(
+                    ordinal: 1,
+                    status: "available",
+                    grantedAt: now,
+                    expiresAt: creditExpiry
+                )
+            ],
+            refreshedAt: now,
+            dataSource: .real,
+            quotaWindows: [
+                QuotaWindow(
+                    limitId: "codex",
+                    windowId: "primary",
+                    kind: .fiveHour,
+                    durationMinutes: 300,
+                    remainingPercent: 64,
+                    resetAt: quotaReset
+                )
+            ]
+        )
+        let state = WidgetDisplayState.make(
+            snapshot: snapshot,
+            status: .success,
+            lastSuccessAt: now,
+            lastAttemptAt: now,
+            effectiveFiveHourResetAt: quotaReset,
+            savedAt: now
+        )
+
+        let plan = state.timelinePlan(startingAt: now, calendar: calendar)
+
+        XCTAssertEqual(plan.entryDates.first, now)
+        XCTAssertEqual(
+            plan.reloadAfter,
+            now.addingTimeInterval(WidgetTimelinePlan.activeRevalidationInterval)
+        )
+        XCTAssertTrue(plan.entryDates.contains(creditExpiry))
+        XCTAssertTrue(plan.entryDates.contains(midnight))
+        XCTAssertTrue(plan.entryDates.contains(quotaReset))
+        XCTAssertTrue(plan.entryDates.contains(staleDate))
+        XCTAssertEqual(plan.entryDates, Array(Set(plan.entryDates)).sorted())
+        XCTAssertEqual(plan.calendarDayEntryDates.count, WidgetTimelinePlan.calendarDayLookaheadCount)
+        XCTAssertEqual(plan.calendarDayEntryDates.first, midnight)
+        XCTAssertEqual(
+            state.quotaItems(now: quotaReset)
+                .first { $0.kind == .fiveHour }?
+                .percentText,
+            "--"
+        )
+        XCTAssertNil(
+            WidgetPresentation(state: state, family: .small, now: creditExpiry)
+                .footerText
+        )
+    }
+
+    func testWidgetTimelinePlanUsesBudgetedAdaptiveRevalidation() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = calendar.date(from: DateComponents(
+            year: 2024,
+            month: 7,
+            day: 3,
+            hour: 12
+        ))!
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 71,
+            fiveHourQuotaPercent: 64,
+            refreshedAt: now,
+            dataSource: .real
+        )
+        let fresh = WidgetDisplayState.make(
+            snapshot: snapshot,
+            status: .success,
+            lastSuccessAt: now,
+            lastAttemptAt: now,
+            effectiveFiveHourResetAt: nil,
+            savedAt: now
+        )
+        let stale = WidgetDisplayState.make(
+            snapshot: snapshot,
+            status: .success,
+            lastSuccessAt: now.addingTimeInterval(
+                -QuotaTemporalSemantics.defaultStaleAfterInterval
+            ),
+            lastAttemptAt: now,
+            effectiveFiveHourResetAt: nil,
+            savedAt: now
+        )
+
+        XCTAssertEqual(
+            fresh.timelinePlan(startingAt: now, calendar: calendar).reloadAfter,
+            now.addingTimeInterval(WidgetTimelinePlan.activeRevalidationInterval)
+        )
+        XCTAssertEqual(
+            stale.timelinePlan(startingAt: now, calendar: calendar).reloadAfter,
+            now.addingTimeInterval(WidgetTimelinePlan.passiveRevalidationInterval)
+        )
+        XCTAssertEqual(
+            WidgetDisplayState.placeholder
+                .timelinePlan(startingAt: now, calendar: calendar)
+                .reloadAfter,
+            now.addingTimeInterval(WidgetTimelinePlan.disconnectedRevalidationInterval)
+        )
+        XCTAssertGreaterThanOrEqual(WidgetTimelinePlan.activeRevalidationInterval, 30 * 60)
+        XCTAssertGreaterThanOrEqual(WidgetTimelinePlan.passiveRevalidationInterval, 60 * 60)
+        XCTAssertGreaterThanOrEqual(WidgetTimelinePlan.disconnectedRevalidationInterval, 6 * 60 * 60)
+    }
+
+    func testWidgetTimelinePlanRecomputesCalendarBoundaryForTimeZoneChange() {
+        let now = Date(timeIntervalSince1970: 1_720_008_000)
+        var utcCalendar = Calendar(identifier: .gregorian)
+        utcCalendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        var shanghaiCalendar = Calendar(identifier: .gregorian)
+        shanghaiCalendar.timeZone = TimeZone(secondsFromGMT: 8 * 60 * 60)!
+        let state = WidgetDisplayState.placeholder
+
+        let utcPlan = state.timelinePlan(startingAt: now, calendar: utcCalendar)
+        let shanghaiPlan = state.timelinePlan(startingAt: now, calendar: shanghaiCalendar)
+
+        XCTAssertNotEqual(
+            utcPlan.calendarDayEntryDates.first,
+            shanghaiPlan.calendarDayEntryDates.first
+        )
+        XCTAssertEqual(
+            utcPlan.calendarDayEntryDates.first,
+            utcCalendar.dateInterval(of: .day, for: now)?.end
+        )
+        XCTAssertEqual(
+            shanghaiPlan.calendarDayEntryDates.first,
+            shanghaiCalendar.dateInterval(of: .day, for: now)?.end
+        )
+    }
+
+    func testWidgetTimelinePlanUsesCalendarBoundariesAcrossDaylightSavingChange() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "America/Los_Angeles")!
+        let now = calendar.date(from: DateComponents(
+            year: 2024,
+            month: 3,
+            day: 9,
+            hour: 23,
+            minute: 30
+        ))!
+        let firstMidnight = calendar.date(from: DateComponents(
+            year: 2024,
+            month: 3,
+            day: 10
+        ))!
+        let secondMidnight = calendar.date(from: DateComponents(
+            year: 2024,
+            month: 3,
+            day: 11
+        ))!
+
+        let plan = WidgetDisplayState.placeholder.timelinePlan(
+            startingAt: now,
+            calendar: calendar
+        )
+
+        XCTAssertEqual(Array(plan.calendarDayEntryDates.prefix(2)), [firstMidnight, secondMidnight])
+        XCTAssertEqual(secondMidnight.timeIntervalSince(firstMidnight), 23 * 60 * 60)
+    }
+
+    func testWidgetExpiresOrphanedRefreshingStateAndFutureSuccessTimestamp() {
+        let now = Date(timeIntervalSince1970: 1_720_000_000)
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 71,
+            fiveHourQuotaPercent: 64,
+            refreshedAt: now.addingTimeInterval(-60),
+            dataSource: .real
+        )
+        let refreshing = WidgetDisplayState.make(
+            snapshot: snapshot,
+            status: .refreshing,
+            lastSuccessAt: snapshot.refreshedAt,
+            lastAttemptAt: now,
+            effectiveFiveHourResetAt: nil,
+            savedAt: now
+        )
+        let leaseExpiry = now.addingTimeInterval(
+            WidgetDisplayState.refreshingLeaseInterval
+        )
+        let futureSuccess = WidgetDisplayState.make(
+            snapshot: snapshot,
+            status: .success,
+            lastSuccessAt: now.addingTimeInterval(5 * 60),
+            lastAttemptAt: now,
+            effectiveFiveHourResetAt: nil,
+            savedAt: now
+        )
+        let disconnectedRefreshing = WidgetDisplayState.make(
+            snapshot: .notConnected,
+            status: .refreshing,
+            lastSuccessAt: nil,
+            lastAttemptAt: now,
+            effectiveFiveHourResetAt: nil,
+            savedAt: now
+        )
+
+        XCTAssertEqual(refreshing.effectiveStatus(at: leaseExpiry.addingTimeInterval(-1)), .refreshing)
+        XCTAssertEqual(refreshing.effectiveStatus(at: leaseExpiry), .stale)
+        XCTAssertEqual(refreshing.nextTemporalTransition(after: now), leaseExpiry)
+        XCTAssertEqual(futureSuccess.effectiveStatus(at: now), .stale)
+        XCTAssertEqual(
+            disconnectedRefreshing.effectiveStatus(at: leaseExpiry.addingTimeInterval(-1)),
+            .refreshing
+        )
+        XCTAssertEqual(disconnectedRefreshing.effectiveStatus(at: leaseExpiry), .noSnapshot)
+    }
+
     private func quota(
         id: String,
         label: String,

@@ -24,12 +24,11 @@ struct CodexMonitorWidgetProvider: TimelineProvider {
     ) {
         let now = Date.now
         let state = WidgetDisplayStateStore.load()
-        let entries = state.timelineEntryDates(startingAt: now).map {
+        let plan = state.timelinePlan(startingAt: now)
+        let entries = plan.entryDates.map {
             CodexMonitorWidgetEntry(date: $0, state: state)
         }
-        let periodicRefresh = Calendar.current.date(byAdding: .minute, value: 5, to: now)
-            ?? now.addingTimeInterval(300)
-        completion(Timeline(entries: entries, policy: .after(periodicRefresh)))
+        completion(Timeline(entries: entries, policy: .after(plan.reloadAfter)))
     }
 }
 
