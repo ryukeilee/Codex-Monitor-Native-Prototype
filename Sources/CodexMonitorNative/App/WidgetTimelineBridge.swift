@@ -28,6 +28,18 @@ final class WidgetTimelineBridge {
 
     private func propagate(_ event: AppStateEvent) {
         let state = event.presentationSnapshot
+        let requiresTemporalReload = event.updateReason == .temporalReconciliation
+
+        // The timeline continues projecting the last settled payload while a
+        // request is in flight. Persisting this transient state can strand the
+        // Widget at "refreshing" if the host exits before publishing a result.
+        if state.status == .refreshing {
+            if requiresTemporalReload {
+                reloadTimelines()
+            }
+            return
+        }
+
         let stateChanged = lastPropagatedState?.isEquivalent(to: state) != true
 
         if stateChanged {
@@ -35,11 +47,7 @@ final class WidgetTimelineBridge {
             lastPropagatedState = state
         }
 
-        let requiresTemporalReload = event.updateReason == .temporalReconciliation
         guard stateChanged || requiresTemporalReload else {
-            return
-        }
-        guard state.status != .refreshing || requiresTemporalReload else {
             return
         }
 

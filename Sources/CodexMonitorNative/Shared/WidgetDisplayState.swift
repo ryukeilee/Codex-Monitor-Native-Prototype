@@ -80,7 +80,28 @@ enum CodexMonitorWidgetConstants {
     static let stateFileName = "WidgetDisplayState.json"
 }
 
+/// A pure WidgetKit timeline contract shared with the host target for tests.
+/// Semantic entries update known quota state exactly; calendar entries keep
+/// day-relative labels correct without waking the host app. `reloadAfter` is a
+/// low-frequency revalidation checkpoint for presentation-environment changes
+/// that cannot be observed while the extension is not running.
+struct WidgetTimelinePlan: Equatable {
+    static let activeRevalidationInterval: TimeInterval = 30 * 60
+    static let passiveRevalidationInterval: TimeInterval = 60 * 60
+    static let disconnectedRevalidationInterval: TimeInterval = 6 * 60 * 60
+    static let calendarDayLookaheadCount = 7
+
+    let entryDates: [Date]
+    let calendarDayEntryDates: [Date]
+    let reloadAfter: Date
+}
+
 struct WidgetDisplayState: Codable, Equatable {
+    /// A Widget payload should never claim that an abandoned request is still
+    /// running forever. Real refreshes normally time out within seconds; two
+    /// minutes leaves headroom for executable fallback and detail enrichment.
+    static let refreshingLeaseInterval: TimeInterval = 2 * 60
+
     let snapshot: QuotaSnapshot
     let status: QuotaRefreshStatus
     let lastSuccessAt: Date?
@@ -173,11 +194,25 @@ struct WidgetDisplayState: Codable, Equatable {
     }
 
     func effectiveStatus(at now: Date) -> QuotaRefreshStatus {
-        guard status == .success,
-              snapshot.dataSource == .real else {
+        if status == .refreshing {
+            guard !hasActiveRefreshingLease(at: now) else { return .refreshing }
+            guard snapshot.dataSource == .real else {
+                return lastSuccessAt == nil ? .noSnapshot : .demoMode
+            }
+            return .stale
+        }
+
+        guard snapshot.dataSource == .real else {
             return status
         }
+
+        guard status == .success else { return status }
         let freshnessReference = lastSuccessAt ?? snapshot.refreshedAt
+
+        // The host requests new data after a clock change. If it is not
+        // running, fail closed instead of presenting a future-dated snapshot
+        // as newly successful after a wall-clock rollback.
+        guard freshnessReference <= now else { return .stale }
 
         return QuotaTemporalSemantics.freshness(
             lastSuccessAt: freshnessReference,
@@ -255,19 +290,46 @@ struct WidgetDisplayState: Codable, Equatable {
     }
 
     func temporalTransitionDates(after now: Date) -> [Date] {
-        var seen = Set<Date>()
-        return QuotaTemporalSemantics.upcomingTransitions(
+        var dates = QuotaTemporalSemantics.upcomingTransitions(
             snapshot: snapshot,
-            status: status,
+            status: effectiveStatus(at: now),
             lastSuccessAt: lastSuccessAt ?? (snapshot.dataSource == .real ? snapshot.refreshedAt : nil),
             now: now
         )
         .map(\.date)
-        .filter { seen.insert($0).inserted }
+
+        if let refreshingLeaseExpiry = refreshingLeaseExpiry(after: now) {
+            dates.append(refreshingLeaseExpiry)
+        }
+
+        return Array(Set(dates)).sorted()
     }
 
     func timelineEntryDates(startingAt now: Date) -> [Date] {
         [now] + temporalTransitionDates(after: now)
+    }
+
+    func timelinePlan(
+        startingAt now: Date,
+        calendar: Calendar = .autoupdatingCurrent
+    ) -> WidgetTimelinePlan {
+        let calendarDayEntryDates = Self.calendarDayEntryDates(
+            after: now,
+            calendar: calendar,
+            count: WidgetTimelinePlan.calendarDayLookaheadCount
+        )
+        let reloadAfter = now.addingTimeInterval(revalidationInterval(at: now))
+        let entryDates = Array(Set(
+            timelineEntryDates(startingAt: now) +
+            calendarDayEntryDates +
+            [reloadAfter]
+        )).sorted()
+
+        return WidgetTimelinePlan(
+            entryDates: entryDates,
+            calendarDayEntryDates: calendarDayEntryDates,
+            reloadAfter: reloadAfter
+        )
     }
 
     func updatedLine(now: Date = .now) -> String {
@@ -356,6 +418,57 @@ struct WidgetDisplayState: Codable, Equatable {
         formatter.dateFormat = "M/d HH:mm"
         let prefix = snapshot.resetCreditDetailsState == .unavailable ? "上次重置" : "最早重置"
         return "\(prefix) \(formatter.string(from: earliestExpiry))"
+    }
+
+    private func hasActiveRefreshingLease(at now: Date) -> Bool {
+        guard status == .refreshing else { return false }
+        let startedAt = lastAttemptAt ?? savedAt
+        guard startedAt <= now else { return false }
+        return now < startedAt.addingTimeInterval(Self.refreshingLeaseInterval)
+    }
+
+    private func refreshingLeaseExpiry(after now: Date) -> Date? {
+        guard status == .refreshing else { return nil }
+        let startedAt = lastAttemptAt ?? savedAt
+        guard startedAt <= now else { return nil }
+        let expiry = startedAt.addingTimeInterval(Self.refreshingLeaseInterval)
+        return now < expiry ? expiry : nil
+    }
+
+    private func revalidationInterval(at now: Date) -> TimeInterval {
+        guard snapshot.dataSource == .real else {
+            return WidgetTimelinePlan.disconnectedRevalidationInterval
+        }
+
+        switch effectiveStatus(at: now) {
+        case .success, .refreshing:
+            return WidgetTimelinePlan.activeRevalidationInterval
+        case .stale, .networkFailed, .authRequired, .parseFailed:
+            return WidgetTimelinePlan.passiveRevalidationInterval
+        case .idle, .noSnapshot, .demoMode:
+            return WidgetTimelinePlan.disconnectedRevalidationInterval
+        }
+    }
+
+    private static func calendarDayEntryDates(
+        after now: Date,
+        calendar: Calendar,
+        count: Int
+    ) -> [Date] {
+        guard count > 0 else { return [] }
+        var dates: [Date] = []
+        var cursor = now
+
+        for _ in 0..<count {
+            guard let boundary = calendar.dateInterval(of: .day, for: cursor)?.end,
+                  boundary > cursor else {
+                break
+            }
+            dates.append(boundary)
+            cursor = boundary.addingTimeInterval(1)
+        }
+
+        return dates
     }
 
     func isEquivalent(to other: WidgetDisplayState) -> Bool {

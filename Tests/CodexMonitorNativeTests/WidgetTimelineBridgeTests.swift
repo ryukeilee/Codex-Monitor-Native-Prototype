@@ -3,7 +3,7 @@ import XCTest
 
 @MainActor
 final class WidgetTimelineBridgeTests: XCTestCase {
-    func testAppStateShutdownPublishesRefreshingThenSettledFreshCacheStateForWidget() async {
+    func testAppStateShutdownPublishesOnlySettledFreshCacheStateForWidget() async {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.widgetShutdownCache.\(UUID().uuidString)")!
         let snapshot = QuotaSnapshot(weeklyQuotaPercent: 70, fiveHourQuotaPercent: 60, refreshedAt: .now, dataSource: .real)
         let store = SnapshotStore(defaults: defaults, key: "snapshot")
@@ -20,15 +20,15 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         await service.waitForStart()
         appState.shutdown()
 
-        XCTAssertEqual(savedStates.map(\.status), [.refreshing, .success])
-        XCTAssertEqual(savedStates.map(\.snapshot), [snapshot, snapshot])
+        XCTAssertEqual(savedStates.map(\.status), [.success])
+        XCTAssertEqual(savedStates.map(\.snapshot), [snapshot])
         XCTAssertEqual(savedStates.last?.snapshot, snapshot)
         XCTAssertEqual(savedStates.last?.status, .success)
         XCTAssertEqual(reloadCount, 1)
         _ = bridge
     }
 
-    func testAppStateShutdownPublishesRefreshingThenSettledNoSnapshotStateForWidgetWithoutCache() async {
+    func testAppStateShutdownPublishesOnlySettledNoSnapshotStateForWidgetWithoutCache() async {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.widgetShutdownNoCache.\(UUID().uuidString)")!
         let service = WidgetBridgeBlockingRefreshService(snapshot: .notConnected)
         let appState = AppState(snapshotStore: SnapshotStore(defaults: defaults, key: "snapshot"), refreshService: service)
@@ -42,8 +42,8 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         await service.waitForStart()
         appState.shutdown()
 
-        XCTAssertEqual(savedStates.map(\.status), [.refreshing, .noSnapshot])
-        XCTAssertEqual(savedStates.map(\.snapshot), [.notConnected, .notConnected])
+        XCTAssertEqual(savedStates.map(\.status), [.noSnapshot])
+        XCTAssertEqual(savedStates.map(\.snapshot), [.notConnected])
         XCTAssertEqual(savedStates.last?.snapshot, .notConnected)
         XCTAssertEqual(savedStates.last?.status, appState.displayStatus)
         XCTAssertNotEqual(savedStates.last?.status, .refreshing)
@@ -51,7 +51,7 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         _ = bridge
     }
 
-    func testAppStateShutdownReplacesPersistedRefreshingStateAndIsIdempotentForWidget() async {
+    func testAppStateShutdownPublishesSettledStateAndIsIdempotentForWidget() async {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.widgetBridgeDeinit.\(UUID().uuidString)")!
         let initial = QuotaSnapshot(weeklyQuotaPercent: 70, fiveHourQuotaPercent: 60, refreshedAt: .now, dataSource: .real)
         let store = SnapshotStore(defaults: defaults, key: "snapshot")
@@ -71,11 +71,11 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         appState.refresh(trigger: .manual)
         await service.waitForStart()
         for _ in 0..<3 { await Task.yield() }
-        XCTAssertEqual(savedStates.last?.status, .refreshing)
+        XCTAssertTrue(savedStates.isEmpty)
 
         appState.shutdown()
 
-        XCTAssertEqual(savedStates.map(\.status), [.refreshing, .success])
+        XCTAssertEqual(savedStates.map(\.status), [.success])
         XCTAssertNotEqual(savedStates.last?.status, .refreshing)
         XCTAssertEqual(reloadCount, 1)
 
@@ -1118,7 +1118,7 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         _ = bridge
     }
 
-    func testRefreshInProgressWritesCachedSnapshotAndRefreshingStatusForWidget() async {
+    func testRefreshInProgressKeepsSettledWidgetFileUntilFinalState() async {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.widgetRefreshing.\(UUID().uuidString)")!
         let store = SnapshotStore(defaults: defaults, key: "snapshot")
         let now = Date()
@@ -1144,15 +1144,11 @@ final class WidgetTimelineBridgeTests: XCTestCase {
 
         var savedStates: [WidgetDisplayState] = []
         var reloadCount = 0
-        let refreshingStateSaved = expectation(description: "Widget bridge saved refreshing state with cached data")
         let finalStateSaved = expectation(description: "Widget bridge saved final success state")
         let bridge = WidgetTimelineBridge(
             appState: appState,
             saveState: {
                 savedStates.append($0)
-                if $0.snapshot == initial, $0.status == .refreshing, $0.lastAttemptAt != nil {
-                    refreshingStateSaved.fulfill()
-                }
                 if $0.snapshot == refreshed, $0.status == .success {
                     finalStateSaved.fulfill()
                 }
@@ -1167,12 +1163,7 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         }
 
         await service.waitForStart()
-        await fulfillment(of: [refreshingStateSaved], timeout: 1)
-
-        XCTAssertEqual(savedStates.last?.snapshot, initial)
-        XCTAssertEqual(savedStates.last?.status, .refreshing)
-        XCTAssertEqual(savedStates.last?.lastSuccessAt, initial.refreshedAt)
-        XCTAssertEqual(savedStates.last?.effectiveFiveHourResetAt, resetAt)
+        XCTAssertTrue(savedStates.isEmpty)
         XCTAssertEqual(reloadCount, 0)
 
         await service.release()
