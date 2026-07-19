@@ -24,7 +24,10 @@ final class StatusPopoverBehaviorTests: XCTestCase {
             rootView: StatusPopoverView(
                 appState: appState,
                 launchAtLoginManager: launchManager,
-                onRefresh: { refreshCount += 1 },
+                onRefresh: {
+                    refreshCount += 1
+                    appState.refresh(trigger: .manual)
+                },
                 onQuit: { quitCount += 1 }
             )
         )
@@ -43,9 +46,9 @@ final class StatusPopoverBehaviorTests: XCTestCase {
         XCTAssertTrue(performCommandShortcut("r", keyCode: 15, in: window))
         XCTAssertEqual(refreshCount, 1)
 
-        appState.refresh(trigger: .manual)
         await Task.yield()
         hostingView.layoutSubtreeIfNeeded()
+        XCTAssertEqual(appState.status, .refreshing)
         XCTAssertFalse(performCommandShortcut("r", keyCode: 15, in: window))
         XCTAssertEqual(refreshCount, 1)
 
@@ -150,6 +153,42 @@ final class StatusPopoverBehaviorTests: XCTestCase {
     }
 
     func testAccessibilityContractPublishesStableControlState() {
+        let launchAtLogin = StatusPopoverAccessibilityContract.launchAtLoginControlState(
+            isUpdating: false,
+            statusInfo: .enabled
+        )
+        XCTAssertEqual(launchAtLogin.label, "开机启动")
+        XCTAssertEqual(launchAtLogin.value, "已启用")
+        XCTAssertEqual(launchAtLogin.hint, "开启或关闭登录时自动启动")
+        XCTAssertEqual(launchAtLogin.identifier, "launch-at-login-toggle")
+        XCTAssertTrue(launchAtLogin.isEnabled)
+
+        let updatingLaunchAtLogin = StatusPopoverAccessibilityContract.launchAtLoginControlState(
+            isUpdating: true,
+            statusInfo: .enabled
+        )
+        XCTAssertFalse(updatingLaunchAtLogin.isEnabled)
+        XCTAssertEqual(updatingLaunchAtLogin.hint, "正在更新开机启动设置")
+
+        let refresh = StatusPopoverAccessibilityContract.refreshControlState(for: .success)
+        XCTAssertEqual(refresh.label, "刷新额度")
+        XCTAssertEqual(refresh.value, "可刷新")
+        XCTAssertEqual(refresh.hint, "按 Command-R 立即更新额度数据")
+        XCTAssertEqual(refresh.identifier, "refresh-button")
+        XCTAssertTrue(refresh.isEnabled)
+
+        let refreshing = StatusPopoverAccessibilityContract.refreshControlState(for: .refreshing)
+        XCTAssertFalse(refreshing.isEnabled)
+        XCTAssertEqual(refreshing.value, "正在刷新")
+        XCTAssertEqual(refreshing.hint, "刷新进行中，请等待完成")
+
+        let quit = StatusPopoverAccessibilityContract.quitControlState
+        XCTAssertEqual(quit.label, "退出 Codex Monitor")
+        XCTAssertEqual(quit.value, "可退出")
+        XCTAssertEqual(quit.hint, "按 Command-Q 退出应用")
+        XCTAssertEqual(quit.identifier, "quit-button")
+        XCTAssertTrue(quit.isEnabled)
+
         XCTAssertEqual(
             StatusPopoverAccessibilityContract.launchAtLoginValue(isUpdating: false, statusInfo: .notRegistered),
             "未启用"
@@ -191,6 +230,77 @@ final class StatusPopoverBehaviorTests: XCTestCase {
                 "reset-credit-fields-disclosure"
             ]
         )
+    }
+
+    func testQuotaCardAccessibilityStatesExposeCredibilityAndStableIdentifiers() {
+        let item = StatusPopoverFormatting.QuotaWindowDisplayItem(
+            id: "server-weekly-window",
+            semanticIdentity: "weekly",
+            kind: .weekly,
+            label: "每周",
+            percentText: "42%",
+            historyCaption: nil,
+            trustedPercent: 42,
+            progress: 0.42,
+            fieldState: .live,
+            stateText: "上次数据",
+            resetAt: nil,
+            resetText: "今天 18:00",
+            resetRemainingText: "5小时后",
+            origin: .dynamic
+        )
+
+        XCTAssertEqual(
+            StatusPopoverAccessibilityContract.quotaCardIdentifier(for: item.semanticIdentity),
+            "quota-card-weekly"
+        )
+
+        let success = StatusPopoverAccessibilityContract.quotaCardState(for: item, status: .success)
+        XCTAssertEqual(success.label, "每周 额度窗口，剩余 42%")
+        XCTAssertEqual(success.identifier, "quota-card-weekly")
+        XCTAssertEqual(success.hint, "只读额度状态；使用刷新额度按钮更新数据")
+        XCTAssertTrue(success.value.contains("可信度：最新数据"))
+        XCTAssertTrue(success.value.contains("恢复 今天 18:00，还需 5小时后"))
+
+        XCTAssertTrue(
+            StatusPopoverAccessibilityContract.quotaCardState(for: item, status: .stale)
+                .value.contains("可信度：数据已过期")
+        )
+        XCTAssertTrue(
+            StatusPopoverAccessibilityContract.quotaCardState(for: item, status: .networkFailed)
+                .value.contains("可信度：网络异常，显示上次数据")
+        )
+        XCTAssertTrue(
+            StatusPopoverAccessibilityContract.quotaCardState(for: item, status: .authRequired)
+                .value.contains("可信度：需要登录，显示上次数据")
+        )
+        XCTAssertTrue(
+            StatusPopoverAccessibilityContract.quotaCardState(for: item, status: .parseFailed)
+                .value.contains("可信度：数据异常，显示上次数据")
+        )
+
+        let cachedItem = StatusPopoverFormatting.QuotaWindowDisplayItem(
+            id: "cached-weekly-window",
+            semanticIdentity: "weekly",
+            kind: .weekly,
+            label: "每周",
+            percentText: "42%",
+            historyCaption: "（历史缓存）",
+            trustedPercent: 42,
+            progress: 0.42,
+            fieldState: .cached,
+            stateText: "历史缓存",
+            resetAt: nil,
+            resetText: "今天 18:00",
+            resetRemainingText: "5小时后",
+            origin: .dynamic
+        )
+        let cachedSuccess = StatusPopoverAccessibilityContract.quotaCardState(
+            for: cachedItem,
+            status: .success
+        )
+        XCTAssertTrue(cachedSuccess.value.contains("可信度：当前窗口为历史缓存，本次快照最新"))
+        XCTAssertFalse(cachedSuccess.value.contains("可信度：最新数据"))
     }
 
     func testEscapeClosePolicyOnlyClosesVisiblePopover() {

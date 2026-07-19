@@ -44,6 +44,9 @@ struct StatusPopoverView: View {
 
     private var isPanelActive: Bool { presentationState.isPanelActive }
     private var presentationSnapshot: QuotaPresentationSnapshot { appState.presentationSnapshot }
+    private var refreshControlState: StatusPopoverAccessibilityContract.ControlState {
+        StatusPopoverAccessibilityContract.refreshControlState(for: presentationSnapshot.status)
+    }
 
     var body: some View {
         MetallicPanelBackground {
@@ -208,6 +211,10 @@ struct StatusPopoverView: View {
     }
 
     private func launchAtLoginToggle(controlSize: ControlSize) -> some View {
+        let controlState = StatusPopoverAccessibilityContract.launchAtLoginControlState(
+            isUpdating: launchAtLoginManager.isUpdating,
+            statusInfo: launchAtLoginManager.statusInfo
+        )
         return Toggle(isOn: launchAtLoginBinding) {
             ZStack {
                 Circle()
@@ -255,34 +262,34 @@ struct StatusPopoverView: View {
         }
             .toggleStyle(.button)
             .buttonStyle(.plain)
-            .disabled(launchAtLoginManager.isUpdating)
-            .accessibilityLabel("开机启动")
-            .accessibilityValue(
-                StatusPopoverAccessibilityContract.launchAtLoginValue(
-                    isUpdating: launchAtLoginManager.isUpdating,
-                    statusInfo: launchAtLoginManager.statusInfo
-                )
-            )
-            .accessibilityHint("开启或关闭登录时自动启动")
-            .accessibilityIdentifier(StatusPopoverAccessibilityContract.launchAtLoginToggleIdentifier)
+            .disabled(!controlState.isEnabled)
+            .accessibilityLabel(controlState.label)
+            .accessibilityValue(controlState.value)
+            .accessibilityHint(controlState.hint)
+            .accessibilityIdentifier(controlState.identifier)
+            .accessibilityRespondsToUserInteraction(controlState.isEnabled)
             .help("开机启动")
     }
 
     private var actions: some View {
-        HStack(spacing: 8) {
-            Button(action: onRefresh) {
+        let refreshControl = refreshControlState
+        let quitControl = StatusPopoverAccessibilityContract.quitControlState
+        return HStack(spacing: 8) {
+            Button(action: requestRefresh) {
                 Label("刷新", systemImage: "arrow.clockwise")
                     .font(.subheadline.weight(.medium))
                     .frame(minHeight: MetallicControlMetrics.actionRowHeight)
             }
             .buttonStyle(.borderless)
             .foregroundStyle(MetallicPalette.redBright)
-            .disabled(presentationSnapshot.status == .refreshing)
+            .disabled(!refreshControl.isEnabled)
             .keyboardShortcut("r", modifiers: .command)
-            .accessibilityLabel("刷新额度")
-            .accessibilityValue(StatusPopoverAccessibilityContract.refreshValue(for: presentationSnapshot.status))
-            .accessibilityHint("立即更新额度数据")
-            .accessibilityIdentifier(StatusPopoverAccessibilityContract.refreshButtonIdentifier)
+            .accessibilityLabel(refreshControl.label)
+            .accessibilityValue(refreshControl.value)
+            .accessibilityHint(refreshControl.hint)
+            .accessibilityIdentifier(refreshControl.identifier)
+            .accessibilityRespondsToUserInteraction(refreshControl.isEnabled)
+            .accessibilitySortPriority(2)
 
             Spacer()
 
@@ -294,12 +301,20 @@ struct StatusPopoverView: View {
             .buttonStyle(.borderless)
             .foregroundStyle(MetallicPalette.foreground)
             .keyboardShortcut("q", modifiers: .command)
-            .accessibilityLabel("退出 Codex Monitor")
-            .accessibilityHint("退出应用")
-            .accessibilityIdentifier(StatusPopoverAccessibilityContract.quitButtonIdentifier)
+            .accessibilityLabel(quitControl.label)
+            .accessibilityValue(quitControl.value)
+            .accessibilityHint(quitControl.hint)
+            .accessibilityIdentifier(quitControl.identifier)
+            .accessibilityRespondsToUserInteraction(quitControl.isEnabled)
+            .accessibilitySortPriority(1)
         }
         .padding(.horizontal, MetallicControlMetrics.sectionHorizontalInset)
         .padding(.vertical, 2)
+    }
+
+    private func requestRefresh() {
+        guard refreshControlState.isEnabled else { return }
+        onRefresh()
     }
 
     @ViewBuilder

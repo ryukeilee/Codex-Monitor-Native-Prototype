@@ -30,8 +30,12 @@ struct QuotaSummaryView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             } else {
                 LazyVGrid(columns: quotaColumns, alignment: .leading, spacing: 8) {
-                    ForEach(quotaItems) { item in
-                        QuotaGaugeView(item: item)
+                    ForEach(Array(quotaItems.enumerated()), id: \.element.id) { indexedItem in
+                        QuotaGaugeView(
+                            item: indexedItem.element,
+                            status: presentationSnapshot.status,
+                            accessibilitySortPriority: Double(quotaItems.count - indexedItem.offset)
+                        )
                     }
                 }
                 .frame(maxWidth: .infinity)
@@ -227,6 +231,12 @@ struct QuotaSummaryView: View {
 
 struct QuotaGaugeView: View {
     let item: StatusPopoverFormatting.QuotaWindowDisplayItem
+    let status: QuotaRefreshStatus
+    let accessibilitySortPriority: Double
+
+    private var accessibilityState: StatusPopoverAccessibilityContract.QuotaCardState {
+        StatusPopoverAccessibilityContract.quotaCardState(for: item, status: status)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -282,8 +292,10 @@ struct QuotaGaugeView: View {
         }
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(
-            "\(item.label) \(item.percentText)，\(item.stateText)，恢复 \(item.resetText)，还需 \(item.resetRemainingText)"
-        )
+        .accessibilityLabel(accessibilityState.label)
+        .accessibilityValue(accessibilityState.value)
+        .accessibilityHint(accessibilityState.hint)
+        .accessibilityIdentifier(accessibilityState.identifier)
+        .accessibilitySortPriority(accessibilitySortPriority)
     }
 }
