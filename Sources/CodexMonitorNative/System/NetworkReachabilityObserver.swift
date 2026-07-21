@@ -59,6 +59,32 @@ private extension NetworkPathSnapshot.Interface {
     }
 }
 
+protocol NetworkPathMonitoring: AnyObject, Sendable {
+    var pathUpdateHandler: (@Sendable (NetworkPathSnapshot) -> Void)? { get set }
+
+    func start(queue: DispatchQueue)
+    func cancel()
+}
+
+private final class NWPathMonitorAdapter: NetworkPathMonitoring, @unchecked Sendable {
+    private let monitor = NWPathMonitor()
+    var pathUpdateHandler: (@Sendable (NetworkPathSnapshot) -> Void)?
+
+    init() {
+        monitor.pathUpdateHandler = { [weak self] path in
+            self?.pathUpdateHandler?(NetworkPathSnapshot(path: path))
+        }
+    }
+
+    func start(queue: DispatchQueue) {
+        monitor.start(queue: queue)
+    }
+
+    func cancel() {
+        monitor.cancel()
+    }
+}
+
 enum NetworkReachabilityChange: Equatable, Sendable {
     case becameReachable
     case becameUnreachable
@@ -89,6 +115,7 @@ enum NetworkReachabilityChange: Equatable, Sendable {
 @MainActor
 final class NetworkReachabilityObserver {
     private let queue: DispatchQueue
+    private let monitorFactory: @MainActor () -> any NetworkPathMonitoring
     private let dispatchTask: @Sendable (@escaping @MainActor @Sendable () -> Void) -> Void
     private let onChange: @MainActor (NetworkReachabilityChange) -> Void
     private let resources = NetworkReachabilityResources()
@@ -97,12 +124,14 @@ final class NetworkReachabilityObserver {
 
     init(
         queue: DispatchQueue = DispatchQueue(label: "CodexMonitorNative.network-reachability"),
+        monitorFactory: @escaping @MainActor () -> any NetworkPathMonitoring = { NWPathMonitorAdapter() },
         dispatchTask: @escaping @Sendable (@escaping @MainActor @Sendable () -> Void) -> Void = { action in
             Task { @MainActor in action() }
         },
         onChange: @escaping @MainActor (NetworkReachabilityChange) -> Void
     ) {
         self.queue = queue
+        self.monitorFactory = monitorFactory
         self.dispatchTask = dispatchTask
         self.onChange = onChange
     }
@@ -110,12 +139,11 @@ final class NetworkReachabilityObserver {
     func start() {
         stop()
         let generation = resources.start()
-        let monitor = NWPathMonitor()
+        let monitor = monitorFactory()
         let onChange = self.onChange
         let dispatchTask = self.dispatchTask
 
-        monitor.pathUpdateHandler = { [weak resources] path in
-            let snapshot = NetworkPathSnapshot(path: path)
+        monitor.pathUpdateHandler = { [weak resources] snapshot in
             dispatchTask {
                 guard let resources, resources.isCurrent(generation) else { return }
                 let previous = resources.previousSnapshot
@@ -145,7 +173,7 @@ final class NetworkReachabilityObserver {
 }
 
 private final class NetworkReachabilityResources: @unchecked Sendable {
-    var monitor: NWPathMonitor?
+    var monitor: (any NetworkPathMonitoring)?
     var previousSnapshot: NetworkPathSnapshot?
     private var generation = 0
 

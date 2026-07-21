@@ -1,6 +1,12 @@
 import Foundation
 import CryptoKit
+import Darwin
 import OSLog
+
+// Darwin's `flock` function collides with its imported `flock` structure in
+// Swift, so bind the C symbol under an unambiguous name.
+@_silgen_name("flock")
+private func codexMonitorFlock(_ fileDescriptor: CInt, _ operation: CInt) -> CInt
 
 private enum PersistenceLog {
     static let logger = Logger(subsystem: "com.ryukeilee.CodexMonitorNativePrototype", category: "Persistence")
@@ -497,6 +503,12 @@ enum WidgetDisplayStateStore {
     static func load(fileManager: FileManager = .default) -> WidgetDisplayState {
         lock.lock()
         defer { lock.unlock() }
+        guard let transactionLock = acquireTransactionLock(fileManager: fileManager) else {
+            PersistenceLog.logger.error("Cannot acquire widget state transaction lock; using not-connected placeholder")
+            return .placeholder
+        }
+        defer { transactionLock.release() }
+
         let url = stateURL(fileManager: fileManager)
         let primaryData = try? Data(contentsOf: url)
         let primaryWasWrittenByNewerVersion = primaryData.map(containsNewerPersistenceVersion) ?? false
@@ -560,7 +572,46 @@ enum WidgetDisplayStateStore {
     static func save(_ state: WidgetDisplayState, fileManager: FileManager = .default) {
         lock.lock()
         defer { lock.unlock() }
+        guard let transactionLock = acquireTransactionLock(fileManager: fileManager) else {
+            PersistenceLog.logger.error("Cannot acquire widget state transaction lock; save was skipped")
+            return
+        }
+        defer { transactionLock.release() }
+
         saveUnlocked(state, fileManager: fileManager)
+    }
+
+    private static func acquireTransactionLock(fileManager: FileManager) -> WidgetStateTransactionLock? {
+        let url = lockURL(fileManager: fileManager)
+        do {
+            try fileManager.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+        } catch {
+            PersistenceLog.logger.error("Cannot create widget state directory for transaction lock: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+
+        let flags = O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW
+        let fileDescriptor = Darwin.open(url.path, flags, S_IRUSR | S_IWUSR)
+        guard fileDescriptor >= 0 else {
+            let errorDescription = String(cString: strerror(errno))
+            PersistenceLog.logger.error("Cannot open widget state transaction lock: \(errorDescription, privacy: .public)")
+            return nil
+        }
+
+        while codexMonitorFlock(fileDescriptor, LOCK_EX) != 0 {
+            if errno == EINTR {
+                continue
+            }
+            let errorDescription = String(cString: strerror(errno))
+            Darwin.close(fileDescriptor)
+            PersistenceLog.logger.error("Cannot lock widget state transaction file: \(errorDescription, privacy: .public)")
+            return nil
+        }
+
+        return WidgetStateTransactionLock(fileDescriptor: fileDescriptor)
     }
 
     private static func saveUnlocked(_ state: WidgetDisplayState, fileManager: FileManager) {
@@ -771,5 +822,36 @@ enum WidgetDisplayStateStore {
         return baseURL
             .appendingPathComponent("CodexMonitorNative", isDirectory: true)
             .appendingPathComponent(CodexMonitorWidgetConstants.stateFileName)
+    }
+
+    static func lockURL(fileManager: FileManager = .default) -> URL {
+        stateURL(fileManager: fileManager).appendingPathExtension("lock")
+    }
+
+    private final class WidgetStateTransactionLock {
+        private var fileDescriptor: Int32?
+
+        init(fileDescriptor: Int32) {
+            self.fileDescriptor = fileDescriptor
+        }
+
+        func release() {
+            guard let fileDescriptor else { return }
+            self.fileDescriptor = nil
+
+            while codexMonitorFlock(fileDescriptor, LOCK_UN) != 0 {
+                if errno == EINTR {
+                    continue
+                }
+                let errorDescription = String(cString: strerror(errno))
+                PersistenceLog.logger.error("Cannot unlock widget state transaction file: \(errorDescription, privacy: .public)")
+                break
+            }
+            Darwin.close(fileDescriptor)
+        }
+
+        deinit {
+            release()
+        }
     }
 }

@@ -1,5 +1,9 @@
 import XCTest
+import Darwin
 @testable import CodexMonitorNative
+
+@_silgen_name("flock")
+private func widgetStateTestFlock(_ fileDescriptor: CInt, _ operation: CInt) -> CInt
 
 @MainActor
 final class WidgetTimelineBridgeTests: XCTestCase {
@@ -655,6 +659,165 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager), newer)
     }
 
+    func testWidgetStateSidecarLockMutuallyExcludesIndependentFileDescriptors() throws {
+        let groupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexMonitorNativeTests.widgetFileLock.\(UUID().uuidString)", isDirectory: true)
+        let fileManager = WidgetStateTestFileManager(groupURL: groupURL)
+        let lockURL = WidgetDisplayStateStore.lockURL(fileManager: fileManager)
+        try FileManager.default.createDirectory(at: groupURL, withIntermediateDirectories: true)
+
+        let firstDescriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+        let secondDescriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+        XCTAssertGreaterThanOrEqual(firstDescriptor, 0)
+        XCTAssertGreaterThanOrEqual(secondDescriptor, 0)
+        guard firstDescriptor >= 0, secondDescriptor >= 0 else { return }
+        defer {
+            _ = widgetStateTestFlock(firstDescriptor, LOCK_UN)
+            _ = widgetStateTestFlock(secondDescriptor, LOCK_UN)
+            Darwin.close(firstDescriptor)
+            Darwin.close(secondDescriptor)
+        }
+
+        XCTAssertEqual(widgetStateTestFlock(firstDescriptor, LOCK_EX | LOCK_NB), 0)
+        errno = 0
+        XCTAssertEqual(widgetStateTestFlock(secondDescriptor, LOCK_EX | LOCK_NB), -1)
+        XCTAssertTrue(errno == EWOULDBLOCK || errno == EAGAIN)
+
+        XCTAssertEqual(widgetStateTestFlock(firstDescriptor, LOCK_UN), 0)
+        XCTAssertEqual(widgetStateTestFlock(secondDescriptor, LOCK_EX | LOCK_NB), 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: lockURL.path))
+    }
+
+    func testWidgetStateSaveWaitsForSidecarLock() throws {
+        let groupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexMonitorNativeTests.widgetStoreFileLock.\(UUID().uuidString)", isDirectory: true)
+        let fileManager = WidgetStateTestFileManager(groupURL: groupURL)
+        let lockURL = WidgetDisplayStateStore.lockURL(fileManager: fileManager)
+        let stateURL = WidgetDisplayStateStore.stateURL(fileManager: fileManager)
+        let state = WidgetDisplayState.make(
+            snapshot: .notConnected,
+            status: .noSnapshot,
+            lastSuccessAt: nil,
+            lastAttemptAt: nil,
+            effectiveFiveHourResetAt: nil,
+            savedAt: Date(timeIntervalSince1970: 200)
+        )
+        try FileManager.default.createDirectory(at: groupURL, withIntermediateDirectories: true)
+        let descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+        XCTAssertGreaterThanOrEqual(descriptor, 0)
+        guard descriptor >= 0 else { return }
+        XCTAssertEqual(widgetStateTestFlock(descriptor, LOCK_EX), 0)
+
+        let context = WidgetStateUncheckedSendableBox((fileManager, state))
+        let started = DispatchSemaphore(value: 0)
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            started.signal()
+            WidgetDisplayStateStore.save(context.value.1, fileManager: context.value.0)
+            finished.signal()
+        }
+
+        XCTAssertEqual(started.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(finished.wait(timeout: .now() + 0.1), .timedOut)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stateURL.path))
+
+        XCTAssertEqual(widgetStateTestFlock(descriptor, LOCK_UN), 0)
+        Darwin.close(descriptor)
+        XCTAssertEqual(finished.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager), state)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: lockURL.path))
+    }
+
+    func testWidgetStateRecoveryReadsOnlyAfterSidecarLockAndCannotOverwriteNewerState() throws {
+        let groupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexMonitorNativeTests.widgetRecoveryFileLock.\(UUID().uuidString)", isDirectory: true)
+        let fileManager = WidgetStateTestFileManager(groupURL: groupURL)
+        let stateURL = WidgetDisplayStateStore.stateURL(fileManager: fileManager)
+        let lockURL = WidgetDisplayStateStore.lockURL(fileManager: fileManager)
+        let older = WidgetDisplayState.make(
+            snapshot: .notConnected,
+            status: .noSnapshot,
+            lastSuccessAt: nil,
+            lastAttemptAt: nil,
+            effectiveFiveHourResetAt: nil,
+            savedAt: Date(timeIntervalSince1970: 100)
+        )
+        let newer = WidgetDisplayState.make(
+            snapshot: .notConnected,
+            status: .authRequired,
+            lastSuccessAt: nil,
+            lastAttemptAt: Date(timeIntervalSince1970: 200),
+            effectiveFiveHourResetAt: nil,
+            savedAt: Date(timeIntervalSince1970: 200)
+        )
+        let newerData = try legacyCompatibleEnvelopeData(newer, revision: 2)
+        try FileManager.default.createDirectory(at: groupURL, withIntermediateDirectories: true)
+        try Data("truncated".utf8).write(to: stateURL)
+        try legacyCompatibleEnvelopeData(older, revision: 1)
+            .write(to: stateURL.appendingPathExtension("backup"))
+
+        let descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, S_IRUSR | S_IWUSR)
+        XCTAssertGreaterThanOrEqual(descriptor, 0)
+        guard descriptor >= 0 else { return }
+        XCTAssertEqual(widgetStateTestFlock(descriptor, LOCK_EX), 0)
+
+        let context = WidgetStateUncheckedSendableBox(fileManager)
+        let loadedState = WidgetStateLockedValue<WidgetDisplayState?>(nil)
+        let started = DispatchSemaphore(value: 0)
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            started.signal()
+            loadedState.set(WidgetDisplayStateStore.load(fileManager: context.value))
+            finished.signal()
+        }
+
+        XCTAssertEqual(started.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(finished.wait(timeout: .now() + 0.1), .timedOut)
+        try newerData.write(to: stateURL, options: .atomic)
+
+        XCTAssertEqual(widgetStateTestFlock(descriptor, LOCK_UN), 0)
+        Darwin.close(descriptor)
+        XCTAssertEqual(finished.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(loadedState.get(), newer)
+        XCTAssertEqual(try Data(contentsOf: stateURL), newerData)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stateURL.appendingPathExtension("corrupt").path))
+    }
+
+    func testWidgetStateFailsClosedWhenSidecarLockCannotBeOpened() throws {
+        let groupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexMonitorNativeTests.widgetFileLockFailure.\(UUID().uuidString)", isDirectory: true)
+        let fileManager = WidgetStateTestFileManager(groupURL: groupURL)
+        let stateURL = WidgetDisplayStateStore.stateURL(fileManager: fileManager)
+        let lockURL = WidgetDisplayStateStore.lockURL(fileManager: fileManager)
+        let original = WidgetDisplayState.make(
+            snapshot: .notConnected,
+            status: .noSnapshot,
+            lastSuccessAt: nil,
+            lastAttemptAt: nil,
+            effectiveFiveHourResetAt: nil,
+            savedAt: Date(timeIntervalSince1970: 100)
+        )
+        let replacement = WidgetDisplayState.make(
+            snapshot: .notConnected,
+            status: .authRequired,
+            lastSuccessAt: nil,
+            lastAttemptAt: Date(timeIntervalSince1970: 200),
+            effectiveFiveHourResetAt: nil,
+            savedAt: Date(timeIntervalSince1970: 200)
+        )
+        let originalData = try legacyCompatibleEnvelopeData(original, revision: 1)
+        try FileManager.default.createDirectory(at: groupURL, withIntermediateDirectories: true)
+        try originalData.write(to: stateURL)
+        try FileManager.default.createSymbolicLink(
+            at: lockURL,
+            withDestinationURL: groupURL.appendingPathComponent("untrusted-lock-target")
+        )
+
+        XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager), .placeholder)
+        WidgetDisplayStateStore.save(replacement, fileManager: fileManager)
+        XCTAssertEqual(try Data(contentsOf: stateURL), originalData)
+    }
+
     func testRepeatedFailedWidgetStateMovesDoNotAccumulateTemporaryFiles() throws {
         let groupURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("CodexMonitorNativeTests.widgetFailedMove.\(UUID().uuidString)", isDirectory: true)
@@ -936,6 +1099,46 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         XCTAssertTrue(savedStates.isEmpty)
         XCTAssertEqual(reloadCount, 1)
         _ = bridge
+    }
+
+    func testStopCancelsSubscriptionAndIgnoresLateRefreshAndTemporalEvents() async {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.widgetBridgeStop.\(UUID().uuidString)")!
+        let initial = QuotaSnapshot(
+            weeklyQuotaPercent: 72,
+            fiveHourQuotaPercent: 69,
+            refreshedAt: .now,
+            dataSource: .real
+        )
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        store.saveSnapshot(initial)
+        let refreshed = QuotaSnapshot(
+            weeklyQuotaPercent: 81,
+            fiveHourQuotaPercent: 63,
+            refreshedAt: .now,
+            dataSource: .real
+        )
+        let appState = AppState(
+            snapshotStore: store,
+            refreshService: WidgetBridgeMockRefreshService(snapshot: refreshed)
+        )
+        var savedStates: [WidgetDisplayState] = []
+        var reloadCount = 0
+        let bridge = WidgetTimelineBridge(
+            appState: appState,
+            saveState: { savedStates.append($0) },
+            reloadTimelines: { reloadCount += 1 }
+        )
+        savedStates.removeAll()
+        reloadCount = 0
+
+        bridge.stop()
+        bridge.stop()
+        appState.reconcileTemporalState()
+        await appState.refreshNow(trigger: .manual)
+
+        XCTAssertTrue(savedStates.isEmpty)
+        XCTAssertEqual(reloadCount, 0)
+        appState.shutdown()
     }
 
     func testManualRefreshWritesFinalSuccessStateForWidget() async {
@@ -1304,6 +1507,35 @@ private final class FailingMoveWidgetStateTestFileManager: FileManager {
             throw CocoaError(.fileWriteUnknown)
         }
         try super.moveItem(at: srcURL, to: dstURL)
+    }
+}
+
+private final class WidgetStateUncheckedSendableBox<Value>: @unchecked Sendable {
+    let value: Value
+
+    init(_ value: Value) {
+        self.value = value
+    }
+}
+
+private final class WidgetStateLockedValue<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Value
+
+    init(_ value: Value) {
+        self.value = value
+    }
+
+    func set(_ value: Value) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.value = value
+    }
+
+    func get() -> Value {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
     }
 }
 

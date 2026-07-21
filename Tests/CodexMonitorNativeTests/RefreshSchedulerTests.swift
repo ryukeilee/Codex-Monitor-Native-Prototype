@@ -325,6 +325,114 @@ final class RefreshSchedulerTests: XCTestCase {
         XCTAssertEqual(callCountAfterStop, 0)
     }
 
+    func testStopBeforeQueuedRefreshTaskBeginsPreventsStaleRefreshAction() async {
+        let clock = ManualRefreshSchedulerClock(now: .now)
+        let recorder = RefreshActionRecorder()
+        let scheduler = RefreshScheduler(clock: clock) { trigger in
+            await recorder.record(trigger)
+        }
+
+        scheduler.start()
+        scheduler.requestRefresh(.manual)
+        scheduler.stop()
+
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+
+        let callCount = await recorder.callCount()
+        XCTAssertEqual(callCount, 0)
+        XCTAssertFalse(scheduler.isRefreshing)
+        XCTAssertFalse(scheduler.hasActiveRefreshTask)
+        XCTAssertFalse(scheduler.hasScheduledTimer)
+    }
+
+    func testStopDuringRefreshCancelsTaskAndClearsRefreshState() async {
+        let clock = ManualRefreshSchedulerClock(now: .now)
+        let gate = RefreshActionGate()
+        let scheduler = RefreshScheduler(clock: clock) { trigger in
+            await gate.perform(trigger)
+        }
+
+        scheduler.start()
+        scheduler.requestRefresh(.manual)
+        await gate.waitForCall(1)
+
+        XCTAssertTrue(scheduler.isRefreshing)
+        XCTAssertTrue(scheduler.hasActiveRefreshTask)
+
+        scheduler.stop()
+
+        XCTAssertFalse(scheduler.isRefreshing)
+        XCTAssertFalse(scheduler.hasActiveRefreshTask)
+        XCTAssertFalse(scheduler.hasScheduledTimer)
+
+        await gate.releaseNext()
+        await gate.waitForCompletion(1)
+        let cancellationStates = await gate.cancellationStates()
+        XCTAssertEqual(cancellationStates, [true])
+        XCTAssertFalse(scheduler.isRefreshing)
+        XCTAssertFalse(scheduler.hasActiveRefreshTask)
+        XCTAssertFalse(scheduler.hasScheduledTimer)
+    }
+
+    func testLateCompletionFromStoppedRunCannotMutateRestartedRun() async {
+        let base = Date(timeIntervalSince1970: 6_000)
+        let clock = ManualRefreshSchedulerClock(now: base)
+        let gate = RefreshActionGate()
+        let scheduler = RefreshScheduler(clock: clock) { trigger in
+            await gate.perform(trigger)
+        }
+
+        scheduler.start()
+        scheduler.requestRefresh(.manual)
+        await gate.waitForCall(1)
+
+        scheduler.stop()
+        scheduler.start()
+        scheduler.requestRefresh(.manual)
+
+        for _ in 0..<100 {
+            if await gate.callCount() >= 2 {
+                break
+            }
+            await Task.yield()
+        }
+        let restartedCallCount = await gate.callCount()
+        XCTAssertEqual(restartedCallCount, 2)
+        guard restartedCallCount == 2 else {
+            await gate.releaseNext()
+            return
+        }
+
+        scheduler.updateSchedule(with: schedulingState(
+            snapshot: quotaSnapshot(refreshedAt: base),
+            at: base
+        ))
+        XCTAssertTrue(scheduler.isRefreshing)
+        XCTAssertTrue(scheduler.hasActiveRefreshTask)
+        XCTAssertFalse(scheduler.hasScheduledTimer)
+
+        // The first action deliberately ignores cancellation until released.
+        // Its stale completion must not clear or schedule the restarted run.
+        await gate.releaseNext()
+        await gate.waitForCompletion(1)
+
+        XCTAssertTrue(scheduler.isRefreshing)
+        XCTAssertTrue(scheduler.hasActiveRefreshTask)
+        XCTAssertFalse(scheduler.hasScheduledTimer)
+
+        await gate.releaseNext()
+        await gate.waitForCompletion(2)
+        await waitForSchedulerToBecomeIdle(scheduler)
+
+        XCTAssertFalse(scheduler.hasActiveRefreshTask)
+        XCTAssertTrue(scheduler.hasScheduledTimer)
+        let triggers = await gate.triggers()
+        XCTAssertEqual(triggers, [.manual, .manual])
+        scheduler.stop()
+    }
+
     private func quotaSnapshot(
         weekly: Int = 70,
         fiveHour: Int = 60,
@@ -433,9 +541,12 @@ private actor RefreshActionRecorder {
 private actor RefreshActionGate {
     private var activeCalls = 0
     private var maximumActiveCalls = 0
+    private var completedCalls = 0
     private var recordedTriggers: [AppState.RefreshTrigger] = []
     private var callWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
+    private var completionWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
     private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+    private var observedCancellationStates: [Bool] = []
 
     func perform(_ trigger: AppState.RefreshTrigger) async {
         activeCalls += 1
@@ -448,7 +559,11 @@ private actor RefreshActionGate {
         await withCheckedContinuation { continuation in
             releaseWaiters.append(continuation)
         }
+        observedCancellationStates.append(Task.isCancelled)
         activeCalls -= 1
+        completedCalls += 1
+        let completed = completionWaiters.removeValue(forKey: completedCalls) ?? []
+        completed.forEach { $0.resume() }
     }
 
     func waitForCall(_ expectedCount: Int) async {
@@ -463,8 +578,17 @@ private actor RefreshActionGate {
         releaseWaiters.removeFirst().resume()
     }
 
+    func waitForCompletion(_ expectedCount: Int) async {
+        guard completedCalls < expectedCount else { return }
+        await withCheckedContinuation { continuation in
+            completionWaiters[expectedCount, default: []].append(continuation)
+        }
+    }
+
     func callCount() -> Int { recordedTriggers.count }
     func maximumConcurrentCalls() -> Int { maximumActiveCalls }
+    func triggers() -> [AppState.RefreshTrigger] { recordedTriggers }
+    func cancellationStates() -> [Bool] { observedCancellationStates }
 }
 
 private actor SchedulerBlockingRefreshService: QuotaRefreshing {

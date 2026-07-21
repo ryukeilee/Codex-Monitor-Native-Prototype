@@ -60,6 +60,7 @@ final class RealQuotaProviderTests: XCTestCase {
     func testProcessTransportConcurrentShutdownIsIdempotentAndClosesEveryPipeEndpoint() async throws {
         let process = ControlledProcessHandle(terminateExits: false, killExits: true)
         let transport = ProcessRPCTransport(process: process, shutdownGraceSeconds: 0)
+        let configuredDescriptors = process.configuredPipeFileDescriptors
         try transport.start(stdout: { _ in }, stdoutEOF: {}, stderr: { _ in }, termination: { _ in })
 
         let results = await withTaskGroup(of: Bool.self, returning: [Bool].self) { group in
@@ -84,27 +85,23 @@ final class RealQuotaProviderTests: XCTestCase {
         XCTAssertEqual(process.terminateCount, 1)
         XCTAssertEqual(process.killCount, 1)
         XCTAssertTrue(process.handlersCleared)
+        assertFileDescriptorsAreClosed(configuredDescriptors)
     }
 
     func testProcessTransportRepeatedCyclesCloseFileDescriptorsWhileTransportsRemainRetained() throws {
-        for _ in 0..<5 {
-            try autoreleasepool {
-                try runCompletedTransportCycle()
-            }
-        }
-        let baselineCount = openFileDescriptorCount()
         var retainedTransports: [ProcessRPCTransport] = []
 
         for _ in 0..<100 {
             let process = ControlledProcessHandle(terminateExits: true, killExits: true)
             let transport = ProcessRPCTransport(process: process, shutdownGraceSeconds: 0)
+            let configuredDescriptors = process.configuredPipeFileDescriptors
             try transport.start(stdout: { _ in }, stdoutEOF: {}, stderr: { _ in }, termination: { _ in })
             try transport.shutdownAndWait()
             XCTAssertTrue(process.handlersCleared)
+            guard assertFileDescriptorsAreClosed(configuredDescriptors) else { return }
             retainedTransports.append(transport)
         }
 
-        XCTAssertLessThanOrEqual(openFileDescriptorCount(), baselineCount)
         withExtendedLifetime(retainedTransports) {}
     }
 
@@ -170,19 +167,30 @@ final class RealQuotaProviderTests: XCTestCase {
         XCTAssertTrue(process.handlersCleared)
     }
 
-    private func runCompletedTransportCycle() throws {
-        let process = ControlledProcessHandle(terminateExits: true, killExits: true)
-        let transport = ProcessRPCTransport(process: process, shutdownGraceSeconds: 0)
-        try transport.start(stdout: { _ in }, stdoutEOF: {}, stderr: { _ in }, termination: { _ in })
-        try transport.shutdownAndWait()
-    }
-
-    private func openFileDescriptorCount() -> Int {
-        (0..<Int(getdtablesize())).reduce(into: 0) { count, descriptor in
-            if fcntl(Int32(descriptor), F_GETFD) != -1 {
-                count += 1
+    @discardableResult
+    private func assertFileDescriptorsAreClosed(
+        _ descriptors: [Int32],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) -> Bool {
+        XCTAssertEqual(descriptors.count, 6, file: file, line: line)
+        XCTAssertEqual(Set(descriptors).count, 6, file: file, line: line)
+        let deadline = Date().addingTimeInterval(1)
+        var allClosed = true
+        for (index, descriptor) in descriptors.enumerated() {
+            while fcntl(descriptor, F_GETFD) != -1, Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.001)
             }
+            let isClosed = fcntl(descriptor, F_GETFD) == -1
+            allClosed = allClosed && isClosed
+            XCTAssertTrue(
+                isClosed,
+                "Expected pipe endpoint \(index) (fd \(descriptor)) to be closed",
+                file: file,
+                line: line
+            )
         }
+        return allClosed
     }
 
     func testRPCClientCompletesOnceWithForceKillFailure() async {
@@ -231,6 +239,61 @@ final class RealQuotaProviderTests: XCTestCase {
         XCTAssertEqual(transport.shutdownCount, 1)
         XCTAssertEqual(timeoutScheduler.cancelCount, 1)
         XCTAssertTrue(transport.handlersCleared)
+    }
+
+    func testRPCClientCancellationReportsCleanupFailure() async {
+        let transport = ControlledRPCTransport(cleanupError: .forceKillFailed)
+        let timeoutScheduler = ControlledTimeoutScheduler()
+        let client = CodexRPCClient(transport: transport, timeoutScheduler: timeoutScheduler)
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.startedExpectation], timeout: 1)
+        task.cancel()
+
+        await assertFailure(.processCleanupFailed, from: task)
+        XCTAssertEqual(transport.shutdownCount, 1)
+        XCTAssertEqual(timeoutScheduler.cancelCount, 1)
+        XCTAssertTrue(transport.handlersCleared)
+    }
+
+    func testRPCClientRejectsConcurrentAndSequentialReuseWithoutReplacingFirstCompletion() async throws {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let firstTask = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+
+        do {
+            _ = try await client.fetchQuota(timeoutSeconds: 60)
+            XCTFail("Expected concurrent reuse to fail")
+        } catch let error as CodexRPCClientUsageError {
+            XCTAssertEqual(error, .alreadyUsed)
+        } catch {
+            XCTFail("Expected typed usage error, got \(error)")
+        }
+        XCTAssertEqual(transport.startCount, 1)
+
+        transport.emitStdout(Self.initializeResponse)
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.rateLimitResponse)
+
+        let snapshot = try await firstTask.value
+        XCTAssertEqual(snapshot.fiveHourQuotaPercent, 50)
+        XCTAssertEqual(transport.shutdownCount, 1)
+
+        do {
+            _ = try await client.fetchQuota(timeoutSeconds: 60)
+            XCTFail("Expected sequential reuse to fail")
+        } catch let error as CodexRPCClientUsageError {
+            XCTAssertEqual(error, .alreadyUsed)
+        } catch {
+            XCTFail("Expected typed usage error, got \(error)")
+        }
+        XCTAssertEqual(transport.startCount, 1)
+        XCTAssertEqual(transport.shutdownCount, 1)
     }
 
     func testRPCClientTimeoutReclaimsTransportAndIgnoresLateResponse() async {
@@ -1990,6 +2053,7 @@ private final class ControlledProcessHandle: ProcessRPCProcess, @unchecked Senda
     private var stdinPipe: Pipe?
     private var stdoutPipe: Pipe?
     private var stderrPipe: Pipe?
+    private(set) var configuredPipeFileDescriptors: [Int32] = []
 
     init(
         terminateExits: Bool,
@@ -2010,6 +2074,14 @@ private final class ControlledProcessHandle: ProcessRPCProcess, @unchecked Senda
         stdinPipe = stdin
         stdoutPipe = stdout
         stderrPipe = stderr
+        configuredPipeFileDescriptors = [
+            stdin.fileHandleForReading.fileDescriptor,
+            stdin.fileHandleForWriting.fileDescriptor,
+            stdout.fileHandleForReading.fileDescriptor,
+            stdout.fileHandleForWriting.fileDescriptor,
+            stderr.fileHandleForReading.fileDescriptor,
+            stderr.fileHandleForWriting.fileDescriptor
+        ]
     }
     func run() throws {
         if let runError { throw runError }
@@ -2086,6 +2158,7 @@ private final class ControlledRPCTransport: CodexRPCTransport, @unchecked Sendab
     let initializeRequestExpectation = XCTestExpectation(description: "initialize request written")
     let rateLimitRequestExpectation = XCTestExpectation(description: "rate limits request written")
     let accountRequestExpectation = XCTestExpectation(description: "account request written")
+    private(set) var startCount = 0
     private(set) var shutdownCount = 0
     private(set) var handlersCleared = false
     private(set) var writtenMessages: [CodexAppServerMessage] = []
@@ -2116,6 +2189,7 @@ private final class ControlledRPCTransport: CodexRPCTransport, @unchecked Sendab
         stderr: @escaping @Sendable (Data) -> Void,
         termination: @escaping @Sendable (Int32) -> Void
     ) throws {
+        startCount += 1
         self.stdout = stdout
         self.stdoutEOF = stdoutEOF
         self.stderr = stderr

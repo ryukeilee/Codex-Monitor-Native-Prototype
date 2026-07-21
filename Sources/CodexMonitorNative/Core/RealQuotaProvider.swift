@@ -570,7 +570,17 @@ final class ProcessRPCTransport: CodexRPCTransport, @unchecked Sendable {
     }
 }
 
+enum CodexRPCClientUsageError: Error, Equatable, Sendable {
+    case alreadyUsed
+}
+
 actor CodexRPCClient {
+    private enum Lifecycle {
+        case ready
+        case running
+        case finished
+    }
+
     private enum Operation: String, Sendable {
         case initialize
         case rateLimitsRead
@@ -600,6 +610,7 @@ actor CodexRPCClient {
     private var pendingResponse: PendingResponse?
     private var completion: ((Result<QuotaSnapshot, Error>) -> Void)?
     private var timeoutWork: (any CodexRPCCancellable)?
+    private var lifecycle = Lifecycle.ready
 
     init(codexPath: String) {
         transport = ProcessRPCTransport(codexPath: codexPath)
@@ -647,7 +658,12 @@ actor CodexRPCClient {
 #endif
 
     func fetchQuota(timeoutSeconds: Double) async throws -> QuotaSnapshot {
-        try await withTaskCancellationHandler(operation: {
+        guard case .ready = lifecycle else {
+            throw CodexRPCClientUsageError.alreadyUsed
+        }
+        lifecycle = .running
+
+        return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { continuation in
                 completion = { result in
                     switch result {
@@ -1003,6 +1019,7 @@ actor CodexRPCClient {
     private func complete(_ result: Result<QuotaSnapshot, Error>) {
         guard !hasResumed else { return }
         hasResumed = true
+        lifecycle = .finished
         pendingResponse = nil
         timeoutWork?.cancel()
         timeoutWork = nil
@@ -1012,6 +1029,9 @@ actor CodexRPCClient {
         } catch {
             AppLogger.codexRPC.error("Failed to clean up Codex app-server: \(String(describing: error), privacy: .private)")
             if case .success = result {
+                finalResult = .failure(RealQuotaError.processCleanupFailed)
+            } else if case .failure(let operationError) = result,
+                      operationError is CancellationError {
                 finalResult = .failure(RealQuotaError.processCleanupFailed)
             }
         }

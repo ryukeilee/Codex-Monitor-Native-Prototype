@@ -163,6 +163,8 @@ final class RefreshScheduler {
     private var previousSuccessfulSnapshot: QuotaSnapshot?
     private var comparisonSnapshot: QuotaSnapshot?
     private var refreshInFlight = false
+    private var refreshTask: Task<Void, Never>?
+    private var refreshGeneration = 0
     private var scheduleChangedWhileRefreshing = false
     private var pendingAutomaticTrigger: AppState.RefreshTrigger?
 
@@ -172,6 +174,7 @@ final class RefreshScheduler {
 
     var isPaused: Bool { !pauseReasons.isEmpty }
     var isRefreshing: Bool { refreshInFlight }
+    var hasActiveRefreshTask: Bool { refreshTask != nil }
 
     /// Exposed for lifecycle verification without leaking the concrete timer.
     var hasScheduledTimer: Bool { clock.hasScheduledAction }
@@ -195,10 +198,15 @@ final class RefreshScheduler {
     }
 
     func stop() {
-        if clock.hasScheduledAction {
+        if clock.hasScheduledAction || refreshTask != nil {
             AppLogger.refresh.info("Stopping refresh scheduler")
         }
         isRunning = false
+        refreshGeneration &+= 1
+        refreshTask?.cancel()
+        refreshTask = nil
+        refreshInFlight = false
+        scheduleChangedWhileRefreshing = false
         pauseReasons.removeAll()
         pendingAutomaticTrigger = nil
         nextFireAt = nil
@@ -314,12 +322,25 @@ final class RefreshScheduler {
         cancelScheduledRefresh()
         refreshInFlight = true
         scheduleChangedWhileRefreshing = false
+        refreshGeneration &+= 1
+        let expectedGeneration = refreshGeneration
+        let refreshAction = onRefresh
         AppLogger.refresh.info("Starting adaptive \(self.triggerName(for: trigger), privacy: .public) refresh")
 
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            await onRefresh(trigger)
-            guard !Task.isCancelled else { return }
+        refreshTask = Task { @MainActor [weak self] in
+            guard !Task.isCancelled,
+                  let self,
+                  self.isRunning,
+                  self.refreshGeneration == expectedGeneration else {
+                return
+            }
+            await refreshAction(trigger)
+            guard !Task.isCancelled,
+                  self.isRunning,
+                  self.refreshGeneration == expectedGeneration else {
+                return
+            }
+            refreshTask = nil
             refreshInFlight = false
             if scheduleChangedWhileRefreshing {
                 scheduleChangedWhileRefreshing = false

@@ -69,8 +69,8 @@ final class SingleInstanceCoordinatorTests: XCTestCase {
         )
         let handoffRecorder = SingleInstanceHandoffRecorder()
         let ownerExecutor = SingleInstanceActivationExecutor(
-            submitAction: { _, expiresAt, completion in
-                completion(expiresAt > .now)
+            submitAction: { _, expiresAt, begin, completion in
+                completion(expiresAt > .now && begin())
             },
             submitRelinquishment: { identity, expiresAt, completion in
                 handoffRecorder.recordRequestDeadline(expiresAt)
@@ -139,7 +139,7 @@ final class SingleInstanceCoordinatorTests: XCTestCase {
         )
         let recorder = SingleInstanceHandoffRecorder()
         let ownerExecutor = SingleInstanceActivationExecutor(
-            submitAction: { _, _, completion in completion(true) },
+            submitAction: { _, _, begin, completion in completion(begin()) },
             submitRelinquishment: { identity, _, completion in
                 completion(identity == preferredIdentity)
             },
@@ -350,8 +350,12 @@ final class SingleInstanceCoordinatorTests: XCTestCase {
         let handoffRecorder = SingleInstanceHandoffRecorder()
         let authorization = SingleInstanceRelinquishmentAuthorizationHarness()
         let ownerExecutor = SingleInstanceActivationExecutor(
-            submitAction: { action, expiresAt, completion in
-                completion(expiresAt > .now && activationRecorder.record(action))
+            submitAction: { action, expiresAt, begin, completion in
+                completion(
+                    expiresAt > .now
+                        && begin()
+                        && activationRecorder.record(action)
+                )
             },
             submitRelinquishment: { identity, _, completion in
                 XCTAssertEqual(identity, preferredIdentity)
@@ -501,6 +505,102 @@ final class SingleInstanceCoordinatorTests: XCTestCase {
         })
         XCTAssertFalse(recorder.committed)
         XCTAssertEqual(readOwnerRecord(at: fixture.ownerURL)?.installationIdentity, oldIdentity)
+    }
+
+    func testAuthorizedHandoffFailureBeforeCommittingAllowsLaterClaimantToTakeOver() throws {
+        let fixture = makeFixture(
+            acknowledgementTimeout: .milliseconds(300),
+            handoffCompletionTimeout: .milliseconds(300)
+        )
+        defer { fixture.remove() }
+        let oldIdentity = installationIdentity(
+            path: "/Users/test/Downloads/CodexMonitorNative.app",
+            digest: "old"
+        )
+        let preferredIdentity = installationIdentity(
+            path: "/Applications/CodexMonitorNative.app",
+            digest: "preferred"
+        )
+        let handoffRecorder = SingleInstanceHandoffRecorder()
+        let failureHarness = SingleInstanceAuthorizedHandoffFailureHarness(
+            handoffURL: fixture.handoffURL
+        )
+        let owner = SingleInstanceCoordinator(
+            configuration: fixture.configuration,
+            handoffVerificationObserver: { event in
+                failureHarness.failFirstClaimantBeforeCommit(event: event)
+            }
+        )
+        defer { owner.release() }
+        XCTAssertEqual(
+            owner.claim(
+                using: .immediate(
+                    { _ in true },
+                    shouldRelinquish: { $0 == preferredIdentity },
+                    commitRelinquishment: {
+                        handoffRecorder.recordCommit()
+                        return true
+                    },
+                    didRelinquish: {
+                        handoffRecorder.recordRelinquished()
+                    }
+                ),
+                installationIdentity: oldIdentity
+            ),
+            .owner
+        )
+        let originalOwnerID = try XCTUnwrap(
+            readOwnerRecord(at: fixture.ownerURL)?.instanceID
+        )
+
+        let firstClaimant = SingleInstanceCoordinator(configuration: fixture.configuration)
+        XCTAssertEqual(
+            firstClaimant.claim(
+                using: .immediate { _ in true },
+                installationIdentity: preferredIdentity
+            ),
+            .secondary(forwardedActivation: false)
+        )
+        XCTAssertTrue(failureHarness.didFailFirstClaimant)
+        XCTAssertTrue(waitUntil(timeout: 1) {
+            owner.stableOwnerRecordHoldingLock()?.instanceID == originalOwnerID
+                && !FileManager.default.fileExists(atPath: fixture.handoffURL.path)
+        })
+        XCTAssertEqual(handoffRecorder.commitCount, 0)
+        XCTAssertEqual(handoffRecorder.relinquishmentCount, 0)
+
+        let successorActivationRecorder = SingleInstanceActivationRecorder()
+        let laterClaimant = SingleInstanceCoordinator(configuration: fixture.configuration)
+        defer { laterClaimant.release() }
+        XCTAssertEqual(
+            laterClaimant.claim(
+                using: .immediate { successorActivationRecorder.record($0) },
+                installationIdentity: preferredIdentity
+            ),
+            .owner
+        )
+        XCTAssertEqual(handoffRecorder.commitCount, 1)
+        XCTAssertEqual(handoffRecorder.relinquishmentCount, 1)
+        XCTAssertEqual(
+            laterClaimant.stableOwnerRecordHoldingLock()?.installationIdentity,
+            preferredIdentity
+        )
+
+        let thirdContender = SingleInstanceCoordinator(configuration: fixture.configuration)
+        XCTAssertEqual(
+            thirdContender.claim(using: .immediate { _ in true }),
+            .secondary(forwardedActivation: true)
+        )
+        XCTAssertEqual(successorActivationRecorder.actions, [.showPopover])
+        XCTAssertTrue(waitUntil(timeout: 1) {
+            (try? FileManager.default.contentsOfDirectory(
+                atPath: fixture.requestsURL.path
+            ).isEmpty) == true
+                && (try? FileManager.default.contentsOfDirectory(
+                    atPath: fixture.acknowledgementsURL.path
+                ).isEmpty) == true
+        })
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.handoffURL.path))
     }
 
     func testClaimantFinalizingAfterCommittingPublicationDoesNotCancelBegin() throws {
@@ -910,6 +1010,76 @@ final class SingleInstanceCoordinatorTests: XCTestCase {
         contender.release()
     }
 
+    func testShutdownCancelsSubmittedActivationBeforeExecutionAndLeavesCleanSuccessor() throws {
+        let fixture = makeFixture()
+        defer { fixture.remove() }
+        let executionHarness = SingleInstanceActivationExecutionHarness()
+        let owner = SingleInstanceCoordinator(configuration: fixture.configuration)
+        defer { owner.release() }
+        XCTAssertEqual(
+            owner.claim(
+                using: SingleInstanceActivationExecutor(
+                    submitAction: { action, expiresAt, begin, completion in
+                        executionHarness.capture(
+                            action: action,
+                            expiresAt: expiresAt,
+                            begin: begin,
+                            completion: completion
+                        )
+                    }
+                )
+            ),
+            .owner
+        )
+        let ownerRecord = try XCTUnwrap(readOwnerRecord(at: fixture.ownerURL))
+        let requestID = UUID()
+        let requestURL = fixture.requestURL(for: requestID)
+        let acknowledgementURL = fixture.acknowledgementURL(for: requestID)
+        let now = Date()
+        let requestObject: [String: Any] = [
+            "protocolVersion": SingleInstanceOwnerRecord.currentProtocolVersion,
+            "targetInstanceID": ownerRecord.instanceID.uuidString,
+            "requestID": requestID.uuidString,
+            "action": SingleInstanceActivationAction.showPopover.rawValue,
+            "createdAt": now.timeIntervalSince1970 * 1_000,
+            "expiresAt": now.addingTimeInterval(2).timeIntervalSince1970 * 1_000
+        ]
+        let requestData = try JSONSerialization.data(
+            withJSONObject: requestObject,
+            options: [.sortedKeys]
+        )
+        try requestData.write(to: requestURL, options: .atomic)
+        XCTAssertEqual(
+            executionHarness.waitUntilCaptured(until: .now() + .seconds(1)),
+            .success
+        )
+
+        owner.prepareForShutdown()
+        executionHarness.attemptExecutionAndComplete()
+
+        XCTAssertTrue(waitUntil(timeout: 1) {
+            !FileManager.default.fileExists(atPath: requestURL.path)
+        })
+        XCTAssertTrue(executionHarness.actions.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: acknowledgementURL.path))
+        XCTAssertEqual(readOwnerRecord(at: fixture.ownerURL)?.activationCount, 0)
+
+        owner.release()
+        let successor = SingleInstanceCoordinator(configuration: fixture.configuration)
+        defer { successor.release() }
+        XCTAssertEqual(successor.claim(using: .immediate { _ in true }), .owner)
+        XCTAssertTrue(executionHarness.actions.isEmpty)
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: fixture.requestsURL.path),
+            []
+        )
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: fixture.acknowledgementsURL.path),
+            []
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.handoffURL.path))
+    }
+
     func testNewOwnerRemovesAbandonedTemporaryMailboxFiles() throws {
         let fixture = makeFixture()
         defer { fixture.remove() }
@@ -1150,6 +1320,62 @@ private final class SingleInstanceActivationRecorder: @unchecked Sendable {
     }
 }
 
+private final class SingleInstanceActivationExecutionHarness: @unchecked Sendable {
+    private let lock = NSLock()
+    private let capturedSignal = DispatchSemaphore(value: 0)
+    private var pendingAction: SingleInstanceActivationAction?
+    private var pendingExpiresAt: Date?
+    private var pendingBegin: (@Sendable () -> Bool)?
+    private var pendingCompletion: (@Sendable (Bool) -> Void)?
+    private var recordedActions: [SingleInstanceActivationAction] = []
+
+    var actions: [SingleInstanceActivationAction] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedActions
+    }
+
+    func capture(
+        action: SingleInstanceActivationAction,
+        expiresAt: Date,
+        begin: @escaping @Sendable () -> Bool,
+        completion: @escaping @Sendable (Bool) -> Void
+    ) {
+        lock.lock()
+        pendingAction = action
+        pendingExpiresAt = expiresAt
+        pendingBegin = begin
+        pendingCompletion = completion
+        lock.unlock()
+        capturedSignal.signal()
+    }
+
+    func waitUntilCaptured(until deadline: DispatchTime) -> DispatchTimeoutResult {
+        capturedSignal.wait(timeout: deadline)
+    }
+
+    func attemptExecutionAndComplete() {
+        lock.lock()
+        let action = pendingAction
+        let expiresAt = pendingExpiresAt
+        let begin = pendingBegin
+        let completion = pendingCompletion
+        pendingAction = nil
+        pendingExpiresAt = nil
+        pendingBegin = nil
+        pendingCompletion = nil
+        lock.unlock()
+
+        let didBegin = expiresAt.map { $0 > .now } == true && begin?() == true
+        if didBegin, let action {
+            lock.lock()
+            recordedActions.append(action)
+            lock.unlock()
+        }
+        completion?(didBegin)
+    }
+}
+
 private final class SingleInstanceHandoffRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private let relinquishmentSignal = DispatchSemaphore(value: 0)
@@ -1308,6 +1534,34 @@ private final class SingleInstanceVerificationRaceHarness: @unchecked Sendable {
     }
 }
 
+private final class SingleInstanceAuthorizedHandoffFailureHarness: @unchecked Sendable {
+    private let lock = NSLock()
+    private let handoffURL: URL
+    private var hasFailedFirstClaimant = false
+
+    init(handoffURL: URL) {
+        self.handoffURL = handoffURL
+    }
+
+    var didFailFirstClaimant: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return hasFailedFirstClaimant
+    }
+
+    func failFirstClaimantBeforeCommit(event: SingleInstanceHandoffVerificationEvent) {
+        guard event == .didReadCandidateBeforeLockProbe else { return }
+        lock.lock()
+        guard !hasFailedFirstClaimant else {
+            lock.unlock()
+            return
+        }
+        hasFailedFirstClaimant = true
+        lock.unlock()
+        try? FileManager.default.removeItem(at: handoffURL)
+    }
+}
+
 private final class SingleInstanceCommitPublicationHarness: @unchecked Sendable {
     private let lock = NSLock()
     private let ownerURL: URL
@@ -1392,16 +1646,18 @@ private struct SingleInstanceFixture {
     var lockURL: URL { rootURL.appendingPathComponent("owner.lock") }
     var ownerURL: URL { rootURL.appendingPathComponent("owner.json") }
     var handoffURL: URL { rootURL.appendingPathComponent("handoff.json") }
+    var requestsURL: URL { rootURL.appendingPathComponent("requests", isDirectory: true) }
+    var acknowledgementsURL: URL {
+        rootURL.appendingPathComponent("acknowledgements", isDirectory: true)
+    }
 
     func requestURL(for requestID: UUID) -> URL {
-        rootURL
-            .appendingPathComponent("requests", isDirectory: true)
+        requestsURL
             .appendingPathComponent("request-\(requestID.uuidString).json")
     }
 
     func acknowledgementURL(for requestID: UUID) -> URL {
-        rootURL
-            .appendingPathComponent("acknowledgements", isDirectory: true)
+        acknowledgementsURL
             .appendingPathComponent("ack-\(requestID.uuidString).json")
     }
 

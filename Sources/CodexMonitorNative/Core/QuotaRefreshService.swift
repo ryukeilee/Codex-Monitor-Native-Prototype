@@ -20,9 +20,12 @@ struct QuotaRefreshService: QuotaRefreshing {
     }
 
     func refresh(basedOn currentSnapshot: QuotaSnapshot) async throws -> QuotaSnapshot {
+        try Task.checkCancellation()
+
         if forceMock {
             AppLogger.refresh.info("CODEX_MONITOR_FORCE_MOCK=1; using mock data")
             let mockSnapshot = try await mockProvider.fetchQuota(basedOn: currentSnapshot)
+            try Task.checkCancellation()
             return mockSnapshot
         }
 
@@ -30,15 +33,17 @@ struct QuotaRefreshService: QuotaRefreshing {
         // The caller (AppState) will classify the error and preserve
         // the last successful real snapshot.
         let realSnapshot = try await realProvider.fetchQuota()
+        try Task.checkCancellation()
         guard realSnapshot.dataSource != .real
                 || realSnapshot.accountBoundary?.isValid == true else {
             throw RealQuotaError.accountIdentityUnavailable
         }
         let mergedSnapshot = realSnapshot.mergingPartial(with: currentSnapshot)
-        let enrichedSnapshot = await enrichResetCreditsDetails(
+        let enrichedSnapshot = try await enrichResetCreditsDetails(
             for: mergedSnapshot,
             fallingBackTo: currentSnapshot
         )
+        try Task.checkCancellation()
         AppLogger.refresh.info("Real quota fetch succeeded")
         return enrichedSnapshot
     }
@@ -46,9 +51,12 @@ struct QuotaRefreshService: QuotaRefreshing {
     private func enrichResetCreditsDetails(
         for snapshot: QuotaSnapshot,
         fallingBackTo previousSnapshot: QuotaSnapshot
-    ) async -> QuotaSnapshot {
+    ) async throws -> QuotaSnapshot {
+        try Task.checkCancellation()
+
         do {
             let details = try await resetCreditsDetailProvider.fetchDetails()
+            try Task.checkCancellation()
             return QuotaSnapshot(
                 weeklyQuotaPercent: snapshot.weeklyQuotaPercent,
                 fiveHourQuotaPercent: snapshot.fiveHourQuotaPercent,
@@ -70,7 +78,10 @@ struct QuotaRefreshService: QuotaRefreshing {
                 quotaWindows: snapshot.quotaWindows,
                 accountBoundary: snapshot.accountBoundary
             )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
+            try Task.checkCancellation()
             let reusableDetails = reusableResetCreditDetails(
                 from: previousSnapshot,
                 for: snapshot

@@ -138,6 +138,7 @@ struct SingleInstanceActivationExecutor: Sendable {
     private let submitAction: @Sendable (
         SingleInstanceActivationAction,
         Date,
+        @escaping @Sendable () -> Bool,
         @escaping @Sendable (Bool) -> Void
     ) -> Void
     private let submitRelinquishment: @Sendable (
@@ -156,6 +157,7 @@ struct SingleInstanceActivationExecutor: Sendable {
         submitAction: @escaping @Sendable (
             SingleInstanceActivationAction,
             Date,
+            @escaping @Sendable () -> Bool,
             @escaping @Sendable (Bool) -> Void
         ) -> Void,
         submitRelinquishment: @escaping @Sendable (
@@ -179,9 +181,10 @@ struct SingleInstanceActivationExecutor: Sendable {
     func submit(
         _ action: SingleInstanceActivationAction,
         expiresAt: Date,
+        begin: @escaping @Sendable () -> Bool,
         completion: @escaping @Sendable (Bool) -> Void
     ) {
-        submitAction(action, expiresAt, completion)
+        submitAction(action, expiresAt, begin, completion)
     }
 
     func submitRelinquishment(
@@ -211,9 +214,9 @@ struct SingleInstanceActivationExecutor: Sendable {
         didRelinquish: @escaping @MainActor @Sendable () -> Void = {}
     ) -> SingleInstanceActivationExecutor {
         SingleInstanceActivationExecutor(
-            submitAction: { action, expiresAt, completion in
+            submitAction: { action, expiresAt, begin, completion in
                 Task { @MainActor in
-                    guard expiresAt > .now else {
+                    guard expiresAt > .now, begin() else {
                         completion(false)
                         return
                     }
@@ -253,8 +256,8 @@ struct SingleInstanceActivationExecutor: Sendable {
         didRelinquish: @escaping @Sendable () -> Void = {}
     ) -> SingleInstanceActivationExecutor {
         SingleInstanceActivationExecutor(
-            submitAction: { action, expiresAt, completion in
-                completion(expiresAt > .now && handler(action))
+            submitAction: { action, expiresAt, begin, completion in
+                completion(expiresAt > .now && begin() && handler(action))
             },
             submitRelinquishment: { installationIdentity, expiresAt, completion in
                 completion(expiresAt > .now && shouldRelinquish(installationIdentity))
@@ -1287,6 +1290,34 @@ private final class SingleInstanceHandoffCommitSignal: @unchecked Sendable {
     }
 }
 
+private final class SingleInstanceActivationExecutionGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var hasBegun = false
+    private var wasCancelled = false
+
+    var didBegin: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return hasBegun
+    }
+
+    func begin() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !hasBegun, !wasCancelled else { return false }
+        hasBegun = true
+        return true
+    }
+
+    func cancelIfPending() {
+        lock.lock()
+        if !hasBegun {
+            wasCancelled = true
+        }
+        lock.unlock()
+    }
+}
+
 private final class OwnerActivationMailbox: @unchecked Sendable {
     private let namespace: SingleInstanceNamespace
     private let ownedLock: OwnedSingleInstanceLock
@@ -1304,6 +1335,7 @@ private final class OwnerActivationMailbox: @unchecked Sendable {
     private var isAcceptingActivations = true
     private var isShutdownPrepared = false
     private var inFlightRequestIDs = Set<UUID>()
+    private var activationExecutionGates: [UUID: SingleInstanceActivationExecutionGate] = [:]
     private var committingHandoffRequestID: UUID?
     private var submittedHandoffCommitRequestID: UUID?
 
@@ -1367,11 +1399,12 @@ private final class OwnerActivationMailbox: @unchecked Sendable {
 
     func stop() {
         let shouldWait = queue.sync { () -> Bool in
+            isStarted = false
+            isAcceptingActivations = false
+            activationExecutionGates.values.forEach { $0.cancelIfPending() }
             guard let source, !sourceWasCancelled else {
-                isStarted = false
                 return false
             }
-            isStarted = false
             sourceWasCancelled = true
             source.cancel()
             self.source = nil
@@ -1386,6 +1419,7 @@ private final class OwnerActivationMailbox: @unchecked Sendable {
         queue.sync {
             isShutdownPrepared = true
             isAcceptingActivations = false
+            activationExecutionGates.values.forEach { $0.cancelIfPending() }
         }
     }
 
@@ -1449,7 +1483,13 @@ private final class OwnerActivationMailbox: @unchecked Sendable {
 
         switch request.action {
         case .showPopover:
-            activationExecutor.submit(request.action, expiresAt: request.expiresAt) { [weak self] accepted in
+            let executionGate = SingleInstanceActivationExecutionGate()
+            activationExecutionGates[request.requestID] = executionGate
+            activationExecutor.submit(
+                request.action,
+                expiresAt: request.expiresAt,
+                begin: { executionGate.begin() }
+            ) { [weak self] accepted in
                 self?.queue.async { [weak self] in
                     self?.completeRequest(request, accepted: accepted)
                 }
@@ -1484,6 +1524,9 @@ private final class OwnerActivationMailbox: @unchecked Sendable {
     ) {
         dispatchPrecondition(condition: .onQueue(queue))
         inFlightRequestIDs.remove(request.requestID)
+        let didBegin = activationExecutionGates.removeValue(
+            forKey: request.requestID
+        )?.didBegin ?? false
 
         guard isStarted,
               isAcceptingActivations,
@@ -1492,6 +1535,7 @@ private final class OwnerActivationMailbox: @unchecked Sendable {
             return
         }
 
+        let accepted = accepted && didBegin
         if accepted {
             record.activationCount = record.activationCount == UInt64.max
                 ? UInt64.max

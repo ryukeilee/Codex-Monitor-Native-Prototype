@@ -117,6 +117,7 @@ final class AppState: ObservableObject {
     private var pendingRefresh: PendingRefresh?
     private var lastSettledStatus: QuotaRefreshStatus = .noSnapshot
     private var lastObservedAccountBoundary: QuotaAccountBoundary?
+    private var isShutdown = false
     private(set) var networkIsReachable: Bool?
 
     var isRefreshing: Bool { status == .refreshing }
@@ -312,6 +313,7 @@ final class AppState: ObservableObject {
     // MARK: - Refresh
 
     func refresh(trigger: RefreshTrigger) {
+        guard !isShutdown else { return }
         if let onRefreshRequested {
             onRefreshRequested(trigger)
         } else {
@@ -320,6 +322,7 @@ final class AppState: ObservableObject {
     }
 
     func refreshNow(trigger: RefreshTrigger) async {
+        guard !isShutdown else { return }
         await withCheckedContinuation { continuation in
             enqueueRefresh(trigger: trigger, waiter: continuation)
         }
@@ -330,6 +333,7 @@ final class AppState: ObservableObject {
     /// response from the old path cannot overwrite the offline state or a later
     /// recovery refresh.
     func updateNetworkReachability(_ isReachable: Bool) {
+        guard !isShutdown else { return }
         guard networkIsReachable != isReachable else { return }
         networkIsReachable = isReachable
         guard !isReachable else { return }
@@ -366,6 +370,7 @@ final class AppState: ObservableObject {
     }
 
     func accountBoundaryDidChange() {
+        guard !isShutdown else { return }
         let currentBoundary = accountBoundaryProvider()
         guard currentBoundary != lastObservedAccountBoundary else { return }
         lastObservedAccountBoundary = currentBoundary
@@ -394,6 +399,11 @@ final class AppState: ObservableObject {
         trigger: RefreshTrigger,
         waiter: CheckedContinuation<Void, Never>? = nil
     ) {
+        guard !isShutdown else {
+            waiter?.resume()
+            return
+        }
+
         guard networkIsReachable == true else {
             waiter?.resume()
             AppLogger.refresh.info("Skipped \(self.triggerName(for: trigger), privacy: .public) refresh while network is unavailable or unresolved")
@@ -427,6 +437,11 @@ final class AppState: ObservableObject {
         trigger: RefreshTrigger,
         waiters: [CheckedContinuation<Void, Never>]
     ) {
+        guard !isShutdown else {
+            waiters.forEach { $0.resume() }
+            return
+        }
+
         let refreshID = UUID()
         activeRefresh = ActiveRefresh(id: refreshID, waiters: waiters)
         let baselineSnapshot = beginRefresh(trigger: trigger)
@@ -452,10 +467,12 @@ final class AppState: ObservableObject {
         taskResources.refreshTask = refreshTask
     }
 
-    /// Cancels the managed refresh and immediately leaves presentation state usable.
-    /// A provider that ignores cancellation keeps the physical single-flight slot
-    /// until it really returns. Any later trigger is coalesced behind that barrier.
+    /// Enters an irreversible terminal state, cancels managed work, and publishes
+    /// one final settled presentation for persistence and Widget consumers.
     func shutdown() {
+        guard !isShutdown else { return }
+        isShutdown = true
+
         taskResources.refreshTask?.cancel()
         taskResources.cancelFreshnessTask()
 
@@ -469,6 +486,7 @@ final class AppState: ObservableObject {
 
         let currentBoundary = accountBoundaryProvider()
         lastObservedAccountBoundary = currentBoundary
+        let referenceDate = now()
         let invalidatedSnapshot = discardCachedSnapshotIfAccountBoundaryIsUnverified(
             currentBoundary: currentBoundary
         )
@@ -479,24 +497,18 @@ final class AppState: ObservableObject {
                 kind: .waitingForFirstRequest,
                 isUsingCachedSnapshot: false
             )
-            commitState(at: now())
-            return
+        } else if status == .refreshing {
+            if let real = latestRealSnapshot {
+                snapshot = real
+            }
+            status = resolvedDisplayStatus(for: lastSettledStatus, at: referenceDate)
+            realQuotaHealth = RealQuotaHealthDiagnostic(
+                kind: .waitingForFirstRequest,
+                isUsingCachedSnapshot: latestRealSnapshot != nil
+            )
+            lastErrorSummary = nil
         }
 
-        guard status == .refreshing else { return }
-
-        if let real = latestRealSnapshot {
-            snapshot = real
-        } else {
-            snapshot = .notConnected
-        }
-        let referenceDate = now()
-        status = resolvedDisplayStatus(for: lastSettledStatus, at: referenceDate)
-        realQuotaHealth = RealQuotaHealthDiagnostic(
-            kind: .waitingForFirstRequest,
-            isUsingCachedSnapshot: latestRealSnapshot != nil
-        )
-        lastErrorSummary = nil
         commitState(at: referenceDate)
     }
 
@@ -554,6 +566,15 @@ final class AppState: ObservableObject {
 
         taskResources.refreshTask = nil
 
+        if isShutdown {
+            activeRefresh = nil
+            completedRefresh.resumeWaiters()
+            pendingRefresh?.resumeWaiters()
+            pendingRefresh = nil
+            AppLogger.refresh.info("Discarded a refresh result received after shutdown")
+            return
+        }
+
         if completedRefresh.isInvalidated {
             activeRefresh = nil
             AppLogger.refresh.info("Discarded the cancelled refresh result")
@@ -582,6 +603,13 @@ final class AppState: ObservableObject {
     private func startPendingRefreshIfNeeded(
         carrying waiters: [CheckedContinuation<Void, Never>]
     ) {
+        guard !isShutdown else {
+            waiters.forEach { $0.resume() }
+            pendingRefresh?.resumeWaiters()
+            pendingRefresh = nil
+            return
+        }
+
         guard var pendingRefresh else {
             waiters.forEach { $0.resume() }
             return
@@ -851,6 +879,7 @@ final class AppState: ObservableObject {
     /// calendar changes. Typed refresh failures remain authoritative; only a
     /// successful state can transition to stale here.
     func reconcileTemporalState() {
+        guard !isShutdown else { return }
         let referenceDate = now()
         if status == .success, isDataStale(at: referenceDate) {
             status = .stale
@@ -863,7 +892,8 @@ final class AppState: ObservableObject {
     private func scheduleTemporalCheck(referenceDate: Date) {
         taskResources.cancelFreshnessTask()
 
-        guard snapshot.dataSource == .real,
+        guard !isShutdown,
+              snapshot.dataSource == .real,
               let schedule = temporalSchedule(after: referenceDate) else {
             return
         }
@@ -909,6 +939,7 @@ final class AppState: ObservableObject {
     }
 
     private func handleTemporalSchedule(_ schedule: TemporalSchedule) {
+        guard !isShutdown else { return }
         let referenceDate = now()
 
         if status == .success, isDataStale(at: referenceDate) {

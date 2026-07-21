@@ -26,6 +26,12 @@ final class WidgetTimelineBridge {
             .store(in: &cancellables)
     }
 
+    /// Stops receiving host-state changes. Safe to call more than once during
+    /// overlapping termination and ownership-handoff paths.
+    func stop() {
+        cancellables.removeAll()
+    }
+
     private func propagate(_ event: AppStateEvent) {
         let state = event.presentationSnapshot
         let requiresTemporalReload = event.updateReason == .temporalReconciliation

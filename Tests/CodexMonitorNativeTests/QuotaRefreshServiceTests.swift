@@ -273,6 +273,108 @@ final class QuotaRefreshServiceTests: XCTestCase {
         }
     }
 
+    func testRefreshCancelledBeforeRealProviderDoesNotStartProviders() async {
+        let recorder = RefreshCallRecorder()
+        let startGate = RefreshCancellationGate()
+        let snapshot = makeBoundRealSnapshot()
+        let service = QuotaRefreshService(
+            realProvider: RecordingRealQuotaProvider(snapshot: snapshot, recorder: recorder),
+            resetCreditsDetailProvider: RecordingResetCreditsProvider(recorder: recorder),
+            mockProvider: MockQuotaProvider()
+        )
+
+        let task = Task {
+            await startGate.waitForRelease()
+            return try await service.refresh(basedOn: .notConnected)
+        }
+        task.cancel()
+        await startGate.release()
+
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let realCallCount = await recorder.realCallCount
+        let detailCallCount = await recorder.detailCallCount
+        XCTAssertEqual(realCallCount, 0)
+        XCTAssertEqual(detailCallCount, 0)
+    }
+
+    func testRefreshCancelledAfterRealProviderDoesNotStartDetailProvider() async {
+        let recorder = RefreshCallRecorder()
+        let realProviderGate = RefreshCancellationGate()
+        let snapshot = makeBoundRealSnapshot()
+        let service = QuotaRefreshService(
+            realProvider: BlockingRealQuotaProvider(
+                snapshot: snapshot,
+                recorder: recorder,
+                gate: realProviderGate
+            ),
+            resetCreditsDetailProvider: RecordingResetCreditsProvider(recorder: recorder),
+            mockProvider: MockQuotaProvider()
+        )
+
+        let task = Task { try await service.refresh(basedOn: .notConnected) }
+        await realProviderGate.waitForStart()
+        task.cancel()
+        await realProviderGate.release()
+
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let realCallCount = await recorder.realCallCount
+        let detailCallCount = await recorder.detailCallCount
+        XCTAssertEqual(realCallCount, 1)
+        XCTAssertEqual(detailCallCount, 0)
+    }
+
+    func testRefreshCancelledWhileResetCreditDetailsAreBlockedRethrowsCancellation() async {
+        let detailProviderGate = RefreshCancellationGate()
+        let snapshot = makeBoundRealSnapshot()
+        let service = QuotaRefreshService(
+            realProvider: StubRealQuotaProvider(snapshot: snapshot),
+            resetCreditsDetailProvider: BlockingResetCreditsProvider(gate: detailProviderGate),
+            mockProvider: MockQuotaProvider()
+        )
+
+        let task = Task { try await service.refresh(basedOn: .notConnected) }
+        await detailProviderGate.waitForStart()
+        task.cancel()
+        await detailProviderGate.release()
+
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation instead of a degraded snapshot")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    private func makeBoundRealSnapshot() -> QuotaSnapshot {
+        QuotaSnapshot(
+            weeklyQuotaPercent: 70,
+            fiveHourQuotaPercent: 64,
+            resetAvailableCount: 1,
+            resetCreditDetailsState: .appServerCountOnly,
+            refreshedAt: makeDate("2026-06-19T12:40:00Z"),
+            dataSource: .real,
+            accountBoundary: .testDefault
+        )
+    }
+
     private func makeDate(_ iso8601: String) -> Date {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
@@ -299,5 +401,100 @@ private struct SucceedingResetCreditsProvider: ResetCreditsDetailRefreshing, Sen
 
     func fetchDetails() async throws -> ResetCreditsDetailPayload {
         payload
+    }
+}
+
+private struct RecordingRealQuotaProvider: RealQuotaRefreshing, Sendable {
+    let snapshot: QuotaSnapshot
+    let recorder: RefreshCallRecorder
+
+    func fetchQuota() async throws -> QuotaSnapshot {
+        await recorder.recordRealCall()
+        return snapshot
+    }
+}
+
+private struct BlockingRealQuotaProvider: RealQuotaRefreshing, Sendable {
+    let snapshot: QuotaSnapshot
+    let recorder: RefreshCallRecorder
+    let gate: RefreshCancellationGate
+
+    func fetchQuota() async throws -> QuotaSnapshot {
+        await recorder.recordRealCall()
+        await gate.markStarted()
+        await gate.waitForRelease()
+        return snapshot
+    }
+}
+
+private struct RecordingResetCreditsProvider: ResetCreditsDetailRefreshing, Sendable {
+    let recorder: RefreshCallRecorder
+
+    func fetchDetails() async throws -> ResetCreditsDetailPayload {
+        await recorder.recordDetailCall()
+        return ResetCreditsDetailPayload(
+            availableCount: 1,
+            availableCredits: [],
+            statusSummary: []
+        )
+    }
+}
+
+private struct BlockingResetCreditsProvider: ResetCreditsDetailRefreshing, Sendable {
+    let gate: RefreshCancellationGate
+
+    func fetchDetails() async throws -> ResetCreditsDetailPayload {
+        await gate.markStarted()
+        await gate.waitForRelease()
+        try Task.checkCancellation()
+        return ResetCreditsDetailPayload(
+            availableCount: 1,
+            availableCredits: [],
+            statusSummary: []
+        )
+    }
+}
+
+private actor RefreshCallRecorder {
+    private(set) var realCallCount = 0
+    private(set) var detailCallCount = 0
+
+    func recordRealCall() {
+        realCallCount += 1
+    }
+
+    func recordDetailCall() {
+        detailCallCount += 1
+    }
+}
+
+private actor RefreshCancellationGate {
+    private var hasStarted = false
+    private var isReleased = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func markStarted() {
+        hasStarted = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+
+    func waitForStart() async {
+        guard !hasStarted else { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    func waitForRelease() async {
+        guard !isReleased else { return }
+        await withCheckedContinuation { releaseWaiters.append($0) }
+    }
+
+    func release() {
+        isReleased = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        waiters.forEach { $0.resume() }
     }
 }

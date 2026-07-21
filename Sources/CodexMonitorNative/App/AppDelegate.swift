@@ -40,6 +40,30 @@ enum ClaimedInstallationRevalidationPolicy {
 }
 
 @MainActor
+enum AppDelegateOwnedServiceShutdown {
+    static func stop(
+        refreshScheduler: RefreshScheduler?,
+        sleepWakeObserver: SleepWakeObserver?,
+        networkReachabilityObserver: NetworkReachabilityObserver?,
+        systemClockObserver: SystemClockObserver?,
+        authBoundaryObserver: CodexAuthBoundaryObserver?,
+        appState: AppState?,
+        widgetTimelineBridge: WidgetTimelineBridge?
+    ) {
+        refreshScheduler?.stop()
+        sleepWakeObserver?.stop()
+        networkReachabilityObserver?.stop()
+        systemClockObserver?.stop()
+        authBoundaryObserver?.stop()
+
+        // AppState publishes this terminal, settled event synchronously. Keep
+        // the bridge subscribed through it, then detach before releasing either.
+        appState?.shutdown()
+        widgetTimelineBridge?.stop()
+    }
+}
+
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let installationAuthority = AppInstallationAuthority()
     private let singleInstanceCoordinator = SingleInstanceCoordinator()
@@ -386,17 +410,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         didStopOwnedServices = true
         preferredRedirectTimeoutTask?.cancel()
         preferredRedirectTimeoutTask = nil
+        singleInstanceCoordinator.prepareForShutdown()
+        AppDelegateOwnedServiceShutdown.stop(
+            refreshScheduler: refreshScheduler,
+            sleepWakeObserver: sleepWakeObserver,
+            networkReachabilityObserver: networkReachabilityObserver,
+            systemClockObserver: systemClockObserver,
+            authBoundaryObserver: authBoundaryObserver,
+            appState: appState,
+            widgetTimelineBridge: widgetTimelineBridge
+        )
+
         popoverController?.teardown()
         statusBarController?.teardown()
         popoverController = nil
         statusBarController = nil
-        singleInstanceCoordinator.prepareForShutdown()
-        refreshScheduler?.stop()
-        sleepWakeObserver?.stop()
-        networkReachabilityObserver?.stop()
-        systemClockObserver?.stop()
-        authBoundaryObserver?.stop()
-        appState?.shutdown()
+        refreshScheduler = nil
+        sleepWakeObserver = nil
+        networkReachabilityObserver = nil
+        systemClockObserver = nil
+        authBoundaryObserver = nil
+        appState = nil
+        widgetTimelineBridge = nil
+        launchAtLoginManager = nil
     }
 
     private func redirectToPreferredInstallation(_ preferredIdentity: AppInstallationIdentity) {

@@ -284,37 +284,78 @@ final class AppStateTests: XCTestCase {
         await Task.yield()
     }
 
-    func testShutdownSettlesUIButQueuesNewRequestUntilCancellationIgnoringProviderReturns() async {
+    func testShutdownIsTerminalAndRejectsLaterEventsWhileCancellationIgnoringProviderReturns() async {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.shutdown.\(UUID().uuidString)")!
-        let oldSnapshot = QuotaSnapshot(weeklyQuotaPercent: 10, fiveHourQuotaPercent: 20, refreshedAt: .now, dataSource: .real)
-        let refreshed = QuotaSnapshot(weeklyQuotaPercent: 80, fiveHourQuotaPercent: 60, refreshedAt: .now.addingTimeInterval(1), dataSource: .real)
-        let service = QueueingResultRefreshService(results: [.success(oldSnapshot), .success(refreshed)])
+        let provider = MutableAccountBoundaryProvider(.testDefault)
+        let lateSnapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 80,
+            fiveHourQuotaPercent: 60,
+            refreshedAt: .now,
+            dataSource: .real,
+            accountBoundary: .testDefault
+        )
+        let service = QueueingResultRefreshService(results: [.success(lateSnapshot), .success(lateSnapshot)])
         let store = SnapshotStore(defaults: defaults, key: "snapshot")
-        let appState = AppState(snapshotStore: store, refreshService: service)
+        let appState = AppState(
+            snapshotStore: store,
+            refreshService: service,
+            accountBoundaryProvider: { provider.value }
+        )
 
         appState.refresh(trigger: .manual)
         await service.waitForCall(1)
+
+        var publishedStateCount = 0
+        var forwardedRequestCount = 0
+        appState.onRefreshSchedulingStateChanged = { _ in publishedStateCount += 1 }
+        appState.onRefreshRequested = { _ in forwardedRequestCount += 1 }
         appState.shutdown()
-        XCTAssertNotEqual(appState.status, .refreshing)
+        XCTAssertEqual(appState.status, .noSnapshot)
+        XCTAssertEqual(publishedStateCount, 1)
+        XCTAssertFalse(appState.hasScheduledFreshnessTask)
 
         appState.refresh(trigger: .wake)
+        let completionProbe = RefreshCompletionProbe()
+        let rejectedRefreshNow = Task {
+            await appState.refreshNow(trigger: .manual)
+            await completionProbe.markCompleted()
+        }
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+        let refreshNowCompleted = await completionProbe.isCompleted()
+        XCTAssertTrue(refreshNowCompleted)
+
+        provider.value = .testOtherAccount
+        appState.accountBoundaryDidChange()
+        appState.updateNetworkReachability(false)
+        appState.reconcileTemporalState()
+        appState.shutdown()
+
+        XCTAssertEqual(forwardedRequestCount, 0)
+        XCTAssertEqual(publishedStateCount, 1)
+        XCTAssertEqual(appState.networkIsReachable, true)
         await assertCallCount(1, for: service)
         await assertMaxConcurrentCalls(1, for: service)
 
         await service.release(call: 1)
-        await service.waitForCall(2)
-        await assertMaxConcurrentCalls(1, for: service)
+        await service.waitForCompletion(1)
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+        await assertCallCount(1, for: service)
         XCTAssertEqual(appState.snapshot, .notConnected)
-        XCTAssertEqual(appState.status, .refreshing)
+        XCTAssertEqual(appState.status, .noSnapshot)
         XCTAssertEqual(store.loadState()?.snapshot, .notConnected)
-        XCTAssertEqual(store.loadState()?.status, .refreshing)
-        await service.release(call: 2)
-        await service.waitForCompletion(2)
-        await Task.yield()
+        XCTAssertEqual(store.loadState()?.status, .noSnapshot)
+        XCTAssertEqual(publishedStateCount, 1)
+        XCTAssertFalse(appState.hasManagedRefreshTask)
+        XCTAssertFalse(appState.hasScheduledFreshnessTask)
 
-        XCTAssertEqual(appState.snapshot, refreshed)
-        XCTAssertEqual(appState.status, .success)
-        XCTAssertEqual(store.loadState()?.snapshot, refreshed)
+        // If the regression starts an unexpected trailing request, make sure
+        // the test does not leave its cancellation-ignoring provider blocked.
+        await service.release(call: 2)
+        await rejectedRefreshNow.value
     }
     func testMixedTriggerEntrypointsCollapseToOneTrailingRefresh() async {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.mixedSingleFlight.\(UUID().uuidString)")!
@@ -621,6 +662,69 @@ final class AppStateTests: XCTestCase {
         }
     }
 
+    func testRestartNormalizesPersistedRefreshingRealAndMockStates() {
+        let referenceDate = Date(timeIntervalSince1970: 10_000)
+        let realDefaults = UserDefaults(
+            suiteName: "CodexMonitorNativeTests.restore.refreshing.real.\(UUID().uuidString)"
+        )!
+        let realStore = SnapshotStore(defaults: realDefaults, key: "snapshot")
+        let realSnapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 72,
+            fiveHourQuotaPercent: 69,
+            refreshedAt: referenceDate.addingTimeInterval(-60),
+            dataSource: .real,
+            accountBoundary: .testDefault
+        )
+        realStore.saveState(PersistedAppState(
+            snapshot: realSnapshot,
+            status: .refreshing,
+            lastSuccessAt: realSnapshot.refreshedAt,
+            lastAttemptAt: referenceDate.addingTimeInterval(-1),
+            failureCount: 0,
+            savedAt: referenceDate.addingTimeInterval(-1)
+        ))
+
+        let restoredReal = AppState(
+            snapshotStore: realStore,
+            refreshService: MockRefreshService(error: MockRefreshError.simulatedFailure),
+            now: { referenceDate },
+            accountBoundaryProvider: { .testDefault }
+        )
+
+        XCTAssertEqual(restoredReal.snapshot, realSnapshot)
+        XCTAssertEqual(restoredReal.status, .success)
+        XCTAssertEqual(realStore.loadState()?.status, .success)
+
+        let mockDefaults = UserDefaults(
+            suiteName: "CodexMonitorNativeTests.restore.refreshing.mock.\(UUID().uuidString)"
+        )!
+        let mockStore = SnapshotStore(defaults: mockDefaults, key: "snapshot")
+        let mockSnapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 42,
+            fiveHourQuotaPercent: 39,
+            refreshedAt: referenceDate.addingTimeInterval(-60),
+            dataSource: .mock
+        )
+        mockStore.saveState(PersistedAppState(
+            snapshot: mockSnapshot,
+            status: .refreshing,
+            lastSuccessAt: nil,
+            lastAttemptAt: referenceDate.addingTimeInterval(-1),
+            failureCount: 0,
+            savedAt: referenceDate.addingTimeInterval(-1)
+        ))
+
+        let restoredMock = AppState(
+            snapshotStore: mockStore,
+            refreshService: MockRefreshService(error: MockRefreshError.simulatedFailure),
+            now: { referenceDate }
+        )
+
+        XCTAssertEqual(restoredMock.snapshot, mockSnapshot)
+        XCTAssertEqual(restoredMock.status, .noSnapshot)
+        XCTAssertEqual(mockStore.loadState()?.status, .noSnapshot)
+    }
+
     func testProductionRestoreDiscardsLegacyAndUnverifiableRealSnapshots() {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.accountBoundary.legacy.\(UUID().uuidString)")!
         let store = SnapshotStore(defaults: defaults, key: "snapshot")
@@ -717,6 +821,62 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(store.loadState()?.snapshot.accountBoundary, .testOtherAccount)
     }
 
+    func testAccountChangeDuringActiveRefreshRejectsOldResultAndAcceptsNewOwnerTrailingResult() async {
+        let provider = MutableAccountBoundaryProvider(.testDefault)
+        let store = makeAccountBoundaryStore(
+            suffix: "in-flight-switch",
+            boundary: .testDefault
+        )
+        let baseDate = Date.now
+        let oldOwnerResult = QuotaSnapshot(
+            weeklyQuotaPercent: 91,
+            fiveHourQuotaPercent: 81,
+            refreshedAt: baseDate,
+            dataSource: .real,
+            accountBoundary: .testDefault
+        )
+        let newOwnerResult = QuotaSnapshot(
+            weeklyQuotaPercent: 21,
+            fiveHourQuotaPercent: 31,
+            refreshedAt: baseDate.addingTimeInterval(1),
+            dataSource: .real,
+            accountBoundary: .testOtherAccount
+        )
+        let service = QueueingResultRefreshService(results: [
+            .success(oldOwnerResult),
+            .success(newOwnerResult)
+        ])
+        let state = AppState(
+            snapshotStore: store,
+            refreshService: service,
+            accountBoundaryProvider: { provider.value }
+        )
+
+        state.refresh(trigger: .manual)
+        await service.waitForCall(1)
+        provider.value = .testOtherAccount
+        state.accountBoundaryDidChange()
+
+        await service.release(call: 1)
+        await service.waitForCall(2)
+
+        XCTAssertNotEqual(state.snapshot, oldOwnerResult)
+        XCTAssertEqual(state.snapshot.dataSource, .mock)
+        XCTAssertNotEqual(store.loadState()?.snapshot, oldOwnerResult)
+
+        await service.release(call: 2)
+        await service.waitForCompletion(2)
+        for _ in 0..<100 where state.snapshot != newOwnerResult {
+            await Task.yield()
+        }
+
+        await assertCallCount(2, for: service)
+        await assertMaxConcurrentCalls(1, for: service)
+        XCTAssertEqual(state.snapshot, newOwnerResult)
+        XCTAssertEqual(state.status, .success)
+        XCTAssertEqual(store.loadState()?.snapshot, newOwnerResult)
+    }
+
     func testShutdownInvalidatesCacheWhenLoginBoundaryDisappearedBeforeObserverPoll() {
         let provider = MutableAccountBoundaryProvider(.testDefault)
         let store = makeAccountBoundaryStore(
@@ -766,6 +926,44 @@ final class AppStateTests: XCTestCase {
 
         XCTAssertEqual(store.loadState()?.snapshot, newAccount)
         XCTAssertNil(defaults.data(forKey: "snapshot.backup"))
+    }
+
+    func testCorruptPrimaryFailsClosedWhenBackupBelongsToDifferentAccount() throws {
+        let defaults = UserDefaults(
+            suiteName: "CodexMonitorNativeTests.accountBoundary.corruptPrimary.\(UUID().uuidString)"
+        )!
+        let oldAccountSnapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 90,
+            fiveHourQuotaPercent: 80,
+            refreshedAt: Date.now,
+            dataSource: .real,
+            accountBoundary: .testDefault
+        )
+        let oldAccountState = PersistedAppState(
+            snapshot: oldAccountSnapshot,
+            status: .success,
+            lastSuccessAt: oldAccountSnapshot.refreshedAt,
+            lastAttemptAt: nil,
+            failureCount: 0
+        )
+        defaults.set(Data("corrupt".utf8), forKey: "snapshot")
+        defaults.set(
+            try JSONEncoder().encode(PersistenceEnvelope(value: oldAccountState, revision: 1)),
+            forKey: "snapshot.backup"
+        )
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+
+        let state = AppState(
+            snapshotStore: store,
+            refreshService: MockRefreshService(error: MockRefreshError.simulatedFailure),
+            accountBoundaryProvider: { .testOtherAccount }
+        )
+
+        XCTAssertEqual(state.snapshot, .notConnected)
+        XCTAssertEqual(state.status, .noSnapshot)
+        XCTAssertNil(state.lastSuccessAt)
+        XCTAssertNotEqual(store.loadState()?.snapshot, oldAccountSnapshot)
+        XCTAssertEqual(store.loadState()?.snapshot, .notConnected)
     }
 
     private func makeAccountBoundaryStore(
