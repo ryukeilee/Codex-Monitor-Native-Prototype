@@ -146,9 +146,9 @@ final class LaunchAtLoginManager: ObservableObject {
     }
 
     var toggleValue: Bool {
-        desiredLaunchAtLogin
-            || failedDesiredLaunchAtLogin == false
-            || matchingReconciliationFailure(desiredValue: false) != nil
+        isEnabled
+            || (failedDesiredLaunchAtLogin == false
+                && matchingReconciliationFailure(desiredValue: false) != nil)
     }
 
     func refreshStatus() {
@@ -265,11 +265,11 @@ final class LaunchAtLoginManager: ObservableObject {
         defer { isUpdating = false }
 
         switch loginItemManager.status {
-        case .notRegistered:
-            // Status is scoped to the current main-app view and cannot prove
-            // that an old-path slot is absent. Explicit disable must clear it.
-            unregisterExistingRegistration()
-        case .enabled, .requiresApproval, .notFound:
+        case .notRegistered, .notFound:
+            clearRegisteredInstallationIdentity()
+            clearReconciliationFailure()
+            refreshStatus()
+        case .enabled, .requiresApproval:
             unregisterExistingRegistration()
         @unknown default:
             unregisterExistingRegistration()
@@ -293,14 +293,10 @@ final class LaunchAtLoginManager: ObservableObject {
                 clearRegisteredInstallationIdentity()
                 AppLogger.system.info("No stale launch at login registration remained before repair")
             } catch {
-                let errorSummary = shortErrorMessage(from: error)
-                AppLogger.system.error("Launch at login repair could not remove stale registration: \(error.localizedDescription, privacy: .public)")
+                // Best-effort cleanup: an unexpected unregister error must not
+                // block the actual registration attempt.
+                AppLogger.system.error("Launch at login repair could not remove stale registration: \(error.localizedDescription, privacy: .public), proceeding to register anyway")
                 refreshStatus()
-                recordReconciliationFailure(
-                    errorSummary: errorSummary,
-                    suppressesAutomaticRetry: shouldSuppressAutomaticRetry(for: error)
-                )
-                return
             }
         }
 

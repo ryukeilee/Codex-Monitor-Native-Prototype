@@ -207,7 +207,9 @@ final class LaunchAtLoginManagerTests: XCTestCase {
 
         manager.reconcileAtLaunch()
 
-        XCTAssertEqual(service.unregisterCallCount, 1)
+        // When the system already reports .notRegistered, no unregister
+        // call is needed — the slot is already clear.
+        XCTAssertEqual(service.unregisterCallCount, 0)
         XCTAssertEqual(service.registerCallCount, 0)
         XCTAssertFalse(manager.shouldLaunchAtLogin)
         XCTAssertNil(try fixture.registeredIdentity())
@@ -480,20 +482,23 @@ final class LaunchAtLoginManagerTests: XCTestCase {
         XCTAssertNil(try fixture.registeredIdentity())
     }
 
-    func testUnrelatedErrorCodeCollisionDoesNotPermitRepairToContinue() {
+    func testUnrelatedErrorCodeCollisionDoesNotBlockRegistration() {
         let fixture = LaunchAtLoginTestFixture()
         defer { fixture.cleanup() }
         fixture.defaults.set(true, forKey: fixture.preferenceKey)
         let service = FakeLoginItemManager(status: .notFound)
+        // An unregister error from a different framework domain is not a
+        // legitimate kSMErrorJobNotFound, but it must not block registration.
         service.unregisterError = NSError(domain: NSCocoaErrorDomain, code: kSMErrorJobNotFound)
         let manager = fixture.makeManager(service: service)
 
         manager.reconcileAtLaunch()
 
         XCTAssertEqual(service.unregisterCallCount, 1)
-        XCTAssertEqual(service.registerCallCount, 0)
-        XCTAssertFalse(manager.shouldLaunchAtLogin)
-        XCTAssertEqual(manager.lastErrorSummary, "开机启动更新失败")
+        // Registration proceeds despite the unrelated unregister error.
+        XCTAssertEqual(service.registerCallCount, 1)
+        XCTAssertTrue(manager.shouldLaunchAtLogin)
+        XCTAssertNil(manager.lastErrorSummary)
     }
 
     func testToggleRollsBackAndShowsShortErrorWhenSystemUpdateFails() {
