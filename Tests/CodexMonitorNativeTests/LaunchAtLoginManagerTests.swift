@@ -534,6 +534,155 @@ final class LaunchAtLoginManagerTests: XCTestCase {
         XCTAssertEqual(service.registerCallCount, 0)
         XCTAssertEqual(service.unregisterCallCount, 0)
     }
+
+    // MARK: - Development build (allowsAutomaticReconciliation = false)
+
+    func testDevBuildWithStoredEnabledPreferenceAndNotFoundStatusRegistersAtLaunch() throws {
+        let fixture = LaunchAtLoginTestFixture()
+        defer { fixture.cleanup() }
+        fixture.defaults.set(true, forKey: fixture.preferenceKey)
+        try fixture.storeRegisteredIdentity(fixture.currentIdentity)
+        let service = FakeLoginItemManager(status: .notFound)
+        let manager = fixture.makeManager(
+            service: service,
+            currentIdentity: fixture.currentIdentity,
+            allowsAutomaticReconciliation: false
+        )
+
+        manager.reconcileAtLaunch()
+
+        XCTAssertEqual(service.unregisterCallCount, 1)
+        XCTAssertEqual(service.registerCallCount, 1)
+        XCTAssertTrue(manager.shouldLaunchAtLogin)
+        XCTAssertNil(manager.lastErrorSummary)
+    }
+
+    func testDevBuildWithStoredDisabledPreferenceAndEnabledStatusUnregistersAtLaunch() throws {
+        let fixture = LaunchAtLoginTestFixture()
+        defer { fixture.cleanup() }
+        fixture.defaults.set(false, forKey: fixture.preferenceKey)
+        try fixture.storeRegisteredIdentity(fixture.currentIdentity)
+        let service = FakeLoginItemManager(status: .enabled)
+        let manager = fixture.makeManager(
+            service: service,
+            currentIdentity: fixture.currentIdentity,
+            allowsAutomaticReconciliation: false
+        )
+
+        manager.reconcileAtLaunch()
+
+        XCTAssertEqual(service.unregisterCallCount, 1)
+        XCTAssertEqual(service.registerCallCount, 0)
+        XCTAssertFalse(manager.shouldLaunchAtLogin)
+        XCTAssertNil(manager.lastErrorSummary)
+    }
+
+    func testDevBuildNoStoredPreferenceDoesNotRegisterForNotFound() {
+        let fixture = LaunchAtLoginTestFixture()
+        defer { fixture.cleanup() }
+        let service = FakeLoginItemManager(status: .notFound)
+        let manager = fixture.makeManager(
+            service: service,
+            currentIdentity: fixture.currentIdentity,
+            allowsAutomaticReconciliation: false
+        )
+
+        manager.reconcileAtLaunch()
+
+        XCTAssertEqual(service.registerCallCount, 0)
+        XCTAssertEqual(service.unregisterCallCount, 0)
+        XCTAssertFalse(manager.shouldLaunchAtLogin)
+        XCTAssertEqual(manager.statusInfo, .notFound)
+        XCTAssertEqual(manager.helperText, "未找到登录项")
+    }
+
+    // MARK: - Toggle value for requiresApproval
+
+    func testToggleValueIsTrueWhenRequiresApprovalAndDesiredEnabled() {
+        let fixture = LaunchAtLoginTestFixture()
+        defer { fixture.cleanup() }
+        fixture.defaults.set(true, forKey: fixture.preferenceKey)
+        try! fixture.storeRegisteredIdentity(fixture.currentIdentity)
+        let service = FakeLoginItemManager(status: .requiresApproval)
+        let manager = fixture.makeManager(service: service)
+
+        // reconcileAtLaunch for allowsAutomaticReconciliation=true with
+        // .requiresApproval and matching identity does not register/unregister.
+        manager.reconcileAtLaunch()
+
+        // desiredLaunchAtLogin=YES (from stored preference), status=.requiresApproval
+        XCTAssertTrue(manager.desiredLaunchAtLogin)
+        XCTAssertEqual(manager.statusInfo, .requiresApproval)
+        // toggleValue should reflect the user's intent, not just isEnabled
+        XCTAssertTrue(manager.toggleValue)
+        XCTAssertFalse(manager.shouldLaunchAtLogin)
+        XCTAssertEqual(manager.helperText, "需在系统设置中批准")
+    }
+
+    func testToggleValueIsFalseWhenRequiresApprovalAndDesiredDisabled() {
+        let fixture = LaunchAtLoginTestFixture()
+        defer { fixture.cleanup() }
+        fixture.defaults.set(false, forKey: fixture.preferenceKey)
+        let service = FakeLoginItemManager(status: .requiresApproval)
+        let manager = fixture.makeManager(service: service)
+
+        manager.reconcileAtLaunch()
+
+        XCTAssertFalse(manager.desiredLaunchAtLogin)
+        // reconcileDisabledState calls unregisterExistingRegistration which:
+        // 1. unregisters (success on the fake)
+        // 2. clearRegisteredInstallationIdentity
+        // 3. clearReconciliationFailure
+        // 4. refreshStatus → reads loginItemManager.status
+        //
+        // The existing testLegacyPendingIntentCanBeDisabledAndPersistsDisabledPreference
+        // uses setLaunchAtLogin(false) and expects .notRegistered.
+        // Match that behavior here since both paths call reconcileDisabledState.
+        XCTAssertEqual(manager.statusInfo, .notRegistered)
+        // User explicitly disabled, so toggle should be OFF
+        XCTAssertFalse(manager.toggleValue)
+        XCTAssertFalse(manager.shouldLaunchAtLogin)
+    }
+
+    func testToggleValueAfterSetLaunchAtLoginWithRequiresApproval() {
+        let fixture = LaunchAtLoginTestFixture()
+        defer { fixture.cleanup() }
+        let service = FakeLoginItemManager(status: .notRegistered)
+        service.statusAfterRegisterAttempt = .requiresApproval
+        let manager = fixture.makeManager(service: service)
+
+        manager.setLaunchAtLogin(true)
+
+        // Registration succeeded but system requires approval
+        XCTAssertTrue(manager.desiredLaunchAtLogin)
+        XCTAssertEqual(manager.statusInfo, .requiresApproval)
+        // toggleValue should show ON because user intends to enable
+        XCTAssertTrue(manager.toggleValue)
+        XCTAssertFalse(manager.shouldLaunchAtLogin)
+        XCTAssertEqual(manager.helperText, "需在系统设置中批准")
+    }
+
+    func testToggleValueAfterApprovalChangesToEnabled() throws {
+        let fixture = LaunchAtLoginTestFixture()
+        defer { fixture.cleanup() }
+        fixture.defaults.set(true, forKey: fixture.preferenceKey)
+        try fixture.storeRegisteredIdentity(fixture.currentIdentity)
+        let service = FakeLoginItemManager(status: .requiresApproval)
+        let manager = fixture.makeManager(service: service)
+
+        manager.reconcileAtLaunch()
+        XCTAssertEqual(manager.statusInfo, .requiresApproval)
+        XCTAssertTrue(manager.toggleValue)
+
+        // Simulate user approving in System Settings → status becomes .enabled
+        service.status = .enabled
+        manager.refreshStatus()
+
+        XCTAssertEqual(manager.statusInfo, .enabled)
+        XCTAssertTrue(manager.toggleValue)
+        XCTAssertTrue(manager.shouldLaunchAtLogin)
+        XCTAssertEqual(manager.helperText, "已启用")
+    }
 }
 
 @MainActor
@@ -567,6 +716,21 @@ private final class LaunchAtLoginTestFixture {
             preferenceKey: preferenceKey,
             registrationIdentityKey: registrationIdentityKey,
             currentInstallationIdentity: currentIdentity
+        )
+    }
+
+    func makeManager(
+        service: FakeLoginItemManager,
+        currentIdentity: AppInstallationIdentity?,
+        allowsAutomaticReconciliation: Bool
+    ) -> LaunchAtLoginManager {
+        LaunchAtLoginManager(
+            loginItemManager: service,
+            defaults: defaults,
+            preferenceKey: preferenceKey,
+            registrationIdentityKey: registrationIdentityKey,
+            currentInstallationIdentity: currentIdentity,
+            allowsAutomaticReconciliation: allowsAutomaticReconciliation
         )
     }
 

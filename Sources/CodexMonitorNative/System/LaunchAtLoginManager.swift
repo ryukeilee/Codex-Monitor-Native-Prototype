@@ -147,6 +147,7 @@ final class LaunchAtLoginManager: ObservableObject {
 
     var toggleValue: Bool {
         isEnabled
+            || (statusInfo == .requiresApproval && desiredLaunchAtLogin)
             || (failedDesiredLaunchAtLogin == false
                 && matchingReconciliationFailure(desiredValue: false) != nil)
     }
@@ -164,11 +165,8 @@ final class LaunchAtLoginManager: ObservableObject {
     func reconcileAtLaunch() {
         guard !didReconcileAtLaunch else { return }
         didReconcileAtLaunch = true
-        guard allowsAutomaticReconciliation else {
-            refreshStatus()
-            return
-        }
 
+        // Always check reconciliation failures first.
         if let failure = matchingReconciliationFailure(
             desiredValue: desiredLaunchAtLogin
         ) {
@@ -178,6 +176,22 @@ final class LaunchAtLoginManager: ObservableObject {
             return
         }
         clearReconciliationFailure()
+
+        guard allowsAutomaticReconciliation else {
+            // Development build: still reconcile an explicit stored preference
+            // so a previous toggle-on survives app rebuilds and the system
+            // never shows a stale "未找到登录项" for a user who already opted in.
+            if hasAuthoritativePreference {
+                if desiredLaunchAtLogin {
+                    reconcileEnabledState(userInitiated: false)
+                } else {
+                    reconcileDisabledState()
+                }
+            } else {
+                refreshStatus()
+            }
+            return
+        }
 
         if desiredLaunchAtLogin {
             reconcileEnabledState(userInitiated: false)
