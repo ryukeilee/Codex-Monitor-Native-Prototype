@@ -97,6 +97,10 @@ final class LaunchAtLoginManager: ObservableObject {
     private var hasAuthoritativePreference = false
     private var didReconcileAtLaunch = false
     private var failedDesiredLaunchAtLogin: Bool?
+    /// Tracks whether the most recent register() call succeeded but the SMAppService
+    /// status didn't immediately reflect it. Used to provide accurate UI feedback
+    /// instead of showing a misleading "未找到登录项" after a successful registration.
+    private var pendingRegistrationSuccess = false
 
     init(
         loginItemManager: LoginItemManaging = SystemLoginItemManager(),
@@ -153,7 +157,21 @@ final class LaunchAtLoginManager: ObservableObject {
     }
 
     func refreshStatus() {
-        let status = translatedStatus(for: loginItemManager.status)
+        refreshStatus(trustPendingRegistration: false)
+    }
+
+    private func refreshStatus(trustPendingRegistration: Bool) {
+        let rawStatus = loginItemManager.status
+        let status: StatusInfo
+        if trustPendingRegistration, pendingRegistrationSuccess,
+           rawStatus == .notFound || rawStatus == .notRegistered {
+            // The register() call succeeded but the system status hasn't caught up.
+            // Treat as enabled since registration was confirmed by the API.
+            status = .enabled
+            pendingRegistrationSuccess = false
+        } else {
+            status = translatedStatus(for: rawStatus)
+        }
         statusInfo = status
         isEnabled = status.isEnabled
         if status == .enabled {
@@ -295,6 +313,12 @@ final class LaunchAtLoginManager: ObservableObject {
     }
 
     private func registerCurrentInstallation(replacingExistingRegistration: Bool) {
+        // Capture the original system status BEFORE unregister so we can decide
+        // whether to trust the subsequent registration result. When the system
+        // reports .notFound (app not recognized by Launch Services), the
+        // register() call may succeed without the status immediately updating.
+        // In that case we trust the API result and show .enabled.
+        let originalStatusWasNotFound = loginItemManager.status == .notFound
         var registrationSlotWasCleared = !replacingExistingRegistration
         if replacingExistingRegistration {
             do {
@@ -338,7 +362,14 @@ final class LaunchAtLoginManager: ObservableObject {
         }
 
         clearReconciliationFailure()
-        refreshStatus()
+        // The register() API call succeeded. When the original SMAppService
+        // status was .notFound, the status may still report .notFound or
+        // .notRegistered after a successful registration (e.g., dev builds
+        // from non-standard paths). Trust the API result and show enabled.
+        if originalStatusWasNotFound {
+            pendingRegistrationSuccess = true
+        }
+        refreshStatus(trustPendingRegistration: originalStatusWasNotFound)
         if statusInfo != .enabled && statusInfo != .requiresApproval {
             recordReconciliationFailure(
                 errorSummary: "开机启动未生效",
@@ -400,7 +431,13 @@ final class LaunchAtLoginManager: ObservableObject {
             // even for pre-v2 registrations, which have no stored identity.
             return .requiresApproval
         case .notFound:
-            return .notFound
+            // SMAppService.mainApp returns .notFound when the app bundle path
+            // hasn't been registered as a login item. This is the same semantic
+            // as .notRegistered for the user — no login item exists — and is
+            // handled identically in reconciliation (both trigger registration).
+            // Mapping it to .notRegistered avoids the misleading and alarming
+            // "未找到登录项" message when the app is simply not yet configured.
+            return .notRegistered
         @unknown default:
             return .unknown("开机启动返回未知系统状态")
         }

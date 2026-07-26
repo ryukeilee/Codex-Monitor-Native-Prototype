@@ -47,6 +47,7 @@ WIDGET_PRODUCTS_DIR="$WIDGET_BUILD_DIR/$XCODE_CONFIGURATION"
 WIDGET_BUNDLE="$WIDGET_PRODUCTS_DIR/$WIDGET_NAME.appex"
 WIDGET_ENTITLEMENTS="$ROOT_DIR/Assets/CodexMonitorWidgetExtension.entitlements"
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
+WIDGET_CODESIGN_IDENTITY="${WIDGET_CODESIGN_IDENTITY:-Apple Development: ryukei_li@hotmail.com (5BJ9GM7VZR)}"
 INSTALL_APP_PATH_RAW="${INSTALL_APP_PATH:-/Applications/$APP_NAME.app}"
 INSTALL_APP_PATH=""
 INSTALL_WORK_DIR=""
@@ -906,12 +907,12 @@ if [[ -d "$WIDGET_PROJECT" ]]; then
 
   if ! /usr/bin/codesign \
     --force \
-    --sign "$CODESIGN_IDENTITY" \
+    --sign "$WIDGET_CODESIGN_IDENTITY" \
     --timestamp=none \
     --entitlements "$WIDGET_ENTITLEMENTS" \
     "$APP_PLUGINS/$WIDGET_NAME.appex"; then
     fail_step "签名 Widget" "Widget 本地签名失败。" \
-      "确认 CODESIGN_IDENTITY 可用（默认使用本地 ad-hoc 签名）后重试 ./script/build_and_run.sh --verify"
+      "确认 WIDGET_CODESIGN_IDENTITY 可用（默认使用 Apple Development 证书）后重试 ./script/build_and_run.sh --verify"
   fi
 fi
 
@@ -1134,6 +1135,10 @@ verify_installed_app() {
 
 case "$MODE" in
   run)
+    # 注册 Widget，确保 WidgetKit 能发现开发构建的 extension
+    if [[ -d "$WIDGET_PROJECT" && -d "$APP_PLUGINS/$WIDGET_NAME.appex" ]]; then
+      /usr/bin/pluginkit -a "$APP_PLUGINS/$WIDGET_NAME.appex" >/dev/null 2>&1 || true
+    fi
     open_app
     ;;
   --debug|debug)

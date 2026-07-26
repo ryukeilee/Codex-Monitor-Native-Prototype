@@ -592,8 +592,10 @@ final class LaunchAtLoginManagerTests: XCTestCase {
         XCTAssertEqual(service.registerCallCount, 0)
         XCTAssertEqual(service.unregisterCallCount, 0)
         XCTAssertFalse(manager.shouldLaunchAtLogin)
-        XCTAssertEqual(manager.statusInfo, .notFound)
-        XCTAssertEqual(manager.helperText, "未找到登录项")
+        // SMAppService.Status.notFound is mapped to .notRegistered so the
+        // user sees "未启用" instead of the misleading "未找到登录项".
+        XCTAssertEqual(manager.statusInfo, .notRegistered)
+        XCTAssertEqual(manager.helperText, "未启用")
     }
 
     // MARK: - Toggle value for requiresApproval
@@ -682,6 +684,135 @@ final class LaunchAtLoginManagerTests: XCTestCase {
         XCTAssertTrue(manager.toggleValue)
         XCTAssertTrue(manager.shouldLaunchAtLogin)
         XCTAssertEqual(manager.helperText, "已启用")
+    }
+
+    // MARK: - Registration success with SMAppService status lag
+
+    func testRegisterSuccessWithNotFoundStatusShowsEnabled() {
+        // Regression: SMAppService.mainApp.register() may succeed but status
+        // still returns .notFound on some configurations. The UI must show
+        // "已启用" after a successful registration.
+        let fixture = LaunchAtLoginTestFixture()
+        defer { fixture.cleanup() }
+        let service = FakeLoginItemManager(status: .notFound)
+        // Simulate register() succeeding but status NOT updating
+        service.statusAfterRegisterAttempt = .notFound
+        let manager = fixture.makeManager(service: service)
+
+        manager.setLaunchAtLogin(true)
+
+        XCTAssertEqual(service.registerCallCount, 1)
+        XCTAssertTrue(manager.shouldLaunchAtLogin)
+        XCTAssertEqual(manager.helperText, "已启用")
+        XCTAssertNil(manager.lastErrorSummary)
+    }
+
+    func testRegisterSuccessWithNotRegisteredStatusShowsNotEnabled() {
+        // When register() succeeds but the system status remains .notRegistered,
+        // the manager does NOT trust the result because a .notRegistered system
+        // status means the app is known to the system but registration didn't
+        // take effect. Only .notFound origin triggers the trust path.
+        let fixture = LaunchAtLoginTestFixture()
+        defer { fixture.cleanup() }
+        fixture.defaults.set(true, forKey: fixture.preferenceKey)
+        let service = FakeLoginItemManager(status: .notRegistered)
+        service.statusAfterRegisterAttempt = .notRegistered
+        let manager = fixture.makeManager(service: service)
+
+        manager.reconcileAtLaunch()
+
+        XCTAssertEqual(service.registerCallCount, 1)
+        XCTAssertFalse(manager.shouldLaunchAtLogin)
+        XCTAssertEqual(manager.statusInfo, .notRegistered)
+        XCTAssertEqual(manager.lastErrorSummary, "开机启动未生效")
+    }
+
+    func testStaleNotFoundStatusIsRefreshedAtNextReconcile() throws {
+        // After a registration that succeeded but produced .notFound status,
+        // the next reconcileAtLaunch() should re-check the real system status
+        // and correct the display.
+        let fixture = LaunchAtLoginTestFixture()
+        defer { fixture.cleanup() }
+        let service = FakeLoginItemManager(status: .notFound)
+        service.statusAfterRegisterAttempt = .notFound
+        let manager = fixture.makeManager(service: service)
+
+        manager.setLaunchAtLogin(true)
+        XCTAssertTrue(manager.shouldLaunchAtLogin)
+        XCTAssertEqual(manager.helperText, "已启用")
+
+        // Simulate the next app launch: the system status has now settled to .enabled
+        let freshService = FakeLoginItemManager(status: .enabled)
+        let reconstructedManager = fixture.makeManager(service: freshService)
+        reconstructedManager.reconcileAtLaunch()
+
+        XCTAssertTrue(reconstructedManager.shouldLaunchAtLogin)
+        XCTAssertEqual(reconstructedManager.helperText, "已启用")
+        XCTAssertNil(reconstructedManager.lastErrorSummary)
+    }
+
+    func testRegisterErrorStillShowsStatusNotEnabled() {
+        // When register() throws an error, the manager must NOT show
+        // "已启用" and must preserve the error.
+        let fixture = LaunchAtLoginTestFixture()
+        defer { fixture.cleanup() }
+        let service = FakeLoginItemManager(status: .notFound)
+        service.registerError = NSError(
+            domain: "SMAppServiceErrorDomain",
+            code: kSMErrorServiceUnavailable
+        )
+        let manager = fixture.makeManager(service: service)
+
+        manager.setLaunchAtLogin(true)
+
+        XCTAssertEqual(service.registerCallCount, 1)
+        XCTAssertFalse(manager.shouldLaunchAtLogin)
+        XCTAssertNotNil(manager.lastErrorSummary)
+    }
+
+    // MARK: - Cover install / reinstall scenarios
+
+    func testCoverInstallKeepsStatusAfterRegistration() throws {
+        // Simulate a cover install: create a manager with a valid registration,
+        // then recreate the manager with the same identity and status.
+        let fixture = LaunchAtLoginTestFixture()
+        defer { fixture.cleanup() }
+        fixture.defaults.set(true, forKey: fixture.preferenceKey)
+        try fixture.storeRegisteredIdentity(fixture.currentIdentity)
+        let service = FakeLoginItemManager(status: .enabled)
+        let manager = fixture.makeManager(service: service)
+
+        // Simulate a cover install restart: the stored identity matches
+        // the current identity and the system reports .enabled.
+        manager.reconcileAtLaunch()
+
+        XCTAssertTrue(manager.shouldLaunchAtLogin)
+        XCTAssertEqual(manager.helperText, "已启用")
+        XCTAssertEqual(service.unregisterCallCount, 0)
+        XCTAssertEqual(service.registerCallCount, 0)
+        XCTAssertNil(manager.lastErrorSummary)
+    }
+
+    func testCoverInstallWithNotFoundAfterRegistrationTrustsRegistration() throws {
+        // After a cover install where SMAppService still reports .notFound,
+        // the reconciliation triggers re-registration. Since the original
+        // status was .notFound, a successful register() call is trusted and
+        // the UI shows .enabled even if the system status lags.
+        let fixture = LaunchAtLoginTestFixture()
+        defer { fixture.cleanup() }
+        fixture.defaults.set(true, forKey: fixture.preferenceKey)
+        try fixture.storeRegisteredIdentity(fixture.currentIdentity)
+        let service = FakeLoginItemManager(status: .notFound)
+        let manager = fixture.makeManager(service: service)
+
+        manager.reconcileAtLaunch()
+
+        // Registration succeeded (no error), original status was .notFound,
+        // so the manager trusts the registration and shows .enabled.
+        XCTAssertTrue(manager.shouldLaunchAtLogin)
+        XCTAssertEqual(manager.helperText, "已启用")
+        XCTAssertEqual(service.unregisterCallCount, 1)
+        XCTAssertEqual(service.registerCallCount, 1)
     }
 }
 
