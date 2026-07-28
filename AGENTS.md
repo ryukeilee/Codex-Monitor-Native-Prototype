@@ -6,17 +6,31 @@ This repository is a macOS 14+ menu bar app built with Swift 6 and Swift Package
 
 Primary app code lives in `Sources/CodexMonitorNative` and is split by responsibility:
 
-- `App/` for app lifecycle and status bar wiring
-- `Core/` for quota refresh, scheduling, snapshots, and providers
-- `UI/` for SwiftUI views and formatting helpers
-- `Shared/` for shared models and state
-- `System/` for platform integrations such as sleep/wake and launch-at-login
+- `App/` — app lifecycle, `@main` entry point (`CodexMonitorNativeApp.swift`), status bar wiring, popover controller, and widget timeline bridge
+- `Core/` — quota refresh, scheduling, snapshot persistence, Codex RPC discovery, and providers (real/mock)
+- `UI/` — SwiftUI popover views, metallic panel decorative components, reactor visualization, formatting helpers, interaction policy, and self-check snapshot
+- `Shared/` — shared models (`AppState`, `WidgetDisplayState`), data source protocols, quota decision/status types, health diagnostic, and widget presentation helpers
+- `System/` — platform integrations: single-instance arbitration, installation identity and handoff, launch-at-login, sleep/wake, network reachability, system clock monitoring, and Codex auth boundary observer
 
-Widget extension sources live in `Sources/CodexMonitorWidgetExtension`.
+Widget extension source lives in `Sources/CodexMonitorWidgetExtension/CodexMonitorWidget.swift`.
 
-Tests live in `Tests/CodexMonitorNativeTests`. Runtime assets and entitlements are in `Assets/`. Local packaging and run helpers are in `script/`. Manual verification guidance lives in `VERIFICATION.md` and `QA_CHECKLIST.md`. Built app bundles are emitted to `dist/`; treat `dist/` and `.build/` as generated output, not source.
+Tests live in `Tests/CodexMonitorNativeTests` (currently 501 tests, 0 failures). Runtime assets and entitlements are in `Assets/`. Local packaging and run helpers are in `script/`. Manual verification guidance lives in `VERIFICATION.md` and `QA_CHECKLIST.md`. Implementation plans live in `docs/superpowers/plans/`. Pi agent worktree sessions are tracked in `.claude/worktrees/`. Built app bundles are emitted to `dist/`; treat `dist/`, `.build/`, and `build/` as generated output, not source.
 
-The Xcode widget target directly compiles selected app sources from `Core/`, `Shared/`, and `UI/`; the authoritative list is the widget target's Sources build phase in `CodexMonitorWidgetExtension.xcodeproj/project.pbxproj`, not the SwiftPM target declaration. Keep listed files compatible with both compilation contexts, and update the Xcode project when a shared Widget dependency moves or is added. Preserve decoding compatibility for persisted app and Widget payloads unless an explicit migration is part of the task.
+The Xcode widget target directly compiles selected app sources; the authoritative list is the widget target's Sources build phase in `CodexMonitorWidgetExtension.xcodeproj/project.pbxproj`, not the SwiftPM target declaration. Currently it includes files from:
+
+| Source file | Module area |
+|---|---|
+| `CodexMonitorWidget.swift` | Widget extension |
+| `WidgetDisplayState.swift` | Shared |
+| `QuotaSnapshot.swift` | Core |
+| `QuotaDataSource.swift` | Shared |
+| `QuotaRefreshStatus.swift` | Shared |
+| `RealQuotaHealthDiagnostic.swift` | Shared |
+| `StatusPopoverFormatting.swift` | UI |
+| `MechanicalEnergyCore.swift` | UI |
+| `WidgetPresentation.swift` | Shared |
+
+Keep listed files compatible with both compilation contexts (SwiftPM for the app target, Xcode for the widget extension), and update the Xcode project when a shared Widget dependency moves or is added. Preserve decoding compatibility for persisted app and Widget payloads unless an explicit migration is part of the task.
 
 ## Product Invariants
 
@@ -31,7 +45,7 @@ Unless a task explicitly changes the product contract:
 
 - `swift build -c debug`: build the app for local development
 - `swift build -c release`: build the release binary
-- `swift test`: run the full XCTest suite
+- `swift test`: run the full XCTest suite (currently 501 tests)
 - `swift test --filter <TestType-or-method>`: run the smallest relevant XCTest subset while iterating
 - `./script/build_and_run.sh`: build, package, sign locally, and launch the app bundle
 - `./script/build_and_run.sh --debug`: build and launch the packaged app under LLDB
@@ -39,7 +53,18 @@ Unless a task explicitly changes the product contract:
 - `./script/build_and_run.sh --logs`: stream app process logs for manual debugging
 - `./script/build_and_run.sh --telemetry`: stream app subsystem telemetry logs
 
-For real quota data, the machine must have a `codex` executable that supports `codex app-server`, or `CODEX_BIN` / `CODEX_EXECUTABLE` must point to it. The app uses the command's default stdio transport and must not assume a `--stdio` flag exists. Use `CODEX_MONITOR_FORCE_MOCK=1` for deterministic mock data; the success and failure QA overrides are `CODEX_MONITOR_FORCE_REFRESH_SUCCESS=1` and `CODEX_MONITOR_FORCE_REFRESH_FAILURE=1`. The packaging script also builds the widget extension when `CodexMonitorWidgetExtension.xcodeproj` is present.
+Optional environment variables for the build script:
+- `BUILD_CONFIGURATION=debug|release` — build configuration override (default: debug)
+- `INSTALL_APP_PATH=/path/to/App.app` — override default install target
+
+For real quota data, the machine must have a `codex` executable that supports `codex app-server`, or `CODEX_BIN` / `CODEX_EXECUTABLE` must point to it. The app uses the command's default stdio transport and must not assume a `--stdio` flag exists.
+
+Mock/QA overrides:
+- `CODEX_MONITOR_FORCE_MOCK=1` — deterministic mock data
+- `CODEX_MONITOR_FORCE_REFRESH_SUCCESS=1` — force refresh success path
+- `CODEX_MONITOR_FORCE_REFRESH_FAILURE=1` — force refresh failure path
+
+The packaging script also builds the widget extension when `CodexMonitorWidgetExtension.xcodeproj` is present.
 
 ## Coding Style & Naming Conventions
 
@@ -49,7 +74,23 @@ No formatter or linter is currently checked in, so keep diffs small and style-co
 
 ## Testing and Definition of Done
 
-Use XCTest in `Tests/CodexMonitorNativeTests`. Name test files after the production type, and use method names like `testFailedRefreshKeepsLastSuccessfulSnapshot`. Add or update behavior-focused tests for changes to refresh and RPC handling, account/session boundary handling, persistence and migrations, scheduling and resource lifecycles, shared presentation logic, Widget state, or popover behavior. Account-bound cache changes must cover matching identity, missing or malformed identity, account/session changes, and identity changes during an in-flight refresh. Do not use source-string assertions or artifact existence alone as proof of UI behavior.
+Use XCTest in `Tests/CodexMonitorNativeTests`. Name test files after the production type, and use method names like `testFailedRefreshKeepsLastSuccessfulSnapshot`. The current test suite (501 tests) covers the following areas:
+
+| Test area | Representative test files |
+|---|---|
+| Refresh & RPC | `QuotaRefreshServiceTests`, `RealQuotaProviderTests`, `CodexAppServerProtocolTests`, `CodexExecutableResolverTests` |
+| Account/session boundary | `CodexAuthBoundaryObserverTests`, `CodexAuthIdentityReaderTests`, `QuotaAccountBoundaryTestSupport` |
+| Persistence & state | `AppStateTests`, `QuotaSnapshotTests` (via provider tests), `AppInstallationAuthorityTests` |
+| Scheduling & lifecycle | `RefreshSchedulerTests`, `SleepWakeObserverTests`, `SystemClockObserverTests`, `NetworkReachabilityObserverTests` |
+| Single-instance arbitration | `SingleInstanceCoordinatorTests`, `AppDelegateLifecycleTests` |
+| Launch-at-login | `LaunchAtLoginManagerTests` |
+| UI presentation | `StatusPopoverFormattingTests`, `StatusPopoverBehaviorTests`, `StatusSelfCheckSnapshotTests`, `MechanicalEnergyCoreLayoutTests` |
+| Widget state & timeline | `WidgetPresentationTests`, `WidgetTimelineBridgeTests` |
+| Reset credits | `ResetCreditsDetailProviderTests` |
+| Deterministic fault scenarios | `DeterministicFaultScenarioTests` |
+| Quota decision logic | `QuotaDecisionTests` |
+
+Add or update behavior-focused tests for changes in these areas. Account-bound cache changes must cover matching identity, missing or malformed identity, account/session changes, and identity changes during an in-flight refresh. Do not use source-string assertions or artifact existence alone as proof of UI behavior.
 
 Run the narrowest relevant test while iterating. Before handing off code changes, run `swift test` and `swift build -c debug`. Also run `./script/build_and_run.sh --verify` for packaging, signing, installed-app lifecycle, entitlement, or widget integration changes; note that this command stops the existing app and replaces the installed bundle. For visible menu bar, popover, or widget changes, follow the relevant checks in `QA_CHECKLIST.md` and report every manual check not performed. If a required gate cannot run, report the reason and the exact unverified gate.
 
@@ -62,8 +103,12 @@ Run the narrowest relevant test while iterating. Before handing off code changes
 
 ## Commit & Pull Request Guidelines
 
-Recent history mixes concise imperative subjects with conventional prefixes such as `fix:` and `feat:`. Prefer short, specific commit titles, for example `fix: preserve cached snapshot on auth failure`. PRs should explain the user-visible behavior change, list verification commands run, and include screenshots when menu bar or popover UI changes.
+Recent history mixes concise imperative subjects with conventional prefixes such as `fix:`, `feat:`, and chore-like descriptions. Prefer short, specific commit titles, for example `fix: preserve cached snapshot on auth failure`. PRs should explain the user-visible behavior change, list verification commands run, and include screenshots when menu bar or popover UI changes.
 
 ## Security & Configuration Tips
 
 Never commit credentials, tokens, raw account/session identifiers, auth-file contents, or local account data. Persist or log only the minimum non-reversible identity material required for account-bound cache safety. Keep Codex executable overrides in environment variables, and validate failure paths with `CODEX_MONITOR_FORCE_REFRESH_SUCCESS=1` or `CODEX_MONITOR_FORCE_REFRESH_FAILURE=1` during manual QA. Do not commit generated app bundles, Widget products, or local signing artifacts.
+
+## Pi & Worktree Context
+
+This project uses Pi coding agent with `.claude/worktrees/` for isolated worktree sessions (currently: `icon-fix`, `real-quota-migration`, `stability-hardening`). Each worktree corresponds to a separate Pi agent session with its own branch and scratch state. Treat `.claude/` as a generated/working directory — do not track in version control (included in `.gitignore`). Implementation plans for larger feature work live under `docs/superpowers/plans/` in markdown format with task-level checklists.
