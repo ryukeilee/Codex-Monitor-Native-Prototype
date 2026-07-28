@@ -6,11 +6,11 @@ This repository is a macOS 14+ menu bar app built with Swift 6 and Swift Package
 
 Primary app code lives in `Sources/CodexMonitorNative` and is split by responsibility:
 
-- `App/` — app lifecycle, `@main` entry point (`CodexMonitorNativeApp.swift`), status bar wiring, popover controller, and widget timeline bridge
+- `App/` — app lifecycle and `@main` entry point (`CodexMonitorNativeApp.swift`), `AppDelegate` NSApplication delegate with single-instance ownership claiming, installation identity revalidation, popover/activation lifecycle, status bar wiring, popover controller, and widget timeline bridge
 - `Core/` — quota refresh, scheduling, snapshot persistence, Codex RPC discovery, and providers (real/mock)
 - `UI/` — SwiftUI popover views, metallic panel decorative components, reactor visualization, formatting helpers, interaction policy, and self-check snapshot
-- `Shared/` — shared models (`AppState`, `WidgetDisplayState`), data source protocols, quota decision/status types, health diagnostic, and widget presentation helpers
-- `System/` — platform integrations: single-instance arbitration, installation identity and handoff, launch-at-login, sleep/wake, network reachability, system clock monitoring, and Codex auth boundary observer
+- `Shared/` — shared models (`AppState`, `WidgetDisplayState`), data source protocols, quota decision/status types, health diagnostic (`RealQuotaHealthDiagnostic`), OSLog subsystem/category definitions (`AppLogger`), and widget presentation helpers
+- `System/` — platform integrations: single-instance arbitration (`SingleInstanceCoordinator`), installation identity and authority (`AppInstallationIdentity` + `AppInstallationAuthority`), launch-at-login, sleep/wake, network reachability, system clock monitoring, and Codex auth boundary observer
 
 Widget extension source lives in `Sources/CodexMonitorWidgetExtension/CodexMonitorWidget.swift`.
 
