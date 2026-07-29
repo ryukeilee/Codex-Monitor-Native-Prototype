@@ -65,7 +65,7 @@ final class StatusBarController {
 
     private func updateTitle(with presentationSnapshot: QuotaPresentationSnapshot) {
         let snapshot = presentationSnapshot.snapshot
-        let status = presentationSnapshot.status
+        let status = presentationSnapshot.effectiveStatus(at: .now)
         let title: String
 
         switch status {

@@ -33,7 +33,7 @@ struct QuotaSummaryView: View {
                     ForEach(Array(quotaItems.enumerated()), id: \.element.id) { indexedItem in
                         QuotaGaugeView(
                             item: indexedItem.element,
-                            status: presentationSnapshot.status,
+                            status: presentationSnapshot.effectiveStatus(at: .now),
                             accessibilitySortPriority: Double(quotaItems.count - indexedItem.offset)
                         )
                     }
@@ -66,7 +66,7 @@ struct QuotaSummaryView: View {
     private var quotaItems: [StatusPopoverFormatting.QuotaWindowDisplayItem] {
         StatusPopoverFormatting.quotaWindowDisplayItems(
             snapshot: presentationSnapshot.snapshot,
-            status: presentationSnapshot.status
+            status: presentationSnapshot.effectiveStatus(at: .now)
         )
     }
 
@@ -80,7 +80,7 @@ struct QuotaSummaryView: View {
     private var resetCreditsSummary: StatusPopoverFormatting.ResetCreditsSummary? {
         StatusPopoverFormatting.resetCreditsSummary(
             snapshot: presentationSnapshot.snapshot,
-            status: presentationSnapshot.status
+            status: presentationSnapshot.effectiveStatus(at: .now)
         )
     }
 

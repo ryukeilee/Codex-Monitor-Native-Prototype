@@ -44,8 +44,11 @@ struct StatusPopoverView: View {
 
     private var isPanelActive: Bool { presentationState.isPanelActive }
     private var presentationSnapshot: QuotaPresentationSnapshot { appState.presentationSnapshot }
+    private var effectiveStatus: QuotaRefreshStatus {
+        presentationSnapshot.effectiveStatus(at: .now)
+    }
     private var refreshControlState: StatusPopoverAccessibilityContract.ControlState {
-        StatusPopoverAccessibilityContract.refreshControlState(for: presentationSnapshot.status)
+        StatusPopoverAccessibilityContract.refreshControlState(for: effectiveStatus)
     }
 
     var body: some View {
@@ -85,7 +88,7 @@ struct StatusPopoverView: View {
     private var quotaLayoutSignal: StatusPopoverFormatting.QuotaWindowLayoutSignal {
         StatusPopoverFormatting.quotaWindowLayoutSignal(
             snapshot: presentationSnapshot.snapshot,
-            status: presentationSnapshot.status,
+            status: effectiveStatus,
             columns: 2
         )
     }
@@ -133,7 +136,7 @@ struct StatusPopoverView: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
-            if presentationSnapshot.status == .refreshing {
+            if effectiveStatus == .refreshing {
                 ProgressView()
                     .controlSize(.small)
                     .tint(MetallicPalette.redBright)
@@ -152,11 +155,13 @@ struct StatusPopoverView: View {
     }
 
     private var statusLine: String {
-        StatusPopoverFormatting.titleSummary(for: presentationSnapshot.status)
+        StatusPopoverFormatting.titleSummary(for: effectiveStatus)
     }
 
     private var refreshTimeText: String {
-        presentationSnapshot.snapshot.refreshedAt.formatted(date: .omitted, time: .shortened)
+        let refreshDate = presentationSnapshot.lastSuccessAt
+            ?? presentationSnapshot.snapshot.refreshedAt
+        return refreshDate.formatted(date: .omitted, time: .shortened)
     }
 
     private var launchAtLoginBinding: Binding<Bool> {
@@ -347,17 +352,17 @@ struct StatusPopoverView: View {
             lastSuccess: presentationSnapshot.lastSuccessAt,
             lastAttempt: presentationSnapshot.lastAttemptAt,
             dataSource: presentationSnapshot.snapshot.dataSource,
-            status: presentationSnapshot.status,
+            status: effectiveStatus,
             showsSourceStatus: hasDisplayableSourceStatus
         )
     }
 
     private var hasDisplayableSourceStatus: Bool {
-        presentationSnapshot.snapshot.dataSource == .real || presentationSnapshot.status == .demoMode
+        presentationSnapshot.snapshot.dataSource == .real || effectiveStatus == .demoMode
     }
 
     private var supportLine: String? {
-        switch presentationSnapshot.status {
+        switch effectiveStatus {
         case .refreshing:
             return "正在刷新，先显示当前快照"
         case .networkFailed, .authRequired, .parseFailed:
@@ -381,7 +386,7 @@ struct StatusPopoverView: View {
 
     private var refreshSummaryLine: String? {
         StatusPopoverFormatting.freshnessSummary(
-            for: presentationSnapshot.status,
+            for: effectiveStatus,
             isUsingCachedSnapshot: appState.isUsingCachedSnapshot
         )
     }
