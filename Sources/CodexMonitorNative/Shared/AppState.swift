@@ -123,7 +123,6 @@ final class AppState: ObservableObject {
     var isRefreshing: Bool { status == .refreshing }
     var isUsingCachedSnapshot: Bool { realQuotaHealth.isUsingCachedSnapshot }
     var hasScheduledFreshnessTask: Bool { taskResources.freshnessTask != nil }
-    var hasScheduledTemporalTask: Bool { taskResources.freshnessTask != nil }
     var hasManagedRefreshTask: Bool { taskResources.refreshTask != nil }
 
     var refreshSchedulingState: RefreshSchedulingState {

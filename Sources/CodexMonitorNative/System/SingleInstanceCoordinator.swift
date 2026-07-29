@@ -881,7 +881,7 @@ final class SingleInstanceCoordinator {
     }
 
     private func tryLockAgain(_ descriptor: Int32) -> LockRetryResult {
-        if flock(descriptor, LOCK_EX | LOCK_NB) == 0 {
+        if codexMonitorFlock(descriptor, LOCK_EX | LOCK_NB) == 0 {
             return .acquired
         }
 
@@ -950,7 +950,7 @@ private struct SingleInstanceNamespace: Sendable {
 
         do {
             try validatePrivateLockFile(descriptor)
-            if flock(descriptor, LOCK_EX | LOCK_NB) == 0 {
+            if codexMonitorFlock(descriptor, LOCK_EX | LOCK_NB) == 0 {
                 return .acquired(descriptor)
             }
 
@@ -977,7 +977,7 @@ private struct SingleInstanceNamespace: Sendable {
 
         do {
             try validatePrivateLockFile(descriptor)
-            if flock(descriptor, LOCK_EX | LOCK_NB) == 0 {
+            if codexMonitorFlock(descriptor, LOCK_EX | LOCK_NB) == 0 {
                 return .acquired(descriptor)
             }
             let code = errno

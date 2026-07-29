@@ -383,7 +383,10 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         if let eventWindow = event.window {
             let screenPoint = eventWindow.convertPoint(toScreen: location)
             let localPoint = popoverWindow.convertPoint(fromScreen: screenPoint)
-            return !popoverWindow.contentView!.bounds.contains(localPoint)
+            guard let contentView = popoverWindow.contentView else {
+                return true
+            }
+            return !contentView.bounds.contains(localPoint)
         }
 
         return true

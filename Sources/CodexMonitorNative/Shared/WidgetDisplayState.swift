@@ -6,7 +6,7 @@ import OSLog
 // Darwin's `flock` function collides with its imported `flock` structure in
 // Swift, so bind the C symbol under an unambiguous name.
 @_silgen_name("flock")
-private func codexMonitorFlock(_ fileDescriptor: CInt, _ operation: CInt) -> CInt
+func codexMonitorFlock(_ fileDescriptor: CInt, _ operation: CInt) -> CInt
 
 private enum PersistenceLog {
     static let logger = Logger(subsystem: "com.ryukeilee.CodexMonitorNativePrototype", category: "Persistence")
@@ -692,12 +692,14 @@ enum WidgetDisplayStateStore {
                 try? fileManager.removeItem(at: temporaryURL)
             }
             try data.write(to: temporaryURL, options: .atomic)
+            let writeURL: URL
             if fileManager.fileExists(atPath: url.path) {
-                _ = try fileManager.replaceItemAt(url, withItemAt: temporaryURL)
+                writeURL = (try fileManager.replaceItemAt(url, withItemAt: temporaryURL)) ?? url
             } else {
                 try fileManager.moveItem(at: temporaryURL, to: url)
+                writeURL = url
             }
-            guard let readback = try? Data(contentsOf: url), readback == data, envelopeRevision(readback) == revision else {
+            guard let readback = try? Data(contentsOf: writeURL), readback == data, envelopeRevision(readback) == revision else {
                 PersistenceLog.logger.error("Widget state write verification failed at revision \(revision); restoring trusted backup")
                 if let current = currentData { try? current.write(to: url, options: .atomic) } else { try? fileManager.removeItem(at: url) }
                 return
