@@ -569,16 +569,17 @@ enum WidgetDisplayStateStore {
         return .placeholder
     }
 
-    static func save(_ state: WidgetDisplayState, fileManager: FileManager = .default) {
+    @discardableResult
+    static func save(_ state: WidgetDisplayState, fileManager: FileManager = .default) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         guard let transactionLock = acquireTransactionLock(fileManager: fileManager) else {
             PersistenceLog.logger.error("Cannot acquire widget state transaction lock; save was skipped")
-            return
+            return false
         }
         defer { transactionLock.release() }
 
-        saveUnlocked(state, fileManager: fileManager)
+        return saveUnlocked(state, fileManager: fileManager)
     }
 
     private static func acquireTransactionLock(fileManager: FileManager) -> WidgetStateTransactionLock? {
@@ -614,10 +615,11 @@ enum WidgetDisplayStateStore {
         return WidgetStateTransactionLock(fileDescriptor: fileDescriptor)
     }
 
-    private static func saveUnlocked(_ state: WidgetDisplayState, fileManager: FileManager) {
+    @discardableResult
+    private static func saveUnlocked(_ state: WidgetDisplayState, fileManager: FileManager) -> Bool {
         guard isSupported(state) else {
             PersistenceLog.logger.error("Cannot persist widget state from unsupported snapshot schemaV\(state.snapshot.schemaVersion)")
-            return
+            return false
         }
 
         let url = stateURL(fileManager: fileManager)
@@ -630,7 +632,7 @@ enum WidgetDisplayStateStore {
             let currentData = try? Data(contentsOf: url)
             if let current = currentData, containsNewerPersistenceVersion(current) {
                 PersistenceLog.logger.error("Cannot overwrite widget state written by a newer persistence version")
-                return
+                return false
             }
             let currentState = currentData.flatMap {
                 decodeEnvelope($0) ?? decodeLegacyState($0)
@@ -650,25 +652,43 @@ enum WidgetDisplayStateStore {
                     && !newBoundary.matches(currentBoundary)
             } ?? false
             if let currentState {
-                if (currentState.snapshot.dataSource == .real
-                        && state.snapshot.dataSource != .real
-                        && !explicitlyInvalidatesRealSnapshot) ||
-                    (!explicitlyInvalidatesRealSnapshot
-                        && !crossesAccountBoundary
-                        && state.savedAt < currentState.savedAt) ||
-                    (state.snapshot.dataSource == .real
-                        && currentState.snapshot.dataSource == .real
-                        && !crossesAccountBoundary
-                        && state.snapshot.refreshedAt < currentState.snapshot.refreshedAt) {
-                    PersistenceLog.logger.info("Ignored older widget state write savedAt=\(state.savedAt.timeIntervalSince1970, format: .fixed(precision: 0))")
-                    return
+                // Block non-real writes over real data unless explicit invalidation
+                if currentState.snapshot.dataSource == .real
+                    && state.snapshot.dataSource != .real
+                    && !explicitlyInvalidatesRealSnapshot {
+                    PersistenceLog.logger.info("Ignored widget state write: non-real over real without explicit invalidation")
+                    return false
+                }
+                // Block real writes that are older than the current real snapshot.
+                // Use refreshedAt (semantic timestamp) for real data.
+                if state.snapshot.dataSource == .real
+                    && currentState.snapshot.dataSource == .real
+                    && !crossesAccountBoundary
+                    && state.snapshot.refreshedAt < currentState.snapshot.refreshedAt {
+                    PersistenceLog.logger.info("Ignored older real widget state write refreshedAt=\(state.snapshot.refreshedAt.timeIntervalSince1970, format: .fixed(precision: 0))")
+                    return false
+                }
+                // Block older non-real writes (use savedAt as ordering key for
+                // non-real states where refreshedAt is not semantically meaningful).
+                if state.snapshot.dataSource != .real
+                    && currentState.snapshot.dataSource != .real
+                    && state.savedAt < currentState.savedAt {
+                    PersistenceLog.logger.info("Ignored older non-real widget state write savedAt=\(state.savedAt.timeIntervalSince1970, format: .fixed(precision: 0))")
+                    return false
+                }
+                // Block mock writes over real data
+                if state.snapshot.dataSource != .real
+                    && currentState.snapshot.dataSource == .real
+                    && !explicitlyInvalidatesRealSnapshot {
+                    PersistenceLog.logger.info("Ignored mock widget state write over real data")
+                    return false
                 }
             }
 
             let currentRevision = currentData.flatMap { envelopeRevision($0) } ?? 0
             guard currentRevision < UInt64.max else {
                 PersistenceLog.logger.error("Cannot persist widget state: revision reached UInt64.max")
-                return
+                return false
             }
             let revision = currentRevision + 1
             let envelope = try PersistenceEnvelope(value: state, revision: revision)
@@ -681,31 +701,47 @@ enum WidgetDisplayStateStore {
                 try current.write(to: backupURL, options: .atomic)
                 guard let backupReadback = try? Data(contentsOf: backupURL), backupReadback == current else {
                     PersistenceLog.logger.error("Widget state backup verification failed; primary was not replaced")
-                    return
+                    return false
                 }
             }
             let temporaryURL = url.appendingPathExtension("tmp-\(UUID().uuidString)")
             defer {
-                // A failed replace/move must not leave one orphan per refresh.
-                // On success the temporary path no longer exists, so this stays
-                // harmless while making every failure path self-cleaning.
                 try? fileManager.removeItem(at: temporaryURL)
             }
             try data.write(to: temporaryURL, options: .atomic)
-            let writeURL: URL
+
+            // Write to the final destination.
+            // Use replaceItemAt when the file exists (preserves inode for file
+            // coordination), otherwise moveItem.
             if fileManager.fileExists(atPath: url.path) {
-                writeURL = (try fileManager.replaceItemAt(url, withItemAt: temporaryURL)) ?? url
+                let writeURL: URL
+                do {
+                    writeURL = try fileManager.replaceItemAt(url, withItemAt: temporaryURL) ?? url
+                } catch {
+                    PersistenceLog.logger.error("Widget state replaceItemAt threw: \(error.localizedDescription, privacy: .public); trying remove+move")
+                    try fileManager.removeItem(at: url)
+                    try fileManager.moveItem(at: temporaryURL, to: url)
+                    writeURL = url
+                }
+                guard let readback = try? Data(contentsOf: writeURL), readback == data, envelopeRevision(readback) == revision else {
+                    PersistenceLog.logger.error("Widget state write verification failed at revision \(revision); restoring backup")
+                    try? fileManager.removeItem(at: writeURL)
+                    if let current = currentData { try? current.write(to: url, options: .atomic) }
+                    return false
+                }
             } else {
                 try fileManager.moveItem(at: temporaryURL, to: url)
-                writeURL = url
+                guard let readback = try? Data(contentsOf: url), readback == data, envelopeRevision(readback) == revision else {
+                    PersistenceLog.logger.error("Widget state write verification failed at revision \(revision); rolling back")
+                    try? fileManager.removeItem(at: url)
+                    if let current = currentData { try? current.write(to: url, options: .atomic) }
+                    return false
+                }
             }
-            guard let readback = try? Data(contentsOf: writeURL), readback == data, envelopeRevision(readback) == revision else {
-                PersistenceLog.logger.error("Widget state write verification failed at revision \(revision); restoring trusted backup")
-                if let current = currentData { try? current.write(to: url, options: .atomic) } else { try? fileManager.removeItem(at: url) }
-                return
-            }
+            return true
         } catch {
             PersistenceLog.logger.error("Failed to persist widget state: \(error.localizedDescription, privacy: .public)")
+            return false
         }
     }
 
@@ -828,6 +864,28 @@ enum WidgetDisplayStateStore {
 
     static func lockURL(fileManager: FileManager = .default) -> URL {
         stateURL(fileManager: fileManager).appendingPathExtension("lock")
+    }
+
+    /// Cleans up stale backup and corrupt files, preserving only the current
+    /// primary widget state file. Call at app startup to prevent stale backups
+    /// from being misinterpreted as fresh data.
+    static func cleanCache(fileManager: FileManager = .default) {
+        let url = stateURL(fileManager: fileManager)
+        let backupURL = url.appendingPathExtension("backup")
+        let corruptURL = url.appendingPathExtension("corrupt")
+
+        // Remove corrupt files
+        if fileManager.fileExists(atPath: corruptURL.path) {
+            try? fileManager.removeItem(at: corruptURL)
+        }
+
+        // Remove backup only if primary exists and is valid
+        if fileManager.fileExists(atPath: url.path) {
+            if let primaryData = try? Data(contentsOf: url),
+               (decodeEnvelope(primaryData) != nil || decodeLegacyState(primaryData) != nil) {
+                try? fileManager.removeItem(at: backupURL)
+            }
+        }
     }
 
     private final class WidgetStateTransactionLock {

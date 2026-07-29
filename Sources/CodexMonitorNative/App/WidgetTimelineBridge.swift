@@ -4,14 +4,15 @@ import WidgetKit
 
 @MainActor
 final class WidgetTimelineBridge {
-    private let saveState: @MainActor (WidgetDisplayState) -> Void
+    private let saveState: @MainActor (WidgetDisplayState) -> Bool
     private let reloadTimelines: @MainActor () -> Void
     private var cancellables = Set<AnyCancellable>()
     private var lastPropagatedState: WidgetDisplayState?
+    private var hasWrittenInitialState = false
 
     init(
         appState: AppState,
-        saveState: @escaping @MainActor (WidgetDisplayState) -> Void = { WidgetDisplayStateStore.save($0) },
+        saveState: @escaping @MainActor (WidgetDisplayState) -> Bool = { WidgetDisplayStateStore.save($0) },
         reloadTimelines: @escaping @MainActor () -> Void = {
             WidgetCenter.shared.reloadTimelines(ofKind: CodexMonitorWidgetConstants.kind)
         }
@@ -49,11 +50,17 @@ final class WidgetTimelineBridge {
         let stateChanged = lastPropagatedState?.isEquivalent(to: state) != true
 
         if stateChanged {
-            saveState(state)
-            lastPropagatedState = state
+            let saveSuccess = saveState(state)
+            if saveSuccess {
+                lastPropagatedState = state
+                hasWrittenInitialState = true
+            } else {
+                AppLogger.snapshot.error("Widget state save failed; not reloading timelines with stale data")
+                return
+            }
         }
 
-        guard stateChanged || requiresTemporalReload else {
+        guard stateChanged || (requiresTemporalReload && hasWrittenInitialState) else {
             return
         }
 

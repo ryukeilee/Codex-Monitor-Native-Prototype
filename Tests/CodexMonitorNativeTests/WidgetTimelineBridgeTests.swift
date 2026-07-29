@@ -16,7 +16,7 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         let appState = AppState(snapshotStore: store, refreshService: service)
         var savedStates: [WidgetDisplayState] = []
         var reloadCount = 0
-        let bridge = WidgetTimelineBridge(appState: appState, saveState: { savedStates.append($0) }, reloadTimelines: { reloadCount += 1 })
+        let bridge = WidgetTimelineBridge(appState: appState, saveState: { savedStates.append($0); return true }, reloadTimelines: { reloadCount += 1 })
         savedStates.removeAll()
         reloadCount = 0
 
@@ -38,7 +38,7 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         let appState = AppState(snapshotStore: SnapshotStore(defaults: defaults, key: "snapshot"), refreshService: service)
         var savedStates: [WidgetDisplayState] = []
         var reloadCount = 0
-        let bridge = WidgetTimelineBridge(appState: appState, saveState: { savedStates.append($0) }, reloadTimelines: { reloadCount += 1 })
+        let bridge = WidgetTimelineBridge(appState: appState, saveState: { savedStates.append($0); return true }, reloadTimelines: { reloadCount += 1 })
         savedStates.removeAll()
         reloadCount = 0
 
@@ -66,7 +66,7 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         var reloadCount = 0
         let bridge = WidgetTimelineBridge(
             appState: appState,
-            saveState: { savedStates.append($0) },
+            saveState: { savedStates.append($0); return true },
             reloadTimelines: { reloadCount += 1 }
         )
         savedStates.removeAll()
@@ -1025,7 +1025,7 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         var savedStates: [WidgetDisplayState] = []
         let bridge = WidgetTimelineBridge(
             appState: appState,
-            saveState: { savedStates.append($0) },
+            saveState: { savedStates.append($0); return true },
             reloadTimelines: {}
         )
 
@@ -1054,7 +1054,7 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         var reloadCount = 0
         let bridge = WidgetTimelineBridge(
             appState: appState,
-            saveState: { savedStates.append($0) },
+            saveState: { savedStates.append($0); return true },
             reloadTimelines: { reloadCount += 1 }
         )
 
@@ -1088,7 +1088,7 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         var reloadCount = 0
         let bridge = WidgetTimelineBridge(
             appState: appState,
-            saveState: { savedStates.append($0) },
+            saveState: { savedStates.append($0); return true },
             reloadTimelines: { reloadCount += 1 }
         )
         savedStates.removeAll()
@@ -1125,7 +1125,7 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         var reloadCount = 0
         let bridge = WidgetTimelineBridge(
             appState: appState,
-            saveState: { savedStates.append($0) },
+            saveState: { savedStates.append($0); return true },
             reloadTimelines: { reloadCount += 1 }
         )
         savedStates.removeAll()
@@ -1174,6 +1174,7 @@ final class WidgetTimelineBridgeTests: XCTestCase {
                 if $0.snapshot == refreshed, $0.status == .success {
                     finalStateSaved.fulfill()
                 }
+            return true
             },
             reloadTimelines: {
                 if let state = savedStates.last {
@@ -1245,6 +1246,7 @@ final class WidgetTimelineBridgeTests: XCTestCase {
                    !$0.snapshot.resetCreditDetails.isEmpty {
                     finalStateSaved.fulfill()
                 }
+            return true
             },
             reloadTimelines: {}
         )
@@ -1302,6 +1304,7 @@ final class WidgetTimelineBridgeTests: XCTestCase {
                    $0.snapshot.resetCreditDetails.isEmpty {
                     finalStateSaved.fulfill()
                 }
+            return true
             },
             reloadTimelines: {}
         )
@@ -1355,6 +1358,7 @@ final class WidgetTimelineBridgeTests: XCTestCase {
                 if $0.snapshot == refreshed, $0.status == .success {
                     finalStateSaved.fulfill()
                 }
+            return true
             },
             reloadTimelines: { reloadCount += 1 }
         )
@@ -1407,6 +1411,7 @@ final class WidgetTimelineBridgeTests: XCTestCase {
                 if $0.snapshot == initial, $0.status == .networkFailed {
                     finalStateSaved.fulfill()
                 }
+            return true
             },
             reloadTimelines: { reloadCount += 1 }
         )
@@ -1453,6 +1458,7 @@ final class WidgetTimelineBridgeTests: XCTestCase {
                 if $0.snapshot == initial, $0.status == .networkFailed {
                     finalStateSaved.fulfill()
                 }
+            return true
             },
             reloadTimelines: {}
         )

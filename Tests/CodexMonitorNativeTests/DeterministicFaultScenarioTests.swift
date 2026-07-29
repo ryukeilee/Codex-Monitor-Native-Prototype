@@ -478,7 +478,7 @@ private final class ScenarioWorld {
 
         let bridge = WidgetTimelineBridge(
             appState: state,
-            saveState: { [widgetRecorder] in widgetRecorder.save($0) },
+            saveState: { [widgetRecorder] in widgetRecorder.save($0); return true },
             reloadTimelines: { [widgetRecorder] in widgetRecorder.reload() }
         )
         self.appState = state

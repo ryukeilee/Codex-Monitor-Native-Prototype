@@ -105,7 +105,7 @@ final class AppDelegateLifecycleTests: XCTestCase {
         var reloadCount = 0
         let bridge = WidgetTimelineBridge(
             appState: appState,
-            saveState: { savedStates.append($0) },
+            saveState: { savedStates.append($0); return true },
             reloadTimelines: { reloadCount += 1 }
         )
         savedStates.removeAll()

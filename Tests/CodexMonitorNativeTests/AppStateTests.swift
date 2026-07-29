@@ -1258,7 +1258,7 @@ final class AppStateTests: XCTestCase {
         var reloadCount = 0
         let bridge = WidgetTimelineBridge(
             appState: appState,
-            saveState: { widgetStates.append($0) },
+            saveState: { widgetStates.append($0); return true },
             reloadTimelines: { reloadCount += 1 }
         )
         widgetStates.removeAll()
@@ -1948,7 +1948,7 @@ final class AppStateTests: XCTestCase {
         var reloadCount = 0
         let bridge = WidgetTimelineBridge(
             appState: appState,
-            saveState: { savedStates.append($0) },
+            saveState: { savedStates.append($0); return true },
             reloadTimelines: { reloadCount += 1 }
         )
         savedStates.removeAll()
