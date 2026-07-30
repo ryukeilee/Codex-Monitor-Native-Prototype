@@ -168,6 +168,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         let statusBarController = StatusBarController(appState: state)
         let widgetTimelineBridge = WidgetTimelineBridge(appState: state)
+        // Force an immediate sync of the restored app state to the shared
+        // widget persistence store and reload widget timelines. This ensures
+        // the widget always starts with the latest quota data even when the
+        // Combine subscription was set up after the initial state was published.
+        widgetTimelineBridge.forceSync()
         AppLogger.statusBar.info("Status bar controller created")
 
         statusBarController.setTarget(self, action: #selector(togglePopover(_:)))

@@ -6,6 +6,7 @@ import WidgetKit
 final class WidgetTimelineBridge {
     private let saveState: @MainActor (WidgetDisplayState) -> Bool
     private let reloadTimelines: @MainActor () -> Void
+    private weak var appState: AppState?
     private var cancellables = Set<AnyCancellable>()
     private var lastPropagatedState: WidgetDisplayState?
     private var hasWrittenInitialState = false
@@ -19,6 +20,7 @@ final class WidgetTimelineBridge {
     ) {
         self.saveState = saveState
         self.reloadTimelines = reloadTimelines
+        self.appState = appState
 
         appState.$stateEvent
             .sink { [weak self] stateEvent in
@@ -31,6 +33,24 @@ final class WidgetTimelineBridge {
     /// overlapping termination and ownership-handoff paths.
     func stop() {
         cancellables.removeAll()
+    }
+
+    /// Forces an immediate save of the current app state to the shared widget
+    /// store and reloads all widget timelines. Unlike the regular Combine-driven
+    /// propagation, this bypasses the `isEquivalent(to:)` deduplication check so
+    /// the widget always sees the latest state after a forced sync (e.g. on app
+    /// startup or after an identity change).
+    func forceSync() {
+        guard let appState else { return }
+        let state = appState.presentationSnapshot
+        guard saveState(state) else {
+            AppLogger.snapshot.error("Widget state force-sync save failed; not reloading timelines")
+            return
+        }
+        lastPropagatedState = state
+        hasWrittenInitialState = true
+        reloadTimelines()
+        AppLogger.snapshot.info("Widget state force-synced: status=\(state.status.rawValue, privacy: .public) weekly=\(state.snapshot.weeklyQuotaPercent)%")
     }
 
     private func propagate(_ event: AppStateEvent) {

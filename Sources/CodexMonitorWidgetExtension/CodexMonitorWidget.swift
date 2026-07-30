@@ -6,6 +6,16 @@ struct CodexMonitorWidgetEntry: TimelineEntry {
     let state: WidgetDisplayState
 }
 
+/// The maximum acceptable age (in seconds) for a widget state to be considered
+/// current. Data saved or refreshed longer ago than this is rejected and the
+/// placeholder is used instead, preventing the widget from displaying stale
+/// quota snapshots.
+///
+/// This is set to the passive revalidation interval (60 min) which matches the
+/// widget's own timeline refresh cadence when the data is stale, ensuring the
+/// widget always shows reasonably recent data.
+private let widgetStateMaxAge: TimeInterval = WidgetTimelinePlan.passiveRevalidationInterval
+
 struct CodexMonitorWidgetProvider: TimelineProvider {
     func placeholder(in context: Context) -> CodexMonitorWidgetEntry {
         CodexMonitorWidgetEntry(date: .now, state: .placeholder)
@@ -15,7 +25,8 @@ struct CodexMonitorWidgetProvider: TimelineProvider {
         in context: Context,
         completion: @escaping (CodexMonitorWidgetEntry) -> Void
     ) {
-        completion(CodexMonitorWidgetEntry(date: .now, state: WidgetDisplayStateStore.load()))
+        let state = freshWidgetState()
+        completion(CodexMonitorWidgetEntry(date: .now, state: state))
     }
 
     func getTimeline(
@@ -23,12 +34,34 @@ struct CodexMonitorWidgetProvider: TimelineProvider {
         completion: @escaping (Timeline<CodexMonitorWidgetEntry>) -> Void
     ) {
         let now = Date.now
-        let state = WidgetDisplayStateStore.load()
+        let state = freshWidgetState()
         let plan = state.timelinePlan(startingAt: now)
         let entries = plan.entryDates.map {
             CodexMonitorWidgetEntry(date: $0, state: state)
         }
         completion(Timeline(entries: entries, policy: .after(plan.reloadAfter)))
+    }
+
+    /// Loads the widget state from the shared App Group file and verifies it
+    /// is fresh enough to display. If the state is too old, the placeholder
+    /// (not-connected) is returned so the widget shows "--" instead of stale
+    /// quota data.
+    private func freshWidgetState() -> WidgetDisplayState {
+        let state = WidgetDisplayStateStore.load()
+        // For real data sources, reject snapshots that have not been refreshed
+        // within the acceptable age window. Non-real states (placeholder, mock)
+        // are always accepted as-is.
+        guard state.snapshot.dataSource == .real else { return state }
+
+        let freshnessReference = max(
+            state.snapshot.refreshedAt.timeIntervalSince1970,
+            state.savedAt.timeIntervalSince1970
+        )
+        let age = Date.now.timeIntervalSince1970 - freshnessReference
+        guard age.isFinite, age >= 0, age < widgetStateMaxAge else {
+            return .placeholder
+        }
+        return state
     }
 }
 

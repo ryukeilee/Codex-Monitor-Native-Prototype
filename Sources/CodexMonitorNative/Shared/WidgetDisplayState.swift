@@ -866,24 +866,32 @@ enum WidgetDisplayStateStore {
         stateURL(fileManager: fileManager).appendingPathExtension("lock")
     }
 
-    /// Cleans up stale backup and corrupt files, preserving only the current
-    /// primary widget state file. Call at app startup to prevent stale backups
-    /// from being misinterpreted as fresh data.
+    /// Cleans up stale backup and corrupt files. Removes the backup
+    /// unconditionally on app startup because the app always writes fresh
+    /// data via `WidgetTimelineBridge.forceSync()`.
     static func cleanCache(fileManager: FileManager = .default) {
         let url = stateURL(fileManager: fileManager)
         let backupURL = url.appendingPathExtension("backup")
         let corruptURL = url.appendingPathExtension("corrupt")
 
-        // Remove corrupt files
+        // Remove corrupt files unconditionally
         if fileManager.fileExists(atPath: corruptURL.path) {
             try? fileManager.removeItem(at: corruptURL)
         }
 
-        // Remove backup only if primary exists and is valid
+        // Remove backup unconditionally
+        if fileManager.fileExists(atPath: backupURL.path) {
+            try? fileManager.removeItem(at: backupURL)
+        }
+
+        // Remove primary if it is unreadable or has unsupported schema
         if fileManager.fileExists(atPath: url.path) {
-            if let primaryData = try? Data(contentsOf: url),
-               (decodeEnvelope(primaryData) != nil || decodeLegacyState(primaryData) != nil) {
-                try? fileManager.removeItem(at: backupURL)
+            if let primaryData = try? Data(contentsOf: url) {
+                if decodeEnvelope(primaryData) == nil && decodeLegacyState(primaryData) == nil {
+                    try? fileManager.removeItem(at: url)
+                }
+            } else {
+                try? fileManager.removeItem(at: url)
             }
         }
     }
