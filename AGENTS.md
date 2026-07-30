@@ -53,6 +53,8 @@ Unless a task explicitly changes the product contract:
 - `./script/build_and_run.sh --logs`: stream app process logs for manual debugging
 - `./script/build_and_run.sh --telemetry`: stream app subsystem telemetry logs
 
+The packaging script also builds the widget extension when `CodexMonitorWidgetExtension.xcodeproj` is present.
+
 Optional environment variables for the build script:
 - `BUILD_CONFIGURATION=debug|release` — build configuration override (default: debug)
 - `INSTALL_APP_PATH=/path/to/App.app` — override default install target
@@ -64,7 +66,38 @@ Mock/QA overrides:
 - `CODEX_MONITOR_FORCE_REFRESH_SUCCESS=1` — force refresh success path
 - `CODEX_MONITOR_FORCE_REFRESH_FAILURE=1` — force refresh failure path
 
-The packaging script also builds the widget extension when `CodexMonitorWidgetExtension.xcodeproj` is present.
+
+
+## Widget Extension Signing & Registration
+
+The macOS Widget Extension must be signed with a development or distribution certificate (not ad-hoc) and **must include `com.apple.security.app-sandbox`** in its entitlements. The entitlements file is `Assets/CodexMonitorWidgetExtension.entitlements`. Without sandbox, PlugInKit (pkd) rejects the plugin with:
+
+```
+pkd: rejecting; Ignoring mis-configured plugin at [...CodexMonitorWidgetExtension.appex]: plug-ins must be sandboxed
+```
+
+When this happens, the widget does not appear in the "Edit Widgets" panel and chronod never discovers it. The build script always signs the widget with the configured `WIDGET_CODESIGN_IDENTITY` (default: Apple Development) and `--entitlements` pointing to the canonical entitlements file.
+
+### Troubleshooting Widget Registration
+
+If the widget is missing from the widget gallery after `--verify`:
+
+1. Check system logs for pkd rejection:
+   ```bash
+   log show --predicate 'sender contains "pkd" AND message contains "CodexMonitorWidgetExtension"' --last 10m --style compact
+   ```
+2. Verify the widget's signed entitlements:
+   ```bash
+   codesign -d --entitlements :- /Applications/CodexMonitorNative.app/Contents/PlugIns/CodexMonitorWidgetExtension.appex
+   ```
+3. If the app fails to launch with "App installation validation failed closed", clear the stored installation identity and retry:
+   ```bash
+   defaults delete com.ryukeilee.CodexMonitorNativePrototype "codex.monitor.native.preferredInstallation.v1"
+   ```
+4. Confirm chronod recognizes the widget:
+   ```bash
+   log show --predicate 'message contains "CodexMonitorQuotaWidget" AND message contains "reload: succeeded"' --last 10m --style compact
+   ```
 
 ## Coding Style & Naming Conventions
 

@@ -1050,7 +1050,7 @@ verify_installed_app() {
     sleep 0.2
   done
   [[ -n "$running_pid" ]] || fail_step "校验运行实例" "启动后未找到 $APP_NAME 进程。" \
-    "执行 ./script/build_and_run.sh --logs 查看启动日志后重试"
+    "执行 ./script/build_and_run.sh --logs 查看启动日志；如日志提示 'App installation validation failed closed'，执行 'defaults delete com.ryukeilee.CodexMonitorNativePrototype \"codex.monitor.native.preferredInstallation.v1\"' 清除旧安装身份后重试"
 
   local running_command
   running_command="$(ps -p "$running_pid" -o command= | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
