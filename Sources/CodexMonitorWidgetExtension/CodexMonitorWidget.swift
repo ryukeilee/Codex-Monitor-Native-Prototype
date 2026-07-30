@@ -46,6 +46,15 @@ struct CodexMonitorWidgetProvider: TimelineProvider {
     /// is fresh enough to display. If the state is too old, the placeholder
     /// (not-connected) is returned so the widget shows "--" instead of stale
     /// quota data.
+    ///
+    /// The freshness reference is `savedAt` — the local timestamp when the
+    /// host app wrote the shared file — rather than `refreshedAt` (the server
+    /// timestamp), because `refreshedAt` may be ahead of the Mac clock by a
+    /// few seconds and would cause the age check to fail, forcing the widget
+    /// to show placeholder for otherwise valid data. `savedAt` is always a
+    /// recent local time when the host app is actively writing, so it is the
+    /// safer forward-edge staleness guard. A small clock-skew tolerance is
+    /// applied for negative age (data written slightly in the local future).
     private func freshWidgetState() -> WidgetDisplayState {
         let state = WidgetDisplayStateStore.load()
         // For real data sources, reject snapshots that have not been refreshed
@@ -53,12 +62,8 @@ struct CodexMonitorWidgetProvider: TimelineProvider {
         // are always accepted as-is.
         guard state.snapshot.dataSource == .real else { return state }
 
-        let freshnessReference = max(
-            state.snapshot.refreshedAt.timeIntervalSince1970,
-            state.savedAt.timeIntervalSince1970
-        )
-        let age = Date.now.timeIntervalSince1970 - freshnessReference
-        guard age.isFinite, age >= 0, age < widgetStateMaxAge else {
+        let age = Date.now.timeIntervalSince1970 - state.savedAt.timeIntervalSince1970
+        guard age.isFinite, age > -widgetTimestampSkewTolerance, age < widgetStateMaxAge else {
             return .placeholder
         }
         return state

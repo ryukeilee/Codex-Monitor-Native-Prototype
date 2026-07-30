@@ -492,6 +492,13 @@ struct WidgetDisplayState: Codable, Equatable {
 /// existing widget payloads remain source- and wire-compatible.
 typealias QuotaPresentationSnapshot = WidgetDisplayState
 
+/// Maximum clock skew tolerance (in seconds) for comparing widget-state timestamps
+/// between the server (refreshedAt), the local writer (savedAt), and the widget
+/// extension reader. Without this tolerance a server clock that is even slightly
+/// ahead of the Mac can cause the widget to reject valid data and show placeholder
+/// for the entire freshness window.
+let widgetTimestampSkewTolerance: TimeInterval = 120
+
 enum WidgetDisplayStateStore {
     private static let encoder = JSONEncoder()
     private static let decoder = JSONDecoder()
