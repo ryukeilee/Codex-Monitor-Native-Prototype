@@ -240,11 +240,12 @@ final class RefreshSchedulerTests: XCTestCase {
         XCTAssertEqual(scheduler.nextFireAt, firstRetry)
         XCTAssertEqual(scheduler.nextReason, .failureBackoff)
 
+        // Timer-driven and non-recovery triggers stay inside the backoff window.
         for trigger in [
             AppState.RefreshTrigger.scheduled,
-            .wake,
-            .networkRestored,
             .networkChanged,
+            .temporalBoundary,
+            .systemClockChange,
             .accountBoundaryChanged
         ] {
             scheduler.requestRefresh(trigger)
@@ -272,8 +273,7 @@ final class RefreshSchedulerTests: XCTestCase {
         let secondRetry = firstRetry.addingTimeInterval(10 * 60)
         XCTAssertEqual(scheduler.nextFireAt, secondRetry)
 
-        scheduler.requestRefresh(.wake)
-        scheduler.requestRefresh(.networkRestored)
+        scheduler.requestRefresh(.scheduled)
         clock.advance(to: secondRetry.addingTimeInterval(-1))
         let callCountBeforeSecondRetry = await recorder.callCount()
         XCTAssertEqual(callCountBeforeSecondRetry, 1)
@@ -282,6 +282,61 @@ final class RefreshSchedulerTests: XCTestCase {
         await recorder.waitForCall(2)
         let finalBackoffCallCount = await recorder.callCount()
         XCTAssertEqual(finalBackoffCallCount, 2)
+        scheduler.stop()
+    }
+
+    func testWakeAndNetworkRestoredBypassFailureBackoffWhileOtherTriggersDefer() async {
+        let base = Date(timeIntervalSince1970: 5_000)
+        let clock = ManualRefreshSchedulerClock(now: base)
+        let gate = RefreshActionGate()
+        let scheduler = RefreshScheduler(clock: clock) { trigger in
+            await gate.perform(trigger)
+        }
+        let snapshot = quotaSnapshot(refreshedAt: base)
+
+        scheduler.start()
+        scheduler.updateSchedule(with: schedulingState(
+            snapshot: snapshot,
+            at: base,
+            status: .networkFailed,
+            lastSuccessAt: base,
+            lastAttemptAt: base,
+            failureCount: 1,
+            backoffInterval: 5 * 60
+        ))
+
+        // Non-recovery triggers remain deferred inside the failure backoff window.
+        for trigger in [
+            AppState.RefreshTrigger.scheduled,
+            .networkChanged,
+            .temporalBoundary,
+            .systemClockChange,
+            .accountBoundaryChanged
+        ] {
+            scheduler.requestRefresh(trigger)
+        }
+        let deferredCallCount = await gate.callCount()
+        XCTAssertEqual(deferredCallCount, 0)
+
+        // Environment-recovery signals bypass the backoff so fresh data is
+        // restored promptly after wake or network recovery.
+        scheduler.requestRefresh(.networkRestored)
+        await gate.waitForCall(1)
+        let recoveredTriggers = await gate.triggers()
+        XCTAssertEqual(recoveredTriggers, [.networkRestored])
+
+        // A wake intent arriving while the recovery refresh is in flight
+        // coalesces into the active request instead of a second physical call.
+        scheduler.requestRefresh(.wake)
+        XCTAssertEqual(scheduler.coalescedTriggerCount, 1)
+
+        await gate.releaseNext()
+        await gate.waitForCompletion(1)
+        await waitForSchedulerToBecomeIdle(scheduler)
+
+        let settledTriggers = await gate.triggers()
+        XCTAssertEqual(settledTriggers, [.networkRestored])
+        XCTAssertEqual(scheduler.coalescedTriggerCount, 1)
         scheduler.stop()
     }
 

@@ -398,7 +398,21 @@ final class RefreshScheduler {
 }
 
 private extension AppState.RefreshTrigger {
+    /// Requests that must attempt an immediate refresh even inside a failure
+    /// backoff window. Manual requests are user-initiated. Wake and
+    /// network-restored are environment-recovery signals: the failure that
+    /// created the backoff (a dead path or a suspended system) may already be
+    /// gone, and deferring the recovery refresh would keep stale or failed
+    /// state on screen for the entire backoff window. Timer-driven and other
+    /// automatic triggers keep respecting the backoff to avoid dense retry
+    /// loops against an unavailable source.
     var bypassesFailureBackoff: Bool {
-        self == .manual
+        switch self {
+        case .manual, .wake, .networkRestored:
+            return true
+        case .scheduled, .networkChanged, .temporalBoundary,
+             .systemClockChange, .accountBoundaryChanged:
+            return false
+        }
     }
 }
