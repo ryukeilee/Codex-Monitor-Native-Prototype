@@ -40,9 +40,20 @@ final class WidgetTimelineBridge {
     /// propagation, this bypasses the `isEquivalent(to:)` deduplication check so
     /// the widget always sees the latest state after a forced sync (e.g. on app
     /// startup or after an identity change).
+    ///
+    /// The Combine subscription delivers the current state synchronously on
+    /// subscription, so a fresh launch normally propagates the restored state
+    /// before this call runs. That propagation is skipped only when it could not
+    /// persist the state, so this call neither duplicates the startup write and
+    /// timeline reload nor leaves the widget store stale after a failed save.
     func forceSync() {
         guard let appState else { return }
         let state = appState.presentationSnapshot
+        if hasWrittenInitialState,
+           lastPropagatedState?.isEquivalent(to: state) == true {
+            AppLogger.snapshot.info("Widget state already propagated; skipping redundant force-sync")
+            return
+        }
         guard saveState(state) else {
             AppLogger.snapshot.error("Widget state force-sync save failed; not reloading timelines")
             return

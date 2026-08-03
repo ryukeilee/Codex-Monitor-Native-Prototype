@@ -1068,6 +1068,82 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         _ = bridge
     }
 
+    func testForceSyncSkipsRedundantWriteAndReloadAfterStartupPropagation() {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.widgetForceSyncDedup.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let now = Date()
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 72,
+            fiveHourQuotaPercent: 69,
+            fiveHourResetAt: now.addingTimeInterval(60 * 60),
+            refreshedAt: now,
+            dataSource: .real
+        )
+        store.saveSnapshot(snapshot)
+
+        let appState = AppState(snapshotStore: store, refreshService: WidgetBridgeMockRefreshService(snapshot: snapshot))
+        var savedStates: [WidgetDisplayState] = []
+        var reloadCount = 0
+        let bridge = WidgetTimelineBridge(
+            appState: appState,
+            saveState: { savedStates.append($0); return true },
+            reloadTimelines: { reloadCount += 1 }
+        )
+        XCTAssertEqual(savedStates.count, 1)
+        XCTAssertEqual(reloadCount, 1)
+
+        // The startup subscription already persisted the restored state; the
+        // forced sync must not duplicate the write or the timeline reload.
+        bridge.forceSync()
+
+        XCTAssertEqual(savedStates.count, 1)
+        XCTAssertEqual(reloadCount, 1)
+        _ = bridge
+    }
+
+    func testForceSyncRetriesWhenStartupPropagationSaveFailed() {
+        let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.widgetForceSyncRetry.\(UUID().uuidString)")!
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let now = Date()
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 72,
+            fiveHourQuotaPercent: 69,
+            fiveHourResetAt: now.addingTimeInterval(60 * 60),
+            refreshedAt: now,
+            dataSource: .real
+        )
+        store.saveSnapshot(snapshot)
+
+        let appState = AppState(snapshotStore: store, refreshService: WidgetBridgeMockRefreshService(snapshot: snapshot))
+        var saveAttempts = 0
+        var savedStates: [WidgetDisplayState] = []
+        var reloadCount = 0
+        let bridge = WidgetTimelineBridge(
+            appState: appState,
+            saveState: {
+                saveAttempts += 1
+                if saveAttempts == 1 { return false }
+                savedStates.append($0)
+                return true
+            },
+            reloadTimelines: { reloadCount += 1 }
+        )
+        XCTAssertEqual(saveAttempts, 1)
+        XCTAssertTrue(savedStates.isEmpty)
+        XCTAssertEqual(reloadCount, 0)
+
+        // The startup propagation could not persist the state; the forced sync
+        // retries the write and reloads timelines so the widget is not left
+        // with a stale shared file.
+        bridge.forceSync()
+
+        XCTAssertEqual(saveAttempts, 2)
+        XCTAssertEqual(savedStates.count, 1)
+        XCTAssertEqual(savedStates.last?.snapshot, snapshot)
+        XCTAssertEqual(reloadCount, 1)
+        _ = bridge
+    }
+
     func testTemporalReconciliationReloadsEquivalentWidgetStateWithoutRewritingIt() {
         let defaults = UserDefaults(suiteName: "CodexMonitorNativeTests.widgetTemporalReload.\(UUID().uuidString)")!
         let store = SnapshotStore(defaults: defaults, key: "snapshot")
