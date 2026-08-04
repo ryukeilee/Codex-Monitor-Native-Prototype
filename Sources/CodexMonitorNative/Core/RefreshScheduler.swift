@@ -167,6 +167,7 @@ final class RefreshScheduler {
     private var refreshGeneration = 0
     private var scheduleChangedWhileRefreshing = false
     private var pendingAutomaticTrigger: AppState.RefreshTrigger?
+    private var coalescedTrigger: AppState.RefreshTrigger?
 
     private(set) var nextFireAt: Date?
     private(set) var nextReason: RefreshScheduleReason?
@@ -209,6 +210,10 @@ final class RefreshScheduler {
         scheduleChangedWhileRefreshing = false
         pauseReasons.removeAll()
         pendingAutomaticTrigger = nil
+        coalescedTrigger = nil
+        coalescedTriggerCount = 0
+        previousSuccessfulSnapshot = nil
+        comparisonSnapshot = nil
         nextFireAt = nil
         nextReason = nil
         clock.cancelScheduledAction()
@@ -246,6 +251,10 @@ final class RefreshScheduler {
 
         if refreshInFlight {
             coalescedTriggerCount += 1
+            coalescedTrigger = preferredTrigger(
+                coalescedTrigger,
+                over: trigger
+            )
             AppLogger.refresh.info("Coalesced \(self.triggerName(for: trigger), privacy: .public) refresh with active adaptive request")
             return
         }
@@ -324,6 +333,7 @@ final class RefreshScheduler {
         scheduleChangedWhileRefreshing = false
         refreshGeneration &+= 1
         let expectedGeneration = refreshGeneration
+        let failureCountBeforeRefresh = latestState?.failureCount ?? 0
         let refreshAction = onRefresh
         AppLogger.refresh.info("Starting adaptive \(self.triggerName(for: trigger), privacy: .public) refresh")
 
@@ -342,8 +352,29 @@ final class RefreshScheduler {
             }
             refreshTask = nil
             refreshInFlight = false
+
+            let trailingTrigger = coalescedTrigger
+            coalescedTrigger = nil
+            if let trailingTrigger,
+               latestState?.failureCount ?? 0 > failureCountBeforeRefresh {
+                if trailingTrigger.bypassesFailureBackoff, !isPaused {
+                    // A paused scheduler (system sleep / network lost) must
+                    // not fire the retry: keep it as pending intent instead
+                    // and let resume() recreate the deadline.
+                    startRefresh(trailingTrigger)
+                    return
+                }
+                pendingAutomaticTrigger = preferredTrigger(
+                    pendingAutomaticTrigger,
+                    over: trailingTrigger
+                )
+            }
+
             if scheduleChangedWhileRefreshing {
                 scheduleChangedWhileRefreshing = false
+                scheduleNextRefreshIfPossible()
+            } else if trailingTrigger != nil,
+                      latestState?.failureCount ?? 0 > failureCountBeforeRefresh {
                 scheduleNextRefreshIfPossible()
             }
         }
@@ -373,14 +404,7 @@ final class RefreshScheduler {
     }
 
     private func triggerPriority(_ trigger: AppState.RefreshTrigger) -> Int {
-        switch trigger {
-        case .accountBoundaryChanged: return 5
-        case .networkRestored: return 4
-        case .wake: return 3
-        case .temporalBoundary, .systemClockChange: return 2
-        case .networkChanged, .scheduled: return 1
-        case .manual: return 0
-        }
+        trigger.coalescingPriority
     }
 
     private func triggerName(for trigger: AppState.RefreshTrigger) -> String {

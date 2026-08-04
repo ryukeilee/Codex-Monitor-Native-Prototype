@@ -1861,11 +1861,11 @@ final class AppStateTests: XCTestCase {
         await service.release(call: 2)
         await refreshNowTask.value
 
-        XCTAssertEqual(appState.snapshot, initial)
+        XCTAssertEqual(appState.snapshot, olderSuccess)
         XCTAssertEqual(appState.status, .networkFailed)
         XCTAssertEqual(appState.failureCount, 1)
         XCTAssertEqual(appState.backoffInterval, 300)
-        XCTAssertEqual(store.loadState()?.snapshot, initial)
+        XCTAssertEqual(store.loadState()?.snapshot, olderSuccess)
         XCTAssertEqual(store.loadState()?.status, .networkFailed)
         await assertMaxConcurrentCalls(1, for: service)
     }

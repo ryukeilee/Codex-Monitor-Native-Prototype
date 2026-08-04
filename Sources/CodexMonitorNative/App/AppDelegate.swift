@@ -129,8 +129,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AppLogger.lifecycle.info("App ready; launching in accessory mode")
 
         let snapshotStore = SnapshotStore()
-        // Clean up stale widget cache files (backup, corrupt) so the widget
-        // does not fall back to old data after a fresh app launch.
+        // Remove only quarantine artifacts before the initial state sync. The
+        // locked Widget load path retains primary/backup data for recovery if
+        // this process cannot complete the sync.
         WidgetDisplayStateStore.cleanCache()
         let refreshService = QuotaRefreshService()
         let state = AppState(

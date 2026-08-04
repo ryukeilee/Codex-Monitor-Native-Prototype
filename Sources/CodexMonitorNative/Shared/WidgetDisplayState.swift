@@ -116,6 +116,11 @@ struct WidgetDisplayState: Codable, Equatable {
     let resetCreditFooterLine: String?
     let savedAt: Date
 
+    /// In-memory marker used only when the host has observed a wall-clock
+    /// rollback. It is intentionally excluded from the persisted payload so
+    /// older app and Widget readers keep the same wire format.
+    let allowsOlderRealSnapshot: Bool
+
     private enum CodingKeys: String, CodingKey {
         case snapshot
         case status
@@ -133,7 +138,8 @@ struct WidgetDisplayState: Codable, Equatable {
         lastAttemptAt: Date?,
         effectiveFiveHourResetAt: Date?,
         resetCreditFooterLine: String? = nil,
-        savedAt: Date = .now
+        savedAt: Date = .now,
+        allowsOlderRealSnapshot: Bool = false
     ) -> WidgetDisplayState {
         WidgetDisplayState(
             snapshot: snapshot,
@@ -145,7 +151,8 @@ struct WidgetDisplayState: Codable, Equatable {
                 for: snapshot,
                 now: savedAt
             ),
-            savedAt: savedAt
+            savedAt: savedAt,
+            allowsOlderRealSnapshot: allowsOlderRealSnapshot
         )
     }
 
@@ -156,7 +163,8 @@ struct WidgetDisplayState: Codable, Equatable {
         lastAttemptAt: Date?,
         effectiveFiveHourResetAt: Date?,
         resetCreditFooterLine: String?,
-        savedAt: Date
+        savedAt: Date,
+        allowsOlderRealSnapshot: Bool = false
     ) {
         self.snapshot = snapshot
         self.status = status
@@ -165,6 +173,7 @@ struct WidgetDisplayState: Codable, Equatable {
         self.effectiveFiveHourResetAt = effectiveFiveHourResetAt
         self.resetCreditFooterLine = resetCreditFooterLine
         self.savedAt = savedAt
+        self.allowsOlderRealSnapshot = allowsOlderRealSnapshot
     }
 
     init(from decoder: Decoder) throws {
@@ -181,7 +190,8 @@ struct WidgetDisplayState: Codable, Equatable {
                 for: snapshot,
                 now: savedAt
             ),
-            savedAt: savedAt
+            savedAt: savedAt,
+            allowsOlderRealSnapshot: false
         )
     }
 
@@ -477,13 +487,17 @@ struct WidgetDisplayState: Codable, Equatable {
         return dates
     }
 
+    static func == (lhs: WidgetDisplayState, rhs: WidgetDisplayState) -> Bool {
+        lhs.snapshot == rhs.snapshot &&
+        lhs.status == rhs.status &&
+        lhs.lastSuccessAt == rhs.lastSuccessAt &&
+        lhs.lastAttemptAt == rhs.lastAttemptAt &&
+        lhs.effectiveFiveHourResetAt == rhs.effectiveFiveHourResetAt &&
+        lhs.resetCreditFooterLine == rhs.resetCreditFooterLine
+    }
+
     func isEquivalent(to other: WidgetDisplayState) -> Bool {
-        snapshot == other.snapshot &&
-        status == other.status &&
-        lastSuccessAt == other.lastSuccessAt &&
-        lastAttemptAt == other.lastAttemptAt &&
-        effectiveFiveHourResetAt == other.effectiveFiveHourResetAt &&
-        resetCreditFooterLine == other.resetCreditFooterLine
+        self == other && allowsOlderRealSnapshot == other.allowsOlderRealSnapshot
     }
 }
 
@@ -671,6 +685,7 @@ enum WidgetDisplayStateStore {
                 if state.snapshot.dataSource == .real
                     && currentState.snapshot.dataSource == .real
                     && !crossesAccountBoundary
+                    && !state.allowsOlderRealSnapshot
                     && state.snapshot.refreshedAt < currentState.snapshot.refreshedAt {
                     PersistenceLog.logger.info("Ignored older real widget state write refreshedAt=\(state.snapshot.refreshedAt.timeIntervalSince1970, format: .fixed(precision: 0))")
                     return false
@@ -873,33 +888,23 @@ enum WidgetDisplayStateStore {
         stateURL(fileManager: fileManager).appendingPathExtension("lock")
     }
 
-    /// Cleans up stale backup and corrupt files. Removes the backup
-    /// unconditionally on app startup because the app always writes fresh
-    /// data via `WidgetTimelineBridge.forceSync()`.
+    /// Removes only a stale quarantine artifact. The primary and backup are
+    /// deliberately left to the locked load/recovery path: either one may be
+    /// the only readable copy after a failed startup sync, and a future-format
+    /// primary must never be deleted by an older host.
     static func cleanCache(fileManager: FileManager = .default) {
-        let url = stateURL(fileManager: fileManager)
-        let backupURL = url.appendingPathExtension("backup")
-        let corruptURL = url.appendingPathExtension("corrupt")
+        lock.lock()
+        defer { lock.unlock() }
+        guard let transactionLock = acquireTransactionLock(fileManager: fileManager) else {
+            PersistenceLog.logger.error("Cannot acquire widget state transaction lock; cache cleanup was skipped")
+            return
+        }
+        defer { transactionLock.release() }
 
-        // Remove corrupt files unconditionally
+        let url = stateURL(fileManager: fileManager)
+        let corruptURL = url.appendingPathExtension("corrupt")
         if fileManager.fileExists(atPath: corruptURL.path) {
             try? fileManager.removeItem(at: corruptURL)
-        }
-
-        // Remove backup unconditionally
-        if fileManager.fileExists(atPath: backupURL.path) {
-            try? fileManager.removeItem(at: backupURL)
-        }
-
-        // Remove primary if it is unreadable or has unsupported schema
-        if fileManager.fileExists(atPath: url.path) {
-            if let primaryData = try? Data(contentsOf: url) {
-                if decodeEnvelope(primaryData) == nil && decodeLegacyState(primaryData) == nil {
-                    try? fileManager.removeItem(at: url)
-                }
-            } else {
-                try? fileManager.removeItem(at: url)
-            }
         }
     }
 

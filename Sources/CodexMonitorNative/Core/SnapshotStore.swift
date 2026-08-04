@@ -63,9 +63,10 @@ struct SnapshotStore {
         return nil
     }
 
-    func saveSnapshot(_ snapshot: QuotaSnapshot) {
+    @discardableResult
+    func saveSnapshot(_ snapshot: QuotaSnapshot) -> Bool {
         let status: QuotaRefreshStatus = snapshot.dataSource == .real ? .success : .demoMode
-        saveState(PersistedAppState(
+        return saveState(PersistedAppState(
             snapshot: snapshot,
             status: status,
             lastSuccessAt: snapshot.dataSource == .real ? snapshot.refreshedAt : nil,
@@ -74,27 +75,35 @@ struct SnapshotStore {
         ))
     }
 
-    func saveState(_ state: PersistedAppState) {
+    @discardableResult
+    func saveState(
+        _ state: PersistedAppState,
+        allowOlderRealSnapshot: Bool = false
+    ) -> Bool {
         lock.lock()
         defer { lock.unlock() }
 
         let currentData = defaults.data(forKey: key)
         guard isSupported(state) else {
             AppLogger.snapshot.error("Refused to persist app state with an unsupported schema")
-            return
+            return false
         }
         guard currentData.map(containsNewerPersistenceVersion) != true else {
             AppLogger.snapshot.error("Refused to overwrite persisted app state written by a newer persistence version")
-            return
+            return false
         }
         let current = loadEnvelope(from: currentData)
         if let current, !isSupported(current.value) {
             AppLogger.snapshot.error("Refused to overwrite persisted app state with a newer schema")
-            return
+            return false
         }
-        if let current, shouldReject(state: state, existing: current.value) {
+        if let current, shouldReject(
+            state: state,
+            existing: current.value,
+            allowOlderRealSnapshot: allowOlderRealSnapshot
+        ) {
             AppLogger.snapshot.info("Ignored persisted app state revision \(current.revision) because it is older or non-real")
-            return
+            return false
         }
 
         let currentRevision = current?.revision ?? 0
@@ -106,7 +115,7 @@ struct SnapshotStore {
         } ?? false
         guard currentRevision < UInt64.max else {
             AppLogger.snapshot.error("Cannot persist app state: revision reached UInt64.max")
-            return
+            return false
         }
         let nextRevision = currentRevision + 1
         do {
@@ -121,18 +130,20 @@ struct SnapshotStore {
                 guard defaults.data(forKey: backupKey) == currentData,
                       defaults.data(forKey: backupKey).map(isTrustedPersistenceData) == true else {
                     AppLogger.snapshot.error("Backup verification failed; primary app state was not replaced")
-                    return
+                    return false
                 }
             }
             defaults.set(data, forKey: key)
             guard let readback = defaults.data(forKey: key), readback == data, loadEnvelope(from: readback)?.revision == nextRevision else {
                 AppLogger.snapshot.error("App state write verification failed at revision \(nextRevision); restoring trusted backup")
                 if let trustedData { defaults.set(trustedData, forKey: key) } else { defaults.removeObject(forKey: key) }
-                return
+                return false
             }
             AppLogger.snapshot.info("Saved app state schemaV\(state.schemaVersion) status=\(state.status.rawValue, privacy: .public) revision=\(nextRevision)")
+            return true
         } catch {
             AppLogger.snapshot.error("Failed to persist app state: \(error.localizedDescription, privacy: .public)")
+            return false
         }
     }
 
@@ -308,7 +319,11 @@ struct SnapshotStore {
         }
     }
 
-    private func shouldReject(state: PersistedAppState, existing: PersistedAppState) -> Bool {
+    private func shouldReject(
+        state: PersistedAppState,
+        existing: PersistedAppState,
+        allowOlderRealSnapshot: Bool = false
+    ) -> Bool {
         if existing.snapshot.dataSource == .real, state.snapshot.dataSource != .real {
             return !isExplicitRealSnapshotInvalidation(state: state, existing: existing)
         }
@@ -318,7 +333,8 @@ struct SnapshotStore {
            !newBoundary.matches(existingBoundary) {
             return false
         }
-        return state.snapshot.refreshedAt < existing.snapshot.refreshedAt
+        return !allowOlderRealSnapshot
+            && state.snapshot.refreshedAt < existing.snapshot.refreshedAt
     }
 
     private func isExplicitRealSnapshotInvalidation(

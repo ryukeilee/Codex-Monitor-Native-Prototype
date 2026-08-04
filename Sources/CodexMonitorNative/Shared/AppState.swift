@@ -9,6 +9,7 @@ struct AppStateEvent: Equatable {
     let persistedState: PersistedAppState
     let presentationSnapshot: QuotaPresentationSnapshot
     let updateReason: UpdateReason
+    let allowsOlderRealSnapshot: Bool
 
     init(
         snapshot: QuotaSnapshot,
@@ -18,7 +19,8 @@ struct AppStateEvent: Equatable {
         failureCount: Int,
         effectiveFiveHourResetAt: Date?,
         savedAt: Date = .now,
-        updateReason: UpdateReason = .stateChange
+        updateReason: UpdateReason = .stateChange,
+        allowsOlderRealSnapshot: Bool = false
     ) {
         let persistedState = PersistedAppState(
             snapshot: snapshot,
@@ -35,9 +37,11 @@ struct AppStateEvent: Equatable {
             lastSuccessAt: lastSuccessAt,
             lastAttemptAt: lastAttemptAt,
             effectiveFiveHourResetAt: effectiveFiveHourResetAt,
-            savedAt: savedAt
+            savedAt: savedAt,
+            allowsOlderRealSnapshot: allowsOlderRealSnapshot
         )
         self.updateReason = updateReason
+        self.allowsOlderRealSnapshot = allowsOlderRealSnapshot
     }
 
     static let placeholder = AppStateEvent(
@@ -46,7 +50,8 @@ struct AppStateEvent: Equatable {
         lastSuccessAt: nil,
         lastAttemptAt: nil,
         failureCount: 0,
-        effectiveFiveHourResetAt: nil
+        effectiveFiveHourResetAt: nil,
+        allowsOlderRealSnapshot: false
     )
 }
 
@@ -61,6 +66,16 @@ final class AppState: ObservableObject {
         case temporalBoundary
         case systemClockChange
         case accountBoundaryChanged
+
+        var coalescingPriority: Int {
+            switch self {
+            case .accountBoundaryChanged: return 5
+            case .manual, .networkRestored: return 4
+            case .wake: return 3
+            case .temporalBoundary, .systemClockChange: return 2
+            case .networkChanged, .scheduled: return 1
+            }
+        }
     }
 
     // MARK: - Published state
@@ -105,6 +120,9 @@ final class AppState: ObservableObject {
     private let snapshotStore: SnapshotStore
     private let refreshAction: @Sendable (QuotaSnapshot) async throws -> QuotaSnapshot
     private var latestRealSnapshot: QuotaSnapshot?
+    private var stagedSuccessfulSnapshot: QuotaSnapshot?
+    private var clockRollbackObserved = false
+    private var allowsOlderRealSnapshotForCurrentRefresh = false
     private var consecutiveFailures: Int = 0
     private let defaultInterval: TimeInterval = 300
     private let staleAfterInterval: TimeInterval
@@ -118,6 +136,7 @@ final class AppState: ObservableObject {
     private var lastSettledStatus: QuotaRefreshStatus = .noSnapshot
     private var lastObservedAccountBoundary: QuotaAccountBoundary?
     private var isShutdown = false
+    private var committedRuntimeState: RuntimeStateCheckpoint?
     private(set) var networkIsReachable: Bool?
 
     var isRefreshing: Bool { status == .refreshing }
@@ -351,6 +370,7 @@ final class AppState: ObservableObject {
         _ = discardCachedSnapshotIfAccountBoundaryIsUnverified(
             currentBoundary: currentBoundary
         )
+        promoteStagedSuccessfulSnapshotIfNeeded()
         if let real = latestRealSnapshot {
             snapshot = real
         } else {
@@ -412,7 +432,8 @@ final class AppState: ObservableObject {
         guard activeRefresh == nil else {
             if pendingRefresh == nil {
                 pendingRefresh = PendingRefresh(trigger: trigger)
-            } else {
+            } else if let currentTrigger = pendingRefresh?.trigger,
+                      trigger.coalescingPriority > currentTrigger.coalescingPriority {
                 pendingRefresh?.trigger = trigger
             }
             if let waiter {
@@ -497,6 +518,7 @@ final class AppState: ObservableObject {
                 isUsingCachedSnapshot: false
             )
         } else if status == .refreshing {
+            promoteStagedSuccessfulSnapshotIfNeeded()
             if let real = latestRealSnapshot {
                 snapshot = real
             }
@@ -523,6 +545,8 @@ final class AppState: ObservableObject {
             currentBoundary: currentBoundary
         )
         let baselineSnapshot = latestRealSnapshot ?? snapshot
+        allowsOlderRealSnapshotForCurrentRefresh = clockRollbackObserved
+        clockRollbackObserved = false
         enterRefreshingState(attemptedAt: now())
         AppLogger.refresh.info("Starting \(triggerName, privacy: .public) refresh (baseline source=\(baselineSnapshot.dataSource.rawValue, privacy: .public))")
         return baselineSnapshot
@@ -552,9 +576,68 @@ final class AppState: ObservableObject {
         }
 
         latestRealSnapshot = nil
+        stagedSuccessfulSnapshot = nil
+        clockRollbackObserved = false
+        allowsOlderRealSnapshotForCurrentRefresh = false
         snapshot = .notConnected
         lastSuccessAt = nil
         return true
+    }
+
+    private func stageSuccessfulRefreshForTrailingRequest(
+        _ result: Result<QuotaSnapshot, Error>,
+        referenceDate: Date
+    ) {
+        guard case .success(let refreshed) = result,
+              refreshed.dataSource == .real else {
+            return
+        }
+
+        if let refreshedBoundary = refreshed.accountBoundary {
+            let currentBoundary = accountBoundaryProvider()
+            lastObservedAccountBoundary = currentBoundary
+            guard refreshedBoundary.matches(currentBoundary) else { return }
+            if let cachedBoundary = latestRealSnapshot?.accountBoundary,
+               !refreshedBoundary.matches(cachedBoundary) {
+                latestRealSnapshot = nil
+            }
+        } else if !allowsUnboundSnapshotsForTesting {
+            return
+        }
+
+        let isOlderThanCachedSnapshot = latestRealSnapshot.map {
+            refreshed.refreshedAt < $0.refreshedAt
+        } ?? false
+        let isPlausibleClockRollbackResult = allowsOlderRealSnapshotForCurrentRefresh
+            && abs(refreshed.refreshedAt.timeIntervalSince(referenceDate)) <= widgetTimestampSkewTolerance
+        guard !isOlderThanCachedSnapshot || isPlausibleClockRollbackResult else {
+            return
+        }
+
+        if isOlderThanCachedSnapshot {
+            // The trailing request must inherit the same one-refresh rollback
+            // allowance; otherwise its valid post-rollback result would be
+            // compared against the pre-rollback cache and discarded.
+            clockRollbackObserved = true
+        }
+        latestRealSnapshot = refreshed
+        stagedSuccessfulSnapshot = refreshed
+        AppLogger.refresh.info("Retained successful refresh as a coalesced trailing baseline")
+    }
+
+    private func promoteStagedSuccessfulSnapshotIfNeeded() {
+        guard let stagedSuccessfulSnapshot else { return }
+        guard latestRealSnapshot == stagedSuccessfulSnapshot else {
+            self.stagedSuccessfulSnapshot = nil
+            return
+        }
+
+        snapshot = stagedSuccessfulSnapshot
+        lastSuccessAt = stagedSuccessfulSnapshot.refreshedAt
+        consecutiveFailures = 0
+        failureCount = 0
+        lastErrorSummary = nil
+        self.stagedSuccessfulSnapshot = nil
     }
 
     private func finishManagedRefresh(_ result: Result<QuotaSnapshot, Error>, refreshID: UUID) {
@@ -582,8 +665,9 @@ final class AppState: ObservableObject {
         }
 
         if pendingRefresh != nil {
+            stageSuccessfulRefreshForTrailingRequest(result, referenceDate: now())
             activeRefresh = nil
-            AppLogger.refresh.info("Discarded a superseded refresh result; starting the coalesced trailing request")
+            AppLogger.refresh.info("Retained the completed refresh as the trailing request baseline")
             startPendingRefreshIfNeeded(carrying: completedRefresh.waiters)
             return
         }
@@ -649,7 +733,12 @@ final class AppState: ObservableObject {
                     )
                     return
                 }
-                if let latestRealSnapshot, refreshed.refreshedAt < latestRealSnapshot.refreshedAt {
+                let isPlausibleClockRollbackResult = allowsOlderRealSnapshotForCurrentRefresh
+                    && abs(refreshed.refreshedAt.timeIntervalSince(referenceDate)) <= widgetTimestampSkewTolerance
+                if let latestRealSnapshot,
+                   refreshed.refreshedAt < latestRealSnapshot.refreshedAt,
+                   !isPlausibleClockRollbackResult {
+                    promoteStagedSuccessfulSnapshotIfNeeded()
                     snapshot = latestRealSnapshot
                     status = isDataStale(at: referenceDate) ? .stale : .success
                     realQuotaHealth = RealQuotaHealthDiagnostic(kind: .requestSucceeded, isUsingCachedSnapshot: true)
@@ -659,6 +748,7 @@ final class AppState: ObservableObject {
                     return
                 }
                 latestRealSnapshot = refreshed
+                stagedSuccessfulSnapshot = nil
                 consecutiveFailures = 0
                 failureCount = 0
                 lastSuccessAt = refreshed.refreshedAt
@@ -671,6 +761,7 @@ final class AppState: ObservableObject {
                 scheduleTemporalCheck(referenceDate: referenceDate)
                 AppLogger.refresh.info("Real refresh succeeded: weekly=\(refreshed.weeklyQuotaPercent)% fiveHour=\(refreshed.fiveHourQuotaPercent)%")
             } else if let latestRealSnapshot {
+                promoteStagedSuccessfulSnapshotIfNeeded()
                 snapshot = latestRealSnapshot
                 status = resolvedDisplayStatus(for: lastSettledStatus, at: referenceDate)
                 realQuotaHealth = RealQuotaHealthDiagnostic(
@@ -695,6 +786,7 @@ final class AppState: ObservableObject {
     }
 
     private func applyRefreshFailure(_ error: Error, referenceDate: Date) {
+        promoteStagedSuccessfulSnapshotIfNeeded()
         consecutiveFailures += 1
         failureCount = consecutiveFailures
         let classifiedStatus = classifyError(error)
@@ -880,6 +972,10 @@ final class AppState: ObservableObject {
     func reconcileTemporalState() {
         guard !isShutdown else { return }
         let referenceDate = now()
+        if let latestRealSnapshot,
+           referenceDate < latestRealSnapshot.refreshedAt {
+            clockRollbackObserved = true
+        }
         if status == .success, isDataStale(at: referenceDate) {
             status = .stale
             lastErrorSummary = nil
@@ -997,11 +1093,94 @@ final class AppState: ObservableObject {
             failureCount: failureCount,
             effectiveFiveHourResetAt: effectiveFiveHourResetAt,
             savedAt: referenceDate,
-            updateReason: reason
+            updateReason: reason,
+            allowsOlderRealSnapshot: allowsOlderRealSnapshotForCurrentRefresh
         )
-        snapshotStore.saveState(event.persistedState)
+        guard snapshotStore.saveState(
+            event.persistedState,
+            allowOlderRealSnapshot: allowsOlderRealSnapshotForCurrentRefresh
+        ) else {
+            AppLogger.snapshot.error("App state commit was not persisted; retaining the last committed presentation")
+            restoreLastCommittedState()
+            onRefreshSchedulingStateChanged?(refreshSchedulingState)
+            return
+        }
+
+        committedRuntimeState = RuntimeStateCheckpoint(
+            snapshot: snapshot,
+            status: resolvedStatus,
+            lastSuccessAt: lastSuccessAt,
+            lastAttemptAt: lastAttemptAt,
+            failureCount: failureCount,
+            lastErrorSummary: lastErrorSummary,
+            realQuotaHealth: realQuotaHealth,
+            consecutiveFailures: consecutiveFailures,
+            backoffInterval: backoffInterval,
+            latestRealSnapshot: latestRealSnapshot,
+            lastSettledStatus: lastSettledStatus,
+            allowsOlderRealSnapshot: allowsOlderRealSnapshotForCurrentRefresh,
+            clockRollbackObserved: clockRollbackObserved
+        )
+        if resolvedStatus != .refreshing {
+            allowsOlderRealSnapshotForCurrentRefresh = false
+        }
         stateEvent = event
         onRefreshSchedulingStateChanged?(refreshSchedulingState)
+    }
+
+    private func restoreLastCommittedState() {
+        // A successful active request can be staged while a trailing request
+        // is being entered. If that transient `.refreshing` commit fails, keep
+        // the staged candidate available so a trailing failure can still
+        // promote the last known-good quota instead of losing it.
+        let stagedCandidate = stagedSuccessfulSnapshot
+        let stagedLatestSnapshot = latestRealSnapshot
+        let preserveStagedCandidate = stagedCandidate != nil
+            && stagedLatestSnapshot == stagedCandidate
+
+        if let committedRuntimeState {
+            snapshot = committedRuntimeState.snapshot
+            status = committedRuntimeState.status
+            lastSuccessAt = committedRuntimeState.lastSuccessAt
+            lastAttemptAt = committedRuntimeState.lastAttemptAt
+            failureCount = committedRuntimeState.failureCount
+            lastErrorSummary = committedRuntimeState.lastErrorSummary
+            realQuotaHealth = committedRuntimeState.realQuotaHealth
+            consecutiveFailures = committedRuntimeState.consecutiveFailures
+            backoffInterval = committedRuntimeState.backoffInterval
+            latestRealSnapshot = committedRuntimeState.latestRealSnapshot
+            stagedSuccessfulSnapshot = nil
+            lastSettledStatus = committedRuntimeState.lastSettledStatus
+            allowsOlderRealSnapshotForCurrentRefresh = committedRuntimeState.allowsOlderRealSnapshot
+            clockRollbackObserved = committedRuntimeState.clockRollbackObserved
+            if preserveStagedCandidate {
+                latestRealSnapshot = stagedLatestSnapshot
+                stagedSuccessfulSnapshot = stagedCandidate
+            }
+            return
+        }
+
+        let persisted = stateEvent.persistedState
+        snapshot = persisted.snapshot
+        status = persisted.status
+        lastSuccessAt = persisted.lastSuccessAt
+        lastAttemptAt = persisted.lastAttemptAt
+        failureCount = persisted.failureCount
+        consecutiveFailures = persisted.failureCount
+        lastErrorSummary = nil
+        realQuotaHealth = RealQuotaHealthDiagnostic(
+            kind: .waitingForFirstRequest,
+            isUsingCachedSnapshot: persisted.snapshot.dataSource == .real
+        )
+        latestRealSnapshot = persisted.snapshot.dataSource == .real ? persisted.snapshot : nil
+        stagedSuccessfulSnapshot = nil
+        lastSettledStatus = persisted.status == .refreshing ? .noSnapshot : persisted.status
+        allowsOlderRealSnapshotForCurrentRefresh = false
+        backoffInterval = backoffFor(consecutiveFailures: persisted.failureCount)
+        if preserveStagedCandidate {
+            latestRealSnapshot = stagedLatestSnapshot
+            stagedSuccessfulSnapshot = stagedCandidate
+        }
     }
 
     private func enterRefreshingState(attemptedAt: Date?) {
@@ -1084,6 +1263,22 @@ final class AppState: ObservableObject {
         ).isFresh
     }
 
+}
+
+private struct RuntimeStateCheckpoint {
+    let snapshot: QuotaSnapshot
+    let status: QuotaRefreshStatus
+    let lastSuccessAt: Date?
+    let lastAttemptAt: Date?
+    let failureCount: Int
+    let lastErrorSummary: String?
+    let realQuotaHealth: RealQuotaHealthDiagnostic
+    let consecutiveFailures: Int
+    let backoffInterval: TimeInterval
+    let latestRealSnapshot: QuotaSnapshot?
+    let lastSettledStatus: QuotaRefreshStatus
+    let allowsOlderRealSnapshot: Bool
+    let clockRollbackObserved: Bool
 }
 
 private struct TemporalSchedule {
