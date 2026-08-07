@@ -56,6 +56,161 @@ final class StatusPopoverBehaviorTests: XCTestCase {
         XCTAssertEqual(quitCount, 1)
     }
 
+    func testRefreshButtonStaysDisabledWhileStateIsRefreshingBeyondDisplayLease() async {
+        let suiteName = "CodexMonitorNativeTests.refreshLease.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        // A stale wall-clock reference makes the presentation snapshot's
+        // two-minute refreshing lease expire while the managed request is
+        // still in flight. The control must stay disabled because the true
+        // AppState status is still .refreshing: a duplicate click would be
+        // silently coalesced away instead of starting a new request.
+        let base = Date(timeIntervalSince1970: 5_000)
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        store.saveSnapshot(QuotaSnapshot(
+            weeklyQuotaPercent: 72,
+            fiveHourQuotaPercent: 60,
+            refreshedAt: base,
+            dataSource: .real,
+            accountBoundary: .testDefault
+        ))
+        let appState = AppState(
+            snapshotStore: store,
+            refreshService: SuspendedSnapshotRefreshService(),
+            now: { base },
+            accountBoundaryProvider: { .testDefault }
+        )
+        defer { appState.shutdown() }
+
+        let launchManager = makeSnapshotLaunchAtLoginManager(defaults: defaults)
+        var refreshCount = 0
+        let hostingView = NSHostingView(
+            rootView: StatusPopoverView(
+                appState: appState,
+                launchAtLoginManager: launchManager,
+                onRefresh: {
+                    refreshCount += 1
+                    appState.refresh(trigger: .manual)
+                },
+                onQuit: {}
+            )
+        )
+        hostingView.frame = NSRect(x: 0, y: 0, width: 340, height: 560)
+        let window = NSWindow(
+            contentRect: hostingView.frame,
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hostingView
+        window.makeKey()
+        hostingView.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(performCommandShortcut("r", keyCode: 15, in: window))
+        XCTAssertEqual(refreshCount, 1)
+        XCTAssertEqual(appState.status, .refreshing)
+
+        // The presentation snapshot downgrades the abandoned refresh to
+        // .stale (real data) because its display lease has expired...
+        XCTAssertEqual(
+            appState.presentationSnapshot.effectiveStatus(at: .now),
+            .stale
+        )
+        // ...but the refresh control still reflects the authoritative state.
+        XCTAssertFalse(
+            StatusPopoverAccessibilityContract.refreshControlState(for: appState.status).isEnabled
+        )
+
+        await Task.yield()
+        hostingView.layoutSubtreeIfNeeded()
+        XCTAssertFalse(performCommandShortcut("r", keyCode: 15, in: window))
+        XCTAssertEqual(refreshCount, 1)
+    }
+
+    func testRefreshFailureShowsErrorThenNextSuccessClearsItAndReenablesControl() async {
+        let suiteName = "CodexMonitorNativeTests.refreshFailureRecovery.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let initial = QuotaSnapshot(
+            weeklyQuotaPercent: 72,
+            fiveHourQuotaPercent: 60,
+            refreshedAt: .now,
+            dataSource: .real,
+            accountBoundary: .testDefault
+        )
+        store.saveSnapshot(initial)
+        let refreshed = QuotaSnapshot(
+            weeklyQuotaPercent: 80,
+            fiveHourQuotaPercent: 70,
+            refreshedAt: .now.addingTimeInterval(1),
+            dataSource: .real,
+            accountBoundary: .testDefault
+        )
+        let appState = AppState(
+            snapshotStore: store,
+            refreshService: SequenceResultRefreshService(results: [
+                .failure(MockRefreshError.simulatedFailure),
+                .success(refreshed)
+            ]),
+            accountBoundaryProvider: { .testDefault }
+        )
+        defer { appState.shutdown() }
+
+        let launchManager = makeSnapshotLaunchAtLoginManager(defaults: defaults)
+        var refreshCount = 0
+        let hostingView = NSHostingView(
+            rootView: StatusPopoverView(
+                appState: appState,
+                launchAtLoginManager: launchManager,
+                onRefresh: {
+                    refreshCount += 1
+                    appState.refresh(trigger: .manual)
+                },
+                onQuit: {}
+            )
+        )
+        hostingView.frame = NSRect(x: 0, y: 0, width: 340, height: 560)
+        let window = NSWindow(
+            contentRect: hostingView.frame,
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = hostingView
+        window.makeKey()
+        hostingView.layoutSubtreeIfNeeded()
+
+        XCTAssertTrue(performCommandShortcut("r", keyCode: 15, in: window))
+        XCTAssertEqual(refreshCount, 1)
+        for _ in 0..<100 where appState.status == .refreshing {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(appState.status, .networkFailed)
+        XCTAssertEqual(appState.lastErrorSummary, "数据源不可达")
+        XCTAssertEqual(appState.snapshot, initial)
+        XCTAssertTrue(
+            StatusPopoverAccessibilityContract.refreshControlState(for: appState.status).isEnabled
+        )
+
+        await Task.yield()
+        hostingView.layoutSubtreeIfNeeded()
+        XCTAssertTrue(performCommandShortcut("r", keyCode: 15, in: window))
+        XCTAssertEqual(refreshCount, 2)
+        for _ in 0..<100 where appState.status == .refreshing {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(appState.status, .success)
+        XCTAssertEqual(appState.snapshot, refreshed)
+        XCTAssertNil(appState.lastErrorSummary)
+        XCTAssertTrue(
+            StatusPopoverAccessibilityContract.refreshControlState(for: appState.status).isEnabled
+        )
+    }
+
     func testScrollViewportPolicyCoversExpandedAndOverflowingContent() {
         let compact = StatusPopoverFormatting.QuotaWindowLayoutSignal(
             itemTokens: ["weekly"],
@@ -490,6 +645,24 @@ private struct SuspendedSnapshotRefreshService: QuotaRefreshing {
     func refresh(basedOn currentSnapshot: QuotaSnapshot) async throws -> QuotaSnapshot {
         try await Task.sleep(for: .seconds(60))
         return currentSnapshot
+    }
+}
+
+private actor SequenceResultRefreshService: QuotaRefreshing {
+    private let results: [Result<QuotaSnapshot, Error>]
+    private var index = 0
+
+    init(results: [Result<QuotaSnapshot, Error>]) {
+        self.results = results
+    }
+
+    func refresh(basedOn currentSnapshot: QuotaSnapshot) async throws -> QuotaSnapshot {
+        guard results.indices.contains(index) else {
+            throw MockRefreshError.simulatedFailure
+        }
+        let result = results[index]
+        index += 1
+        return try result.get()
     }
 }
 

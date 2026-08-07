@@ -48,7 +48,14 @@ struct StatusPopoverView: View {
         presentationSnapshot.effectiveStatus(at: .now)
     }
     private var refreshControlState: StatusPopoverAccessibilityContract.ControlState {
-        StatusPopoverAccessibilityContract.refreshControlState(for: effectiveStatus)
+        // Use AppState's authoritative refresh status instead of the
+        // presentation snapshot's leasing reinterpretation. The snapshot may
+        // downgrade an abandoned `.refreshing` to `.stale` after its two-minute
+        // display lease, but the managed request is still in flight and a
+        // duplicate click would be silently coalesced away. Keeping the control
+        // disabled while the true state is `.refreshing` prevents a
+        // "refreshable but click does nothing" inconsistency.
+        StatusPopoverAccessibilityContract.refreshControlState(for: appState.status)
     }
 
     var body: some View {
