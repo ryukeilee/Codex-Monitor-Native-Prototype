@@ -1,6 +1,6 @@
 # Codex Monitor Native
 
-一个面向 macOS 菜单栏的 Codex 额度监视器。它以原生 SwiftUI/AppKit 方式运行，常驻菜单栏，按服务端实际返回展示 5 小时、周、月及未知时长额度窗口和数据可信度信息；仓库同时包含一个 widget extension 工程用于扩展展示。
+一个面向 macOS 菜单栏的 Codex 额度监视器。它以原生 SwiftUI/AppKit 方式运行，常驻菜单栏，按服务端实际返回展示语义明确的 5 小时、周、月额度窗口和数据可信度信息；未知时长窗口会保留在模型中但不会冒充已知额度进入界面。仓库同时包含一个 widget extension 工程用于扩展展示。
 
 仓库当前重点不是继续堆功能，而是保持这几个行为稳定可验证：
 
@@ -37,6 +37,7 @@
 - 候选必须是绝对路径、常规文件且可执行；符号链接会规范化并去重。某个自定义候选失效不会遮蔽后续可用候选，升级换址后无需重启 App。
 - App 会逐个验证候选的 app-server 初始化与 `account/rateLimits/read` 能力；只在启动失败或确定不兼容时尝试下一个候选。
 - 每次真实刷新都会在 RPC 前后读取同一 `CODEX_HOME/auth.json` 的账号与登录会话边界；持久化内容只有域分隔 SHA-256 指纹，不包含邮箱、token 或原始账号 ID。
+- Reset credit 详情请求同样读取该 `CODEX_HOME/auth.json`，并在请求前后校验其账号/会话指纹与本次额度快照一致；不一致时只降级为无详情，不会把另一账号的详情并入快照。
 - 只有当前账号与登录会话仍能确认属于该快照时，失败刷新才继续显示上次成功数据；退出登录、重新登录、切换账号或身份无法可靠确认时会清空旧真实快照并显示 `--%`。
 
 ## 菜单栏与 Popover
@@ -101,17 +102,17 @@ Popover 里有三类关键信息：
 
 当前已实现的刷新策略：
 
-- App 启动约 1 秒后会触发一次刷新。
-- 默认定时刷新间隔为 5 分钟。
-- 连续失败后会退避到 10 分钟、15 分钟。
-- 系统唤醒后会恢复调度，并在短延迟后再刷新一次。
+- App 启动后等待首个网络路径结果；路径可达时立即触发一次恢复刷新。
+- 稳定真实数据默认 15 分钟刷新一次；额度显著变化时缩短到 2 分钟，尚无真实数据时使用 5 分钟 bootstrap 周期，已知恢复/到期边界可提前触发。
+- 连续失败按 5 分钟、10 分钟、15 分钟退避；手动刷新、网络恢复、唤醒恢复和账号边界变化不继承不适用的旧退避。
+- 睡眠期间同时保留系统与网络暂停；唤醒短延迟后先重新确认网络路径，再恢复请求。
 - Popover 中点击“刷新”会触发手动刷新。
 
 失败处理原则：
 
 - 不因单次失败清空菜单栏数字。
 - 如果本地有上次成功的真实快照，就继续显示该快照。
-- 错误状态只改变状态文案、tooltip 和 Popover 说明，不改动已缓存的最后一次真实额度。
+- 非身份类错误只改变状态文案、tooltip 和 Popover 说明，不改动已缓存的最后一次真实额度；认证失效、账号/会话变化或身份不可验证时必须清除旧会话展示。
 
 ## 构建、运行与安装
 
@@ -152,7 +153,7 @@ BUILD_CONFIGURATION=release ./script/build_and_run.sh
 
 `--verify` 是本机安装验收的唯一入口：它会构建主应用和 Widget，先在安装目录旁创建唯一 staging 并校验版本、主应用与 Widget 签名及预期 App Group entitlements，再关闭旧实例并以可回滚 backup 覆盖安装。只有启动、运行路径、版本、`pluginkit` Widget 路径及跨副本验收全部通过后才删除 backup；中途失败会恢复原安装，并在原安装此前正在运行时尽可能重新启动。回滚前必须以可判错的 `pgrep`/`ps` 门禁证明所有验收进程均已退出；枚举、身份查询或 TERM/KILL 收敛失败时禁止移动当前 target 或恢复旧 App，并保留当前安装、唯一 backup 与受控工作目录。如果回滚本身因权限或文件系统错误无法完成，脚本同样不会删除唯一 backup，而会输出精确人工恢复路径。它还会验证三段顺序：安装版 owner 拒绝带开发绕过的直接 challenger、已运行的开发 owner 向首选安装移交、无开发绕过的旧 `dist` 副本用关联 token 重定向到首选安装。
 
-`INSTALL_APP_PATH` 必须是规范化绝对路径，最终名称精确为 `CodexMonitorNative.app`；脚本拒绝根目录、用户主目录、仓库根、普通目录、其他 Bundle ID、目标别名以及无法安全解析的父路径。安装目录不可写时，可用 `INSTALL_APP_PATH="$HOME/Applications/CodexMonitorNative.app"` 指定用户目录。默认 `CODESIGN_IDENTITY=-` 使用本机 ad-hoc 签名；这只证明本地产物完整性及已签入的 entitlements，不等于证书/描述文件有效，也不证明 WidgetKit 已实际加载 extension。实际运行路径由脚本的 `ps`、唯一进程和 owner record 门禁证明。需要证书签名时应显式传入唯一的 `CODESIGN_IDENTITY`，并另查 provisioning 与系统运行日志。
+`INSTALL_APP_PATH` 必须是规范化绝对路径，最终名称精确为 `CodexMonitorNative.app`；脚本拒绝根目录、用户主目录、仓库根、普通目录、其他 Bundle ID、目标别名以及无法安全解析的父路径。安装目录不可写时，可用 `INSTALL_APP_PATH="$HOME/Applications/CodexMonitorNative.app"` 指定用户目录。主应用默认 `CODESIGN_IDENTITY=-` 使用本机 ad-hoc 签名；Widget 因系统沙箱注册要求默认使用可用的 `Apple Development` 证书，可通过唯一的 `WIDGET_CODESIGN_IDENTITY` 覆盖。主应用的 ad-hoc 签名只证明本地产物完整性及已签入的 entitlements，不等于证书/描述文件有效，也不证明 WidgetKit 已实际加载 extension。实际运行路径由脚本的 `ps`、唯一进程和 owner record 门禁证明。需要主应用证书签名时应显式传入唯一的 `CODESIGN_IDENTITY`，并另查 provisioning 与系统运行日志。旧命令 `script/build-and-install.sh` 仅作为兼容入口转交同一 `--verify` 流程，避免维护第二套无回滚安装器。
 
 ### 手动指定安装路径
 

@@ -14,7 +14,7 @@ Primary app code lives in `Sources/CodexMonitorNative` and is split by responsib
 
 Widget extension source lives in `Sources/CodexMonitorWidgetExtension/CodexMonitorWidget.swift`.
 
-Tests live in `Tests/CodexMonitorNativeTests` (currently 501 tests, 0 failures). Runtime assets and entitlements are in `Assets/`. Local packaging and run helpers are in `script/`. Manual verification guidance lives in `VERIFICATION.md` and `QA_CHECKLIST.md`. Implementation plans live in `docs/superpowers/plans/`. Pi agent worktree sessions are tracked in `.claude/worktrees/`. Built app bundles are emitted to `dist/`; treat `dist/`, `.build/`, and `build/` as generated output, not source.
+Tests live in `Tests/CodexMonitorNativeTests` (currently 544 tests, 0 failures). Runtime assets and entitlements are in `Assets/`. Local packaging and run helpers are in `script/`. Manual verification guidance lives in `VERIFICATION.md` and `QA_CHECKLIST.md`. Implementation plans live in `docs/superpowers/plans/`. Pi agent worktree sessions are tracked in `.claude/worktrees/`. Built app bundles are emitted to `dist/`; treat `dist/`, `.build/`, and `build/` as generated output, not source.
 
 The Xcode widget target directly compiles selected app sources; the authoritative list is the widget target's Sources build phase in `CodexMonitorWidgetExtension.xcodeproj/project.pbxproj`, not the SwiftPM target declaration. Currently it includes files from:
 
@@ -38,14 +38,14 @@ Unless a task explicitly changes the product contract:
 
 - The menu bar title shows only a trusted weekly remaining percentage, or `--%` when none exists. Do not substitute five-hour, monthly, unknown, invalid, or mock values; during a failed refresh, the trusted weekly value from the last successful real snapshot remains valid for display.
 - A failed real refresh keeps the last successful real snapshot and surfaces the typed failure state; it must not clear or relabel cached data as fresh.
-- Cached real quota data may be restored, merged, or reused only when its validated account/session boundary matches the current Codex identity. Missing, malformed, changed, or unverifiable identity must fail closed so one account's quota is never shown for another account.
+- Cached real quota data may be restored, merged, or reused only when its validated account/session boundary matches the current Codex identity. Missing, malformed, changed, or unverifiable identity must fail closed so one account's quota is never shown for another account. Fail-closed invalidation must also be published when persistence is unavailable: a persistence write failure must not revive a real snapshot whose account/session ownership is no longer valid, and the Widget must drop old real recovery sources whenever the host explicitly invalidates them, even when the primary state file cannot be replaced or decoded.
 - The popover, status-item tooltip, and Widget derive quota windows from the shared presentation path. Keep ordering, filtering, labels, progress, reset times, and overflow behavior semantically aligned.
 
 ## Build, Test, and Development Commands
 
 - `swift build -c debug`: build the app for local development
 - `swift build -c release`: build the release binary
-- `swift test`: run the full XCTest suite (currently 501 tests)
+- `swift test`: run the full XCTest suite (currently 544 tests)
 - `swift test --filter <TestType-or-method>`: run the smallest relevant XCTest subset while iterating
 - `./script/build_and_run.sh`: build, package, sign locally, and launch the app bundle
 - `./script/build_and_run.sh --debug`: build and launch the packaged app under LLDB
@@ -107,7 +107,7 @@ No formatter or linter is currently checked in, so keep diffs small and style-co
 
 ## Testing and Definition of Done
 
-Use XCTest in `Tests/CodexMonitorNativeTests`. Name test files after the production type, and use method names like `testFailedRefreshKeepsLastSuccessfulSnapshot`. The current test suite (501 tests) covers the following areas:
+Use XCTest in `Tests/CodexMonitorNativeTests`. Name test files after the production type, and use method names like `testFailedRefreshKeepsLastSuccessfulSnapshot`. The current test suite (544 tests) covers the following areas:
 
 | Test area | Representative test files |
 |---|---|
@@ -121,6 +121,7 @@ Use XCTest in `Tests/CodexMonitorNativeTests`. Name test files after the product
 | Widget state & timeline | `WidgetPresentationTests`, `WidgetTimelineBridgeTests` |
 | Reset credits | `ResetCreditsDetailProviderTests` |
 | Deterministic fault scenarios | `DeterministicFaultScenarioTests` |
+| Refresh consistency regression | `RefreshConsistencyRegressionTests` |
 | Quota decision logic | `QuotaDecisionTests` |
 
 Add or update behavior-focused tests for changes in these areas. Account-bound cache changes must cover matching identity, missing or malformed identity, account/session changes, and identity changes during an in-flight refresh. Do not use source-string assertions or artifact existence alone as proof of UI behavior.
