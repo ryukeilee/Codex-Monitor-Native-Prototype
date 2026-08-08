@@ -426,16 +426,18 @@ private extension AppState.RefreshTrigger {
     /// backoff window. Manual requests are user-initiated. Wake and
     /// network-restored are environment-recovery signals: the failure that
     /// created the backoff (a dead path or a suspended system) may already be
-    /// gone, and deferring the recovery refresh would keep stale or failed
-    /// state on screen for the entire backoff window. Timer-driven and other
-    /// automatic triggers keep respecting the backoff to avoid dense retry
-    /// loops against an unavailable source.
+    /// gone. An account-boundary change belongs to a new identity and must not
+    /// inherit the previous account's failure delay. Deferring any of these
+    /// recovery requests would keep stale or failed state on screen for the
+    /// entire backoff window. Timer-driven and other automatic triggers keep
+    /// respecting the backoff to avoid dense retry loops against an unavailable
+    /// source.
     var bypassesFailureBackoff: Bool {
         switch self {
-        case .manual, .wake, .networkRestored:
+        case .manual, .wake, .networkRestored, .accountBoundaryChanged:
             return true
         case .scheduled, .networkChanged, .temporalBoundary,
-             .systemClockChange, .accountBoundaryChanged:
+             .systemClockChange:
             return false
         }
     }

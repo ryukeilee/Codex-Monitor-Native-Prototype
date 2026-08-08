@@ -171,20 +171,13 @@ struct CodexMonitorWidgetView: View {
             Text("数据不可用")
                 .font(.system(size: isSmall ? 11 : 13, weight: .semibold, design: .rounded))
                 .foregroundStyle(Color(red: 0.97, green: 0.91, blue: 0.84).opacity(0.55))
-            if !networkAvailable {
-                Text("网络异常")
+            if let unavailableReason = WidgetPresentation.unavailableReason(
+                for: effectiveStatus
+            ) {
+                Text(unavailableReason)
                     .font(.system(size: isSmall ? 8 : 9, weight: .medium, design: .rounded))
                     .foregroundStyle(Color.orange.opacity(0.7))
             }
-        }
-    }
-
-    private var networkAvailable: Bool {
-        switch effectiveStatus {
-        case .networkFailed, .authRequired:
-            return false
-        default:
-            return true
         }
     }
 

@@ -75,6 +75,48 @@ final class WidgetPresentationTests: XCTestCase {
         XCTAssertEqual(unavailable.gaugeProgress, 0.05)
     }
 
+    func testDisconnectedPresentationDoesNotInventRefreshTimestamp() {
+        let now = Date(timeIntervalSince1970: 1_720_000_000)
+        XCTAssertNil(WidgetDisplayState.placeholder.refreshDisplayDate(at: now))
+        XCTAssertEqual(WidgetDisplayState.placeholder.updatedLine(now: now), "更新 --")
+
+        let demoSnapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 40,
+            fiveHourQuotaPercent: 30,
+            refreshedAt: now,
+            dataSource: .mock
+        )
+        let demo = WidgetDisplayState.make(
+            snapshot: demoSnapshot,
+            status: .demoMode,
+            lastSuccessAt: nil,
+            lastAttemptAt: nil,
+            effectiveFiveHourResetAt: nil,
+            savedAt: now
+        )
+        XCTAssertEqual(demo.refreshDisplayDate(at: now), now)
+    }
+
+    func testUnavailableReasonPreservesTypedFailureState() {
+        XCTAssertEqual(
+            WidgetPresentation.unavailableReason(for: .networkFailed),
+            "网络异常"
+        )
+        XCTAssertEqual(
+            WidgetPresentation.unavailableReason(for: .authRequired),
+            "需要登录"
+        )
+        XCTAssertEqual(
+            WidgetPresentation.unavailableReason(for: .parseFailed),
+            "数据异常"
+        )
+        XCTAssertEqual(
+            WidgetPresentation.unavailableReason(for: .noSnapshot),
+            "等待同步"
+        )
+        XCTAssertNil(WidgetPresentation.unavailableReason(for: .success))
+    }
+
     func testPresentationHidesLatestCaptionAndPreservesOtherQuotaContext() {
         let latest = WidgetPresentation(
             quotaItems: [quota(id: "latest", label: "周额度", percent: 99, progress: 0.99, stateText: "最新")],

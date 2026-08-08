@@ -5,7 +5,10 @@ final class ResetCreditsDetailProviderTests: XCTestCase {
     func testFetchDetailsUsesAccessTokenWithoutAccountID() async throws {
         let authFileURL = try makeTemporaryAuthFile(contents: #"{"tokens":{"access_token":"test-access-token"}}"#)
         let requestStore = CapturedRequestStore()
-        let provider = ResetCreditsDetailProvider(authFileURL: authFileURL) { request in
+        let provider = ResetCreditsDetailProvider(
+            authFileURL: authFileURL,
+            authBoundaryReader: { _ in .testDefault }
+        ) { request in
             await requestStore.save(request)
             return (
                 Self.payloadData(),
@@ -18,7 +21,7 @@ final class ResetCreditsDetailProviderTests: XCTestCase {
             )
         }
 
-        let payload = try await provider.fetchDetails()
+        let payload = try await provider.fetchDetails(for: .testDefault)
         let capturedRequest = await requestStore.request
 
         XCTAssertEqual(payload.availableCount, 1)
@@ -30,7 +33,10 @@ final class ResetCreditsDetailProviderTests: XCTestCase {
     func testFetchDetailsSetsAccountIDHeaderWhenPresent() async throws {
         let authFileURL = try makeTemporaryAuthFile(contents: #"{"tokens":{"access_token":"test-access-token","account_id":"account-123"}}"#)
         let requestStore = CapturedRequestStore()
-        let provider = ResetCreditsDetailProvider(authFileURL: authFileURL) { request in
+        let provider = ResetCreditsDetailProvider(
+            authFileURL: authFileURL,
+            authBoundaryReader: { _ in .testDefault }
+        ) { request in
             await requestStore.save(request)
             return (
                 Self.payloadData(),
@@ -43,11 +49,82 @@ final class ResetCreditsDetailProviderTests: XCTestCase {
             )
         }
 
-        _ = try await provider.fetchDetails()
+        _ = try await provider.fetchDetails(for: .testDefault)
         let capturedRequest = await requestStore.request
 
         XCTAssertEqual(capturedRequest?.value(forHTTPHeaderField: "Authorization"), "Bearer test-access-token")
         XCTAssertEqual(capturedRequest?.value(forHTTPHeaderField: "ChatGPT-Account-ID"), "account-123")
+    }
+
+    func testDefaultAuthFileURLRespectsCodexHomeOverride() {
+        let codexHome = FileManager.default.temporaryDirectory
+            .appendingPathComponent("alternate-codex-home", isDirectory: true)
+        let url = ResetCreditsDetailProvider.defaultAuthFileURL(
+            environment: ["CODEX_HOME": codexHome.path]
+        )
+
+        XCTAssertEqual(url, codexHome.appendingPathComponent("auth.json"))
+    }
+
+    func testFetchDetailsRejectsAuthFromDifferentAccountBeforeRequest() async throws {
+        let authFileURL = try makeTemporaryAuthFile(
+            contents: #"{"tokens":{"access_token":"test-access-token"}}"#
+        )
+        let requestStore = CapturedRequestStore()
+        let provider = ResetCreditsDetailProvider(
+            authFileURL: authFileURL,
+            authBoundaryReader: { _ in .testOtherAccount }
+        ) { request in
+            await requestStore.save(request)
+            return (
+                Self.payloadData(),
+                HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!
+            )
+        }
+
+        do {
+            _ = try await provider.fetchDetails(for: .testDefault)
+            XCTFail("Expected account-bound reset detail rejection")
+        } catch let error as ResetCreditsDetailError {
+            XCTAssertEqual(error, .accountBoundaryMismatch)
+        }
+        let capturedRequest = await requestStore.request
+        XCTAssertNil(capturedRequest)
+    }
+
+    func testFetchDetailsRejectsAccountChangeDuringRequest() async throws {
+        let authFileURL = try makeTemporaryAuthFile(
+            contents: #"{"tokens":{"access_token":"test-access-token"}}"#
+        )
+        let boundaryReader = ResetDetailBoundarySequence(
+            values: [.testDefault, .testOtherAccount]
+        )
+        let provider = ResetCreditsDetailProvider(
+            authFileURL: authFileURL,
+            authBoundaryReader: { _ in boundaryReader.next() }
+        ) { request in
+            (
+                Self.payloadData(),
+                HTTPURLResponse(
+                    url: request.url!,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: nil
+                )!
+            )
+        }
+
+        do {
+            _ = try await provider.fetchDetails(for: .testDefault)
+            XCTFail("Expected account change rejection")
+        } catch let error as ResetCreditsDetailError {
+            XCTAssertEqual(error, .accountBoundaryMismatch)
+        }
     }
 
     func testParsePayloadSortsAvailableCreditsByEarliestExpiry() throws {
@@ -114,6 +191,49 @@ final class ResetCreditsDetailProviderTests: XCTestCase {
         )
     }
 
+    func testParsePayloadRejectsInvalidAvailableCounts() throws {
+        for invalidCount: Any in [true, -1, 1.5, "-2", "1.5"] {
+            let payload = try ResetCreditsDetailProvider.parsePayload(from: [
+                "available_count": invalidCount,
+                "credits": [
+                    [
+                        "status": "available",
+                        "expires_at": "2026-06-20T12:00:00Z"
+                    ]
+                ]
+            ])
+            XCTAssertNil(payload.availableCount, "Unexpected count accepted: \(invalidCount)")
+        }
+
+        let conflictingAliases = try ResetCreditsDetailProvider.parsePayload(from: [
+            "available_count": 1,
+            "availableCount": 2,
+            "credits": [
+                [
+                    "status": "available",
+                    "expires_at": "2026-06-20T12:00:00Z"
+                ]
+            ]
+        ])
+        XCTAssertNil(conflictingAliases.availableCount)
+    }
+
+    func testParsePayloadRejectsBooleanExpiry() {
+        XCTAssertThrowsError(
+            try ResetCreditsDetailProvider.parsePayload(from: [
+                "available_count": 1,
+                "credits": [
+                    [
+                        "status": "available",
+                        "expires_at": true
+                    ]
+                ]
+            ])
+        ) { error in
+            XCTAssertEqual(error as? ResetCreditsDetailError, .missingExpiresAt)
+        }
+    }
+
     func testParsePayloadThrowsWhenCreditsFieldMissing() {
         XCTAssertThrowsError(
             try ResetCreditsDetailProvider.parsePayload(from: [
@@ -159,6 +279,10 @@ final class ResetCreditsDetailProviderTests: XCTestCase {
     func testErrorDescriptionsStaySanitized() {
         XCTAssertEqual(ResetCreditsDetailError.authFileMissing.errorDescription, "auth 文件不存在")
         XCTAssertEqual(ResetCreditsDetailError.tokensMissing.errorDescription, "tokens 缺失")
+        XCTAssertEqual(
+            ResetCreditsDetailError.accountBoundaryMismatch.errorDescription,
+            "账号或登录会话与额度快照不一致"
+        )
         XCTAssertEqual(ResetCreditsDetailError.invalidJSON.errorDescription, "返回非 JSON")
         XCTAssertEqual(ResetCreditsDetailError.unexpectedStatusCode(401).errorDescription, "HTTP 状态码 401")
     }
@@ -205,5 +329,21 @@ private actor CapturedRequestStore {
 
     func save(_ request: URLRequest) {
         self.request = request
+    }
+}
+
+private final class ResetDetailBoundarySequence: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [QuotaAccountBoundary]
+
+    init(values: [QuotaAccountBoundary]) {
+        self.values = values
+    }
+
+    func next() -> QuotaAccountBoundary? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !values.isEmpty else { return nil }
+        return values.removeFirst()
     }
 }

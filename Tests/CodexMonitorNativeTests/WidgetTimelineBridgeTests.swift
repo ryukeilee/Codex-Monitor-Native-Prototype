@@ -499,6 +499,44 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: stateURL.appendingPathExtension("corrupt")), corruptData)
     }
 
+    func testWidgetStateSaveRepairsCorruptEnvelopeWithUntrustedMaxRevision() throws {
+        let groupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexMonitorNativeTests.widgetCorruptMaxRevision.\(UUID().uuidString)", isDirectory: true)
+        let fileManager = WidgetStateTestFileManager(groupURL: groupURL)
+        defer { try? FileManager.default.removeItem(at: groupURL) }
+        let stateURL = WidgetDisplayStateStore.stateURL(fileManager: fileManager)
+        let corruptState = WidgetDisplayState.make(
+            snapshot: .notConnected,
+            status: .noSnapshot,
+            lastSuccessAt: nil,
+            lastAttemptAt: nil,
+            effectiveFiveHourResetAt: nil,
+            savedAt: Date(timeIntervalSince1970: 100)
+        )
+        var corruptObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: legacyCompatibleEnvelopeData(corruptState, revision: 1)
+            ) as? [String: Any]
+        )
+        corruptObject["revision"] = NSNumber(value: UInt64.max)
+        corruptObject["checksum"] = "invalid"
+        try FileManager.default.createDirectory(at: groupURL, withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: corruptObject, options: [.sortedKeys])
+            .write(to: stateURL)
+
+        let replacement = WidgetDisplayState.make(
+            snapshot: .notConnected,
+            status: .noSnapshot,
+            lastSuccessAt: nil,
+            lastAttemptAt: Date(timeIntervalSince1970: 200),
+            effectiveFiveHourResetAt: nil,
+            savedAt: Date(timeIntervalSince1970: 200)
+        )
+
+        XCTAssertTrue(WidgetDisplayStateStore.save(replacement, fileManager: fileManager))
+        XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager), replacement)
+    }
+
     func testWidgetStateRecoversBackupWhenFutureEnvelopeChecksumIsInvalid() throws {
         let groupURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("CodexMonitorNativeTests.widgetCorruptFutureEnvelope.\(UUID().uuidString)", isDirectory: true)
@@ -969,6 +1007,85 @@ final class WidgetTimelineBridgeTests: XCTestCase {
 
         XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager), invalidated)
         XCTAssertFalse(FileManager.default.fileExists(atPath: stateURL.appendingPathExtension("backup").path))
+    }
+
+    func testWidgetAccountInvalidationRemovesOrphanedRealBackup() throws {
+        let groupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexMonitorNativeTests.widgetOrphanedRealBackup.\(UUID().uuidString)", isDirectory: true)
+        let fileManager = WidgetStateTestFileManager(groupURL: groupURL)
+        defer { try? FileManager.default.removeItem(at: groupURL) }
+        let stateURL = WidgetDisplayStateStore.stateURL(fileManager: fileManager)
+        let realSnapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 90,
+            fiveHourQuotaPercent: 80,
+            refreshedAt: Date(timeIntervalSince1970: 100),
+            dataSource: .real,
+            accountBoundary: .testDefault
+        )
+        let real = WidgetDisplayState.make(
+            snapshot: realSnapshot,
+            status: .success,
+            lastSuccessAt: realSnapshot.refreshedAt,
+            lastAttemptAt: nil,
+            effectiveFiveHourResetAt: nil,
+            savedAt: Date(timeIntervalSince1970: 100)
+        )
+        let invalidated = WidgetDisplayState.make(
+            snapshot: .notConnected,
+            status: .authRequired,
+            lastSuccessAt: nil,
+            lastAttemptAt: Date(timeIntervalSince1970: 200),
+            effectiveFiveHourResetAt: nil,
+            savedAt: Date(timeIntervalSince1970: 200)
+        )
+        try FileManager.default.createDirectory(at: groupURL, withIntermediateDirectories: true)
+        try legacyCompatibleEnvelopeData(real, revision: 4)
+            .write(to: stateURL.appendingPathExtension("backup"))
+
+        XCTAssertTrue(WidgetDisplayStateStore.save(invalidated, fileManager: fileManager))
+        XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager), invalidated)
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: stateURL.appendingPathExtension("backup").path
+            )
+        )
+    }
+
+    func testWidgetAccountInvalidationCanReplaceFutureRealSchema() throws {
+        let groupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexMonitorNativeTests.widgetFutureAccountInvalidation.\(UUID().uuidString)", isDirectory: true)
+        let fileManager = WidgetStateTestFileManager(groupURL: groupURL)
+        defer { try? FileManager.default.removeItem(at: groupURL) }
+        let stateURL = WidgetDisplayStateStore.stateURL(fileManager: fileManager)
+        let futureSnapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 90,
+            fiveHourQuotaPercent: 80,
+            refreshedAt: Date(timeIntervalSince1970: 100),
+            dataSource: .real,
+            schemaVersion: QuotaSnapshot.currentSchemaVersion + 1,
+            accountBoundary: .testDefault
+        )
+        let future = WidgetDisplayState.make(
+            snapshot: futureSnapshot,
+            status: .success,
+            lastSuccessAt: futureSnapshot.refreshedAt,
+            lastAttemptAt: nil,
+            effectiveFiveHourResetAt: nil,
+            savedAt: Date(timeIntervalSince1970: 100)
+        )
+        let invalidated = WidgetDisplayState.make(
+            snapshot: .notConnected,
+            status: .authRequired,
+            lastSuccessAt: nil,
+            lastAttemptAt: Date(timeIntervalSince1970: 200),
+            effectiveFiveHourResetAt: nil,
+            savedAt: Date(timeIntervalSince1970: 200)
+        )
+        try FileManager.default.createDirectory(at: groupURL, withIntermediateDirectories: true)
+        try legacyCompatibleEnvelopeData(future, revision: 5).write(to: stateURL)
+
+        XCTAssertTrue(WidgetDisplayStateStore.save(invalidated, fileManager: fileManager))
+        XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager), invalidated)
     }
 
     func testWidgetAcceptsOlderTimestampFromDifferentVerifiedAccount() {

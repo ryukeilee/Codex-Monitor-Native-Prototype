@@ -105,8 +105,10 @@ enum StatusPopoverFormatting {
         timeZone: TimeZone = .current
     ) -> String {
         let timeText = timeString(for: date, locale: locale, timeZone: timeZone)
+        var displayCalendar = calendar
+        displayCalendar.timeZone = timeZone
 
-        if calendar.isDate(date, inSameDayAs: now) {
+        if displayCalendar.isDate(date, inSameDayAs: now) {
             return "\(todayLabel(for: locale)) \(timeText)"
         }
 
@@ -754,6 +756,9 @@ enum StatusPopoverFormatting {
             return "\(item.label)恢复 \(item.resetText) · 还需 \(item.resetRemainingText)"
         }
         let detail = [summary, recovery].compactMap { $0 }.joined(separator: " · ")
+        let failureDataSuffix = snapshot.dataSource == .real
+            ? "显示上次数据"
+            : "当前无可用快照"
 
         switch status {
         case .success:
@@ -761,11 +766,11 @@ enum StatusPopoverFormatting {
         case .refreshing:
             return "Codex Monitor：\(detail) · 正在刷新"
         case .networkFailed:
-            return "Codex Monitor：\(detail) · 网络异常，显示上次数据"
+            return "Codex Monitor：\(detail) · 网络异常，\(failureDataSuffix)"
         case .authRequired:
-            return "Codex Monitor：\(detail) · 需要登录，显示上次数据"
+            return "Codex Monitor：\(detail) · 需要登录，\(failureDataSuffix)"
         case .parseFailed:
-            return "Codex Monitor：\(detail) · 数据异常，显示上次数据"
+            return "Codex Monitor：\(detail) · 数据异常，\(failureDataSuffix)"
         case .stale:
             return "Codex Monitor：\(detail) · 数据已过期"
         case .noSnapshot:

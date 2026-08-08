@@ -254,6 +254,7 @@ final class AppState: ObservableObject {
             AppLogger.snapshot.info("No persisted snapshot; starting in not-connected state")
         }
 
+        backoffInterval = backoffFor(consecutiveFailures: consecutiveFailures)
         let referenceDate = now()
         commitState(at: referenceDate)
         scheduleTemporalCheck(referenceDate: referenceDate)
@@ -976,6 +977,23 @@ final class AppState: ObservableObject {
            referenceDate < latestRealSnapshot.refreshedAt {
             clockRollbackObserved = true
         }
+        // Temporal reconciliation is the one re-evaluation path that can run
+        // without a boundary-change notification (clock changes, wake, scheduled
+        // checks). Re-validate identity so a cached real snapshot from a no
+        // longer verifiable session is never shown, even when the on-disk
+        // checkpoint cannot be replaced at the same time. Do not record the
+        // boundary as observed here: the dedicated observer still has to notice
+        // the change and issue the new identity's recovery refresh.
+        if discardCachedSnapshotIfAccountBoundaryIsUnverified(
+            currentBoundary: accountBoundaryProvider()
+        ) {
+            status = .noSnapshot
+            lastErrorSummary = "Codex 账号或登录会话已变化"
+            realQuotaHealth = RealQuotaHealthDiagnostic(
+                kind: .waitingForFirstRequest,
+                isUsingCachedSnapshot: false
+            )
+        }
         if status == .success, isDataStale(at: referenceDate) {
             status = .stale
             lastErrorSummary = nil
@@ -1100,12 +1118,62 @@ final class AppState: ObservableObject {
             event.persistedState,
             allowOlderRealSnapshot: allowsOlderRealSnapshotForCurrentRefresh
         ) else {
-            AppLogger.snapshot.error("App state commit was not persisted; retaining the last committed presentation")
-            restoreLastCommittedState()
+            if shouldPublishFailClosedStateAfterPersistenceFailure(event) {
+                // Persistence availability must never be allowed to revive a
+                // snapshot whose account/session ownership is no longer valid.
+                // Publish the safe runtime state (and therefore the Widget
+                // invalidation) even though the on-disk app checkpoint could
+                // not be replaced. A later launch validates that checkpoint
+                // against the then-current identity again.
+                AppLogger.snapshot.error("App state commit was not persisted; retaining fail-closed account state in memory")
+                publishRuntimeState(event, resolvedStatus: resolvedStatus)
+            } else {
+                AppLogger.snapshot.error("App state commit was not persisted; retaining the last committed presentation")
+                restoreLastCommittedState()
+            }
             onRefreshSchedulingStateChanged?(refreshSchedulingState)
             return
         }
 
+        publishRuntimeState(event, resolvedStatus: resolvedStatus)
+        onRefreshSchedulingStateChanged?(refreshSchedulingState)
+    }
+
+    private func shouldPublishFailClosedStateAfterPersistenceFailure(
+        _ event: AppStateEvent
+    ) -> Bool {
+        let previousSnapshot = committedRuntimeState?.snapshot
+            ?? stateEvent.persistedState.snapshot
+        guard previousSnapshot.dataSource == .real else { return false }
+
+        let candidateSnapshot = event.persistedState.snapshot
+        if candidateSnapshot.dataSource != .real,
+           event.persistedState.status != .demoMode {
+            return true
+        }
+
+        let currentBoundary = accountBoundaryProvider()
+        guard !isSnapshot(previousSnapshot, boundTo: currentBoundary) else {
+            return false
+        }
+        return isSnapshot(candidateSnapshot, boundTo: currentBoundary)
+    }
+
+    private func isSnapshot(
+        _ snapshot: QuotaSnapshot,
+        boundTo boundary: QuotaAccountBoundary?
+    ) -> Bool {
+        guard snapshot.dataSource == .real else { return true }
+        if allowsUnboundSnapshotsForTesting, snapshot.accountBoundary == nil {
+            return true
+        }
+        return snapshot.accountBoundary?.matches(boundary) == true
+    }
+
+    private func publishRuntimeState(
+        _ event: AppStateEvent,
+        resolvedStatus: QuotaRefreshStatus
+    ) {
         committedRuntimeState = RuntimeStateCheckpoint(
             snapshot: snapshot,
             status: resolvedStatus,
@@ -1125,7 +1193,6 @@ final class AppState: ObservableObject {
             allowsOlderRealSnapshotForCurrentRefresh = false
         }
         stateEvent = event
-        onRefreshSchedulingStateChanged?(refreshSchedulingState)
     }
 
     private func restoreLastCommittedState() {

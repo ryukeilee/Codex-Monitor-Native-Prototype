@@ -196,17 +196,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         networkObserver.start()
 
-        // Sleep/wake: pause independently from reachability. After the wake
-        // stabilization delay, the restarted reachability observer's initial
-        // path delivery drives exactly one recovery refresh (network-restored)
-        // once the path is actually reachable. Issuing an additional eager
-        // wake refresh here would both race the observer (a second physical
-        // request when the first completes quickly) and fire while the
-        // interface is still reconnecting after wake.
+        // Sleep/wake: retain a network pause while the path monitor is stopped.
+        // After the wake stabilization delay, the restarted observer's initial
+        // path delivery removes that pause and drives exactly one recovery
+        // refresh (network-restored) once the path is actually reachable. This
+        // prevents an overdue failure-backoff timer from firing between wake
+        // and the first authoritative path snapshot.
         let observer = SleepWakeObserver(
             wakeDelaySeconds: 5,
             onSleep: { [weak scheduler, weak networkObserver] in
                 scheduler?.pause(for: .systemSleep)
+                scheduler?.pause(for: .networkUnavailable)
                 networkObserver?.stop()
             },
             onWake: { [weak scheduler, weak networkObserver] in

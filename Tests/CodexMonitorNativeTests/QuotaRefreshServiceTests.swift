@@ -273,6 +273,21 @@ final class QuotaRefreshServiceTests: XCTestCase {
         }
     }
 
+    func testRefreshBindsResetCreditDetailsToRealSnapshotAccount() async throws {
+        let recorder = RefreshCallRecorder()
+        let snapshot = makeBoundRealSnapshot()
+        let service = QuotaRefreshService(
+            realProvider: StubRealQuotaProvider(snapshot: snapshot),
+            resetCreditsDetailProvider: RecordingResetCreditsProvider(recorder: recorder),
+            mockProvider: MockQuotaProvider()
+        )
+
+        _ = try await service.refresh(basedOn: .notConnected)
+
+        let boundaries = await recorder.detailAccountBoundaries
+        XCTAssertEqual(boundaries, [.testDefault])
+    }
+
     func testRefreshCancelledBeforeRealProviderDoesNotStartProviders() async {
         let recorder = RefreshCallRecorder()
         let startGate = RefreshCancellationGate()
@@ -391,7 +406,9 @@ private struct StubRealQuotaProvider: RealQuotaRefreshing, Sendable {
 }
 
 private struct FailingResetCreditsProvider: ResetCreditsDetailRefreshing, Sendable {
-    func fetchDetails() async throws -> ResetCreditsDetailPayload {
+    func fetchDetails(
+        for _: QuotaAccountBoundary
+    ) async throws -> ResetCreditsDetailPayload {
         throw ResetCreditsDetailError.unexpectedStatusCode(503)
     }
 }
@@ -399,7 +416,9 @@ private struct FailingResetCreditsProvider: ResetCreditsDetailRefreshing, Sendab
 private struct SucceedingResetCreditsProvider: ResetCreditsDetailRefreshing, Sendable {
     let payload: ResetCreditsDetailPayload
 
-    func fetchDetails() async throws -> ResetCreditsDetailPayload {
+    func fetchDetails(
+        for _: QuotaAccountBoundary
+    ) async throws -> ResetCreditsDetailPayload {
         payload
     }
 }
@@ -430,8 +449,10 @@ private struct BlockingRealQuotaProvider: RealQuotaRefreshing, Sendable {
 private struct RecordingResetCreditsProvider: ResetCreditsDetailRefreshing, Sendable {
     let recorder: RefreshCallRecorder
 
-    func fetchDetails() async throws -> ResetCreditsDetailPayload {
-        await recorder.recordDetailCall()
+    func fetchDetails(
+        for accountBoundary: QuotaAccountBoundary
+    ) async throws -> ResetCreditsDetailPayload {
+        await recorder.recordDetailCall(accountBoundary: accountBoundary)
         return ResetCreditsDetailPayload(
             availableCount: 1,
             availableCredits: [],
@@ -443,7 +464,9 @@ private struct RecordingResetCreditsProvider: ResetCreditsDetailRefreshing, Send
 private struct BlockingResetCreditsProvider: ResetCreditsDetailRefreshing, Sendable {
     let gate: RefreshCancellationGate
 
-    func fetchDetails() async throws -> ResetCreditsDetailPayload {
+    func fetchDetails(
+        for _: QuotaAccountBoundary
+    ) async throws -> ResetCreditsDetailPayload {
         await gate.markStarted()
         await gate.waitForRelease()
         try Task.checkCancellation()
@@ -458,13 +481,15 @@ private struct BlockingResetCreditsProvider: ResetCreditsDetailRefreshing, Senda
 private actor RefreshCallRecorder {
     private(set) var realCallCount = 0
     private(set) var detailCallCount = 0
+    private(set) var detailAccountBoundaries: [QuotaAccountBoundary] = []
 
     func recordRealCall() {
         realCallCount += 1
     }
 
-    func recordDetailCall() {
+    func recordDetailCall(accountBoundary: QuotaAccountBoundary) {
         detailCallCount += 1
+        detailAccountBoundaries.append(accountBoundary)
     }
 }
 

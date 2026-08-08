@@ -245,8 +245,7 @@ final class RefreshSchedulerTests: XCTestCase {
             AppState.RefreshTrigger.scheduled,
             .networkChanged,
             .temporalBoundary,
-            .systemClockChange,
-            .accountBoundaryChanged
+            .systemClockChange
         ] {
             scheduler.requestRefresh(trigger)
         }
@@ -285,7 +284,38 @@ final class RefreshSchedulerTests: XCTestCase {
         scheduler.stop()
     }
 
-    func testWakeAndNetworkRestoredBypassFailureBackoffWhileOtherTriggersDefer() async {
+    func testAccountBoundaryChangeBypassesOldAccountsFailureBackoff() async {
+        let base = Date(timeIntervalSince1970: 4_500)
+        let clock = ManualRefreshSchedulerClock(now: base)
+        let recorder = RefreshActionRecorder()
+        let scheduler = RefreshScheduler(clock: clock) { trigger in
+            await recorder.record(trigger)
+        }
+        let snapshot = quotaSnapshot(refreshedAt: base)
+
+        scheduler.start()
+        scheduler.updateSchedule(with: schedulingState(
+            snapshot: snapshot,
+            at: base,
+            status: .networkFailed,
+            lastSuccessAt: base,
+            lastAttemptAt: base,
+            failureCount: 1,
+            backoffInterval: 5 * 60
+        ))
+
+        scheduler.requestRefresh(.accountBoundaryChanged)
+        for _ in 0..<100 {
+            if await recorder.callCount() == 1 { break }
+            await Task.yield()
+        }
+
+        let triggers = await recorder.triggers()
+        XCTAssertEqual(triggers, [.accountBoundaryChanged])
+        scheduler.stop()
+    }
+
+    func testWakeNetworkRestoredAndAccountBoundaryBypassFailureBackoffWhileOtherTriggersDefer() async {
         let base = Date(timeIntervalSince1970: 5_000)
         let clock = ManualRefreshSchedulerClock(now: base)
         let gate = RefreshActionGate()
@@ -310,8 +340,7 @@ final class RefreshSchedulerTests: XCTestCase {
             AppState.RefreshTrigger.scheduled,
             .networkChanged,
             .temporalBoundary,
-            .systemClockChange,
-            .accountBoundaryChanged
+            .systemClockChange
         ] {
             scheduler.requestRefresh(trigger)
         }

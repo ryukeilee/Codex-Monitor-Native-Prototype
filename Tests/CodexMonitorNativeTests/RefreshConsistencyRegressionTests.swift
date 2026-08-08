@@ -4,6 +4,125 @@ import XCTest
 
 @MainActor
 final class RefreshConsistencyRegressionTests: XCTestCase {
+    func testAccountInvalidationRemainsFailClosedWhenPersistenceIsUnavailable() throws {
+        let suiteName = "CodexMonitorNativeTests.failClosedPersistenceFailure.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let initial = makeSnapshot(
+            weekly: 73,
+            fiveHour: 62,
+            refreshedAt: Date(timeIntervalSince1970: 100)
+        )
+        XCTAssertTrue(store.saveSnapshot(initial))
+
+        var currentBoundary: QuotaAccountBoundary? = .testDefault
+        let appState = AppState(
+            snapshotStore: store,
+            refreshService: ConsistencySequenceRefreshService(results: []),
+            accountBoundaryProvider: { currentBoundary }
+        )
+        appState.updateNetworkReachability(false)
+        XCTAssertEqual(appState.snapshot, initial)
+
+        var futureObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: try XCTUnwrap(defaults.data(forKey: "snapshot")))
+                as? [String: Any]
+        )
+        futureObject["formatVersion"] = PersistenceEnvelope.currentFormatVersion + 1
+        defaults.set(
+            try JSONSerialization.data(withJSONObject: futureObject, options: [.sortedKeys]),
+            forKey: "snapshot"
+        )
+
+        currentBoundary = .testOtherAccount
+        appState.accountBoundaryDidChange()
+
+        XCTAssertEqual(appState.snapshot, .notConnected)
+        XCTAssertEqual(appState.status, .noSnapshot)
+        XCTAssertEqual(appState.presentationSnapshot.snapshot, .notConnected)
+        XCTAssertEqual(
+            StatusPopoverFormatting.weeklyQuotaMenuTitle(
+                snapshot: appState.presentationSnapshot.snapshot,
+                status: appState.presentationSnapshot.status
+            ),
+            "--%"
+        )
+    }
+
+    func testPersistenceFailureDoesNotRestoreRealSnapshotWhenIdentityIsUnverifiable() throws {
+        let suiteName = "CodexMonitorNativeTests.unverifiableIdentityPersistenceFailure.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let initial = makeSnapshot(
+            weekly: 73,
+            fiveHour: 62,
+            refreshedAt: Date(timeIntervalSince1970: 100)
+        )
+        XCTAssertTrue(store.saveSnapshot(initial))
+
+        var currentBoundary: QuotaAccountBoundary? = .testDefault
+        let appState = AppState(
+            snapshotStore: store,
+            refreshService: ConsistencySequenceRefreshService(results: []),
+            now: { Date(timeIntervalSince1970: 200) },
+            accountBoundaryProvider: { currentBoundary }
+        )
+        XCTAssertEqual(appState.snapshot, initial)
+
+        var futureObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: try XCTUnwrap(defaults.data(forKey: "snapshot")))
+                as? [String: Any]
+        )
+        futureObject["formatVersion"] = PersistenceEnvelope.currentFormatVersion + 1
+        defaults.set(
+            try JSONSerialization.data(withJSONObject: futureObject, options: [.sortedKeys]),
+            forKey: "snapshot"
+        )
+
+        currentBoundary = nil
+        appState.reconcileTemporalState()
+
+        XCTAssertEqual(appState.snapshot, .notConnected)
+        XCTAssertEqual(appState.status, .noSnapshot)
+        XCTAssertEqual(appState.presentationSnapshot.snapshot, .notConnected)
+        XCTAssertEqual(
+            StatusPopoverFormatting.weeklyQuotaMenuTitle(
+                snapshot: appState.presentationSnapshot.snapshot,
+                status: appState.presentationSnapshot.status
+            ),
+            "--%"
+        )
+    }
+
+    func testRestoredFailuresKeepEscalatedBackoffInterval() {
+        let suiteName = "CodexMonitorNativeTests.restoredBackoff.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = SnapshotStore(defaults: defaults, key: "snapshot")
+        let refreshedAt = Date(timeIntervalSince1970: 100)
+        let lastAttemptAt = Date(timeIntervalSince1970: 200)
+        let snapshot = makeSnapshot(refreshedAt: refreshedAt)
+        XCTAssertTrue(store.saveState(PersistedAppState(
+            snapshot: snapshot,
+            status: .networkFailed,
+            lastSuccessAt: refreshedAt,
+            lastAttemptAt: lastAttemptAt,
+            failureCount: 3
+        )))
+
+        let appState = AppState(
+            snapshotStore: store,
+            refreshService: ConsistencySequenceRefreshService(results: []),
+            accountBoundaryProvider: { .testDefault }
+        )
+
+        XCTAssertEqual(appState.failureCount, 3)
+        XCTAssertEqual(appState.backoffInterval, 15 * 60)
+        XCTAssertEqual(appState.refreshSchedulingState.backoffInterval, 15 * 60)
+    }
+
     func testPersistFailureDoesNotPublishUnpersistedRefreshAndRecoversAfterStorageReturns() async throws {
         let suiteName = "CodexMonitorNativeTests.persistenceFailure.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

@@ -80,6 +80,23 @@ struct WidgetPresentation: Equatable {
         primaryQuota?.percentText.replacingOccurrences(of: "%", with: "") ?? "--"
     }
 
+    static func unavailableReason(for status: QuotaRefreshStatus) -> String? {
+        switch status {
+        case .networkFailed:
+            return "网络异常"
+        case .authRequired:
+            return "需要登录"
+        case .parseFailed:
+            return "数据异常"
+        case .refreshing:
+            return "正在读取"
+        case .idle, .noSnapshot:
+            return "等待同步"
+        case .success, .stale, .demoMode:
+            return nil
+        }
+    }
+
     var gaugeProgress: Double {
         min(max(primaryQuota?.progress ?? 0.05, 0.05), 1.0)
     }

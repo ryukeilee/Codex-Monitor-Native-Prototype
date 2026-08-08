@@ -166,8 +166,9 @@ struct StatusPopoverView: View {
     }
 
     private var refreshTimeText: String {
-        let refreshDate = presentationSnapshot.lastSuccessAt
-            ?? presentationSnapshot.snapshot.refreshedAt
+        guard let refreshDate = presentationSnapshot.refreshDisplayDate(at: .now) else {
+            return "--"
+        }
         return refreshDate.formatted(date: .omitted, time: .shortened)
     }
 

@@ -3,7 +3,6 @@ import Foundation
 import XCTest
 @testable import CodexMonitorNative
 
-// Temporary probe tests: verify suspected reliability bugs before fixing.
 @MainActor
 final class ReliabilityProbeTests: XCTestCase {
     private func makeSnapshot(
@@ -52,7 +51,7 @@ final class ReliabilityProbeTests: XCTestCase {
             status: .refreshing,
             now: now
         )
-        print("PROBE1 menu title while refreshing with passed 5h resetAt: \(title)")
+        XCTAssertEqual(title, "72%")
     }
 
     // Probe 2: WidgetDisplayStateStore — a real snapshot write where the
@@ -87,11 +86,13 @@ final class ReliabilityProbeTests: XCTestCase {
         XCTAssertFalse(WidgetDisplayStateStore.save(older, fileManager: FileManager()))
     }
 
-    // Probe 3: AppState — a failed refresh while a *queued* refresh exists:
-    // the pending trigger is replaced by later lower-priority triggers.
-    func testProbeQueuedRefreshTriggerOverwrite() async {
-        // Behavioral probe only — record what the trailing trigger ends up as.
-        print("PROBE3 queued trigger overwrite — see AppState.enqueueRefresh pendingRefresh?.trigger = trigger")
+    // Higher-priority user intent must survive later timer noise while refresh
+    // work is being coalesced.
+    func testProbeQueuedRefreshTriggerPriority() {
+        XCTAssertGreaterThan(
+            AppState.RefreshTrigger.manual.coalescingPriority,
+            AppState.RefreshTrigger.scheduled.coalescingPriority
+        )
     }
 
     // Probe 4: RefreshScheduler — deferred automatic trigger while paused.
@@ -125,7 +126,7 @@ final class ReliabilityProbeTests: XCTestCase {
         clock.advance(to: base.addingTimeInterval(5 * 60))
         await gate.waitForCall(1)
         let triggers = await gate.triggers()
-        print("PROBE4 deferred trigger after pause/resume: \(triggers)")
+        XCTAssertEqual(triggers, [.scheduled])
         scheduler.stop()
     }
 
@@ -145,7 +146,8 @@ final class ReliabilityProbeTests: XCTestCase {
         appState.onRefreshRequested = { _ in calls += 1 }
         await appState.refreshNow(trigger: .manual)
         XCTAssertEqual(appState.snapshot.dataSource, .mock)
-        print("PROBE5 refreshNow with unknown network: calls=\(calls) status=\(appState.status.rawValue)")
+        XCTAssertEqual(calls, 0)
+        XCTAssertEqual(appState.status, .noSnapshot)
     }
 
     // Probe 6: SnapshotStore — the demoMode write over persisted real data.
@@ -171,7 +173,7 @@ final class ReliabilityProbeTests: XCTestCase {
             lastAttemptAt: nil,
             failureCount: 0
         ))
-        print("PROBE6 demo-mode write over real: loaded=\(store.loadSnapshot()?.dataSource.rawValue ?? "nil")")
+        XCTAssertEqual(store.loadSnapshot()?.dataSource, .real)
     }
 
     // Probe 7: RefreshScheduler — updateSchedule during refreshInFlight from a
@@ -200,8 +202,11 @@ final class ReliabilityProbeTests: XCTestCase {
 
         // Restart: the old snapshot must not be treated as previousSuccessfulSnapshot.
         scheduler.start()
-        let fireAt = scheduler.nextFireAt
-        print("PROBE7 fireAt after restart: \(String(describing: fireAt))")
+        XCTAssertEqual(scheduler.nextReason, .stable)
+        XCTAssertEqual(
+            scheduler.nextFireAt,
+            base.addingTimeInterval(AdaptiveRefreshCadencePolicy.stableInterval)
+        )
         scheduler.stop()
     }
 
@@ -229,7 +234,7 @@ final class ReliabilityProbeTests: XCTestCase {
         )
         bridge.forceSync()
         bridge.forceSync()
-        print("PROBE8 forceSync after failed startup save: reloadCount=\(reloadCount)")
+        XCTAssertEqual(reloadCount, 1)
     }
 }
 

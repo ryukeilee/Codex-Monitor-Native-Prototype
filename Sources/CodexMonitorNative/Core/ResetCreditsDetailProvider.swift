@@ -1,13 +1,17 @@
+import CoreFoundation
 import Foundation
 
 protocol ResetCreditsDetailRefreshing: Sendable {
-    func fetchDetails() async throws -> ResetCreditsDetailPayload
+    func fetchDetails(
+        for accountBoundary: QuotaAccountBoundary
+    ) async throws -> ResetCreditsDetailPayload
 }
 
 enum ResetCreditsDetailError: LocalizedError, Equatable {
     case authFileMissing
     case invalidAuthFile
     case tokensMissing
+    case accountBoundaryMismatch
     case invalidResponse
     case invalidJSON
     case unexpectedStatusCode(Int)
@@ -23,6 +27,8 @@ enum ResetCreditsDetailError: LocalizedError, Equatable {
             return "auth 文件不可解析"
         case .tokensMissing:
             return "tokens 缺失"
+        case .accountBoundaryMismatch:
+            return "账号或登录会话与额度快照不一致"
         case .invalidResponse:
             return "响应不是有效 HTTP"
         case .invalidJSON:
@@ -48,22 +54,43 @@ struct ResetCreditsDetailPayload: Equatable {
 struct ResetCreditsDetailProvider: ResetCreditsDetailRefreshing {
     private let authFileURL: URL
     private let timeoutInterval: TimeInterval
+    private let authBoundaryReader: @Sendable (Data) -> QuotaAccountBoundary?
     private let dataLoader: @Sendable (URLRequest) async throws -> (Data, URLResponse)
 
     init(
-        authFileURL: URL = URL(fileURLWithPath: NSString(string: "~/.codex/auth.json").expandingTildeInPath),
+        authFileURL: URL? = nil,
         timeoutInterval: TimeInterval = 5,
+        authBoundaryReader: @escaping @Sendable (Data) -> QuotaAccountBoundary? = {
+            CodexAuthIdentityReader.parse(data: $0)
+        },
         dataLoader: (@Sendable (URLRequest) async throws -> (Data, URLResponse))? = nil
     ) {
-        self.authFileURL = authFileURL
+        self.authFileURL = authFileURL ?? Self.defaultAuthFileURL()
         self.timeoutInterval = timeoutInterval
+        self.authBoundaryReader = authBoundaryReader
         self.dataLoader = dataLoader ?? { request in
             try await URLSession.shared.data(for: request)
         }
     }
 
-    func fetchDetails() async throws -> ResetCreditsDetailPayload {
-        let authState = try loadAuthState()
+    static func defaultAuthFileURL(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        fileManager: FileManager = .default
+    ) -> URL {
+        CodexAuthIdentityReader.defaultCodexHomeURL(
+            environment: environment,
+            fileManager: fileManager
+        )
+        .appendingPathComponent("auth.json", isDirectory: false)
+    }
+
+    func fetchDetails(
+        for accountBoundary: QuotaAccountBoundary
+    ) async throws -> ResetCreditsDetailPayload {
+        guard accountBoundary.isValid else {
+            throw ResetCreditsDetailError.accountBoundaryMismatch
+        }
+        let authState = try loadAuthState(matching: accountBoundary)
         var request = URLRequest(url: URL(string: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits")!)
         request.httpMethod = "GET"
         request.timeoutInterval = timeoutInterval
@@ -77,6 +104,7 @@ struct ResetCreditsDetailProvider: ResetCreditsDetailRefreshing {
         }
 
         let (data, response) = try await dataLoader(request)
+        try validateCurrentAccountBoundary(accountBoundary)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw ResetCreditsDetailError.invalidResponse
         }
@@ -88,7 +116,9 @@ struct ResetCreditsDetailProvider: ResetCreditsDetailRefreshing {
         return try Self.parsePayload(from: data)
     }
 
-    private func loadAuthState() throws -> AuthState {
+    private func loadAuthState(
+        matching accountBoundary: QuotaAccountBoundary
+    ) throws -> AuthState {
         let data: Data
         do {
             data = try Data(contentsOf: authFileURL)
@@ -104,15 +134,34 @@ struct ResetCreditsDetailProvider: ResetCreditsDetailRefreshing {
             throw ResetCreditsDetailError.invalidAuthFile
         }
 
-        guard let accessToken = decoded.tokens.accessToken,
-              !accessToken.isEmpty else {
+        guard let accessToken = normalizedHeaderValue(decoded.tokens.accessToken) else {
             throw ResetCreditsDetailError.tokensMissing
+        }
+        guard accountBoundary.matches(authBoundaryReader(data)) else {
+            throw ResetCreditsDetailError.accountBoundaryMismatch
         }
 
         return AuthState(
             accessToken: accessToken,
-            accountID: decoded.tokens.accountID?.isEmpty == false ? decoded.tokens.accountID : nil
+            accountID: normalizedHeaderValue(decoded.tokens.accountID)
         )
+    }
+
+    private func validateCurrentAccountBoundary(
+        _ expectedBoundary: QuotaAccountBoundary
+    ) throws {
+        guard let data = try? Data(contentsOf: authFileURL),
+              expectedBoundary.matches(authBoundaryReader(data)) else {
+            throw ResetCreditsDetailError.accountBoundaryMismatch
+        }
+    }
+
+    private func normalizedHeaderValue(_ value: String?) -> String? {
+        guard let normalized = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !normalized.isEmpty else {
+            return nil
+        }
+        return normalized
     }
 
     static func parsePayload(from data: Data) throws -> ResetCreditsDetailPayload {
@@ -124,7 +173,7 @@ struct ResetCreditsDetailProvider: ResetCreditsDetailRefreshing {
     }
 
     static func parsePayload(from object: [String: Any]) throws -> ResetCreditsDetailPayload {
-        let availableCount = parseOptionalInt(object["available_count"] ?? object["availableCount"])
+        let availableCount = parseAvailableCount(from: object)
         guard let credits = object["credits"] as? [Any] else {
             throw ResetCreditsDetailError.missingCreditsField
         }
@@ -228,28 +277,52 @@ struct ResetCreditsDetailProvider: ResetCreditsDetailRefreshing {
         return String(describing: rawValue).lowercased()
     }
 
-    private static func parseOptionalInt(_ rawValue: Any?) -> Int? {
-        guard let rawValue else {
+    private static func parseAvailableCount(from object: [String: Any]) -> Int? {
+        var counts: [Int] = []
+        var hasInvalidValue = false
+
+        for key in ["available_count", "availableCount"] {
+            guard let rawValue = object[key], !(rawValue is NSNull) else { continue }
+            guard let count = parseNonnegativeInteger(rawValue) else {
+                hasInvalidValue = true
+                continue
+            }
+            counts.append(count)
+        }
+
+        guard !hasInvalidValue,
+              let count = counts.first,
+              counts.allSatisfy({ $0 == count }) else {
             return nil
         }
+        return count
+    }
 
-        if let value = rawValue as? Int {
-            return value
-        }
+    private static func parseNonnegativeInteger(_ rawValue: Any) -> Int? {
+        guard !isBooleanJSONValue(rawValue) else { return nil }
 
         if let number = rawValue as? NSNumber {
-            return number.intValue
+            let value = number.doubleValue
+            guard value.isFinite,
+                  value >= 0,
+                  value.rounded() == value,
+                  let integer = Int(exactly: value) else {
+                return nil
+            }
+            return integer
         }
 
-        if let string = rawValue as? String {
-            return Int(string)
+        if let string = rawValue as? String,
+           let integer = Int(string.trimmingCharacters(in: .whitespacesAndNewlines)),
+           integer >= 0 {
+            return integer
         }
 
         return nil
     }
 
     private static func parseDate(_ rawValue: Any?) -> Date? {
-        guard let rawValue else {
+        guard let rawValue, !isBooleanJSONValue(rawValue) else {
             return nil
         }
 
@@ -257,30 +330,32 @@ struct ResetCreditsDetailProvider: ResetCreditsDetailRefreshing {
             return date
         }
 
-        if let seconds = rawValue as? Double {
-            return dateFromTimestamp(seconds)
-        }
-
-        if let seconds = rawValue as? Int {
-            return dateFromTimestamp(Double(seconds))
+        if let number = rawValue as? NSNumber {
+            return dateFromTimestamp(number.doubleValue)
         }
 
         if let string = rawValue as? String {
-            if let numeric = Double(string) {
+            let normalized = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let numeric = Double(normalized) {
                 return dateFromTimestamp(numeric)
             }
 
             let formatter = ISO8601DateFormatter()
             formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            if let date = formatter.date(from: string) {
+            if let date = formatter.date(from: normalized) {
                 return date
             }
 
             formatter.formatOptions = [.withInternetDateTime]
-            return formatter.date(from: string)
+            return formatter.date(from: normalized)
         }
 
         return nil
+    }
+
+    private static func isBooleanJSONValue(_ rawValue: Any) -> Bool {
+        guard let number = rawValue as? NSNumber else { return false }
+        return CFGetTypeID(number) == CFBooleanGetTypeID()
     }
 
     private static func dateFromTimestamp(_ rawValue: Double) -> Date? {

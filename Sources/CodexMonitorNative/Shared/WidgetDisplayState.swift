@@ -348,9 +348,19 @@ struct WidgetDisplayState: Codable, Equatable {
         )
     }
 
+    func refreshDisplayDate(at now: Date = .now) -> Date? {
+        if let lastSuccessAt {
+            return lastSuccessAt
+        }
+        if snapshot.dataSource == .real || effectiveStatus(at: now) == .demoMode {
+            return snapshot.refreshedAt
+        }
+        return nil
+    }
+
     func updatedLine(now: Date = .now) -> String {
         StatusPopoverFormatting.updatedLine(
-            lastSuccess: lastSuccessAt ?? snapshot.refreshedAt,
+            lastSuccess: refreshDisplayDate(at: now),
             lastAttempt: lastAttemptAt,
             now: now
         )
@@ -651,18 +661,22 @@ enum WidgetDisplayStateStore {
                 withIntermediateDirectories: true
             )
             let currentData = try? Data(contentsOf: url)
-            if let current = currentData, containsNewerPersistenceVersion(current) {
+            let requestsFailClosedInvalidation = state.snapshot.dataSource != .real
+                && state.status != .demoMode
+            if let current = currentData,
+               containsNewerPersistenceVersion(current),
+               !requestsFailClosedInvalidation {
                 PersistenceLog.logger.error("Cannot overwrite widget state written by a newer persistence version")
                 return false
             }
             let currentState = currentData.flatMap {
                 decodeEnvelope($0) ?? decodeLegacyState($0)
             }
-            let explicitlyInvalidatesRealSnapshot = currentState.map {
-                $0.snapshot.dataSource == .real
-                    && state.snapshot.dataSource != .real
-                    && state.status != .demoMode
-            } ?? false
+            // The Widget cannot independently read the current Codex identity.
+            // Any explicit host invalidation therefore has to remove every old
+            // real recovery source, even when the primary is missing, corrupt,
+            // or from a newer format that this binary cannot decode.
+            let explicitlyInvalidatesRealSnapshot = requestsFailClosedInvalidation
             let crossesAccountBoundary = currentState.map {
                 guard let currentBoundary = $0.snapshot.accountBoundary,
                       let newBoundary = state.snapshot.accountBoundary else {
@@ -860,7 +874,14 @@ enum WidgetDisplayStateStore {
     }
 
     private static func envelopeRevision(_ data: Data) -> UInt64? {
-        try? decoder.decode(PersistenceEnvelope.self, from: data).revision
+        guard let envelope = try? decoder.decode(PersistenceEnvelope.self, from: data),
+              envelope.hasValidChecksum,
+              envelope.formatVersion == PersistenceEnvelope.currentFormatVersion,
+              let state = try? envelope.decode(WidgetDisplayState.self),
+              isSupported(state) else {
+            return nil
+        }
+        return envelope.revision
     }
 
     private static func quarantine(url: URL, fileManager: FileManager) {

@@ -55,7 +55,13 @@ struct QuotaRefreshService: QuotaRefreshing {
         try Task.checkCancellation()
 
         do {
-            let details = try await resetCreditsDetailProvider.fetchDetails()
+            guard let accountBoundary = snapshot.accountBoundary,
+                  accountBoundary.isValid else {
+                throw ResetCreditsDetailError.accountBoundaryMismatch
+            }
+            let details = try await resetCreditsDetailProvider.fetchDetails(
+                for: accountBoundary
+            )
             try Task.checkCancellation()
             return QuotaSnapshot(
                 weeklyQuotaPercent: snapshot.weeklyQuotaPercent,

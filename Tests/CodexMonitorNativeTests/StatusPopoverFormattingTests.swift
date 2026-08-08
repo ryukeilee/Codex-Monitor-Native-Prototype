@@ -38,6 +38,25 @@ final class StatusPopoverFormattingTests: XCTestCase {
         XCTAssertEqual(formatted, "5月2日 08:05")
     }
 
+    func testShortTimestampUsesExplicitTimeZoneForDayBoundary() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let displayTimeZone = TimeZone(secondsFromGMT: 2 * 60 * 60)!
+        let locale = Locale(identifier: "en_US")
+        let now = makeDate("2026-06-19T23:30:00Z")
+        let date = makeDate("2026-06-20T00:30:00Z")
+
+        let formatted = StatusPopoverFormatting.shortTimestamp(
+            for: date,
+            now: now,
+            calendar: calendar,
+            locale: locale,
+            timeZone: displayTimeZone
+        )
+
+        XCTAssertEqual(formatted, "今天 02:30")
+    }
+
     func testUpdatedLineCollapsesMatchingTimes() {
         let calendar = Calendar(identifier: .gregorian)
         let timeZone = TimeZone(secondsFromGMT: 0)!
@@ -707,6 +726,32 @@ final class StatusPopoverFormattingTests: XCTestCase {
         )
 
         XCTAssertTrue(items.isEmpty)
+    }
+
+    func testQuotaTooltipDoesNotClaimCachedDataWhenNoRealSnapshotExists() {
+        let snapshot = QuotaSnapshot.notConnected
+
+        XCTAssertEqual(
+            StatusPopoverFormatting.quotaTooltip(
+                snapshot: snapshot,
+                status: .networkFailed
+            ),
+            "Codex Monitor：额度 -- · 网络异常，当前无可用快照"
+        )
+        XCTAssertEqual(
+            StatusPopoverFormatting.quotaTooltip(
+                snapshot: snapshot,
+                status: .authRequired
+            ),
+            "Codex Monitor：额度 -- · 需要登录，当前无可用快照"
+        )
+        XCTAssertEqual(
+            StatusPopoverFormatting.quotaTooltip(
+                snapshot: snapshot,
+                status: .parseFailed
+            ),
+            "Codex Monitor：额度 -- · 数据异常，当前无可用快照"
+        )
     }
 
     func testQuotaTooltipKeepsSameQuotaValuesWhileRefreshing() {

@@ -27,6 +27,7 @@ service-account*.json
 .idea/
 .vscode/
 .claude/
+.opencode/
 
 # Build artifacts
 .build/
