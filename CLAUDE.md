@@ -12,6 +12,8 @@ Codex Monitor Native 是一个常驻 macOS 菜单栏的 Codex 额度监视器（
 
 详细规范见 `AGENTS.md`（模块清单、测试领域表、Review/Commit 约定）；用户可见行为文档见 `README.md`。两者的历史测试数量可能早于当前代码，以命令实际结果为准。
 
+维护现有功能时，按 `.agent/loop.md` 的证据驱动 Maintenance Loop 执行（Observe → Evidence → Decide → Execute → Verify → Record）；项目级 Agent 边界见 `.agent/rules.md`，长期项目知识见 `.agent/memory.md`，最近 Loop 记录见 `.agent/history.md`。
+
 ## 常用命令
 
 - `swift build -c debug` / `swift build -c release` — 构建主应用。

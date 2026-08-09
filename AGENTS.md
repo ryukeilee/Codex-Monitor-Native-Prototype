@@ -128,6 +128,10 @@ Add or update behavior-focused tests for changes in these areas. Account-bound c
 
 Run the narrowest relevant test while iterating. Before handing off code changes, run `swift test` and `swift build -c debug`. Also run `./script/build_and_run.sh --verify` for packaging, signing, installed-app lifecycle, entitlement, or widget integration changes; note that this command stops the existing app and replaces the installed bundle. For visible menu bar, popover, or widget changes, follow the relevant checks in `QA_CHECKLIST.md` and report every manual check not performed. If a required gate cannot run, report the reason and the exact unverified gate.
 
+## Maintenance Loop
+
+Existing-feature maintenance work follows the evidence-driven Maintenance Loop defined in `.agent/loop.md` (Observe → Evidence → Decide → Execute → Verify → Record). Read `.agent/rules.md` (agent working boundary), `.agent/memory.md` (long-term project knowledge), and `.agent/history.md` (recent loop records) before making any change. This file (`AGENTS.md`) remains the authoritative project specification; `.agent/loop.md` is the executable maintenance workflow layered on top of it.
+
 ## Review Guidelines
 
 - Treat regressions against the Product Invariants as correctness issues, not cosmetic differences.
