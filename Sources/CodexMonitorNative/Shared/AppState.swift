@@ -95,6 +95,7 @@ final class AppState: ObservableObject {
         kind: .waitingForFirstRequest,
         isUsingCachedSnapshot: false
     )
+    private(set) var usageTrendAnalysis: UsageTrendAnalysis = .unavailable
 
     // MARK: - Backoff
 
@@ -118,7 +119,9 @@ final class AppState: ObservableObject {
     // MARK: - Private
 
     private let snapshotStore: SnapshotStore
+    private let usageTrendStore: UsageTrendStore?
     private let refreshAction: @Sendable (QuotaSnapshot) async throws -> QuotaSnapshot
+    private var usageTrendHistory: UsageTrendHistory
     private var latestRealSnapshot: QuotaSnapshot?
     private var stagedSuccessfulSnapshot: QuotaSnapshot?
     private var clockRollbackObserved = false
@@ -171,9 +174,11 @@ final class AppState: ObservableObject {
         },
         initialNetworkReachability: Bool? = true,
         accountBoundaryProvider: @escaping () -> QuotaAccountBoundary?,
-        allowsUnboundSnapshotsForTesting: Bool = false
+        allowsUnboundSnapshotsForTesting: Bool = false,
+        usageTrendStore: UsageTrendStore? = nil
     ) {
         self.snapshotStore = snapshotStore
+        self.usageTrendStore = usageTrendStore
         self.staleAfterInterval = staleAfterInterval
         self.now = now
         self.sleep = sleep
@@ -186,6 +191,10 @@ final class AppState: ObservableObject {
 
         let currentAccountBoundary = accountBoundaryProvider()
         lastObservedAccountBoundary = currentAccountBoundary
+        usageTrendHistory = usageTrendStore?.load(
+            matching: currentAccountBoundary,
+            allowsUnboundHistory: allowsUnboundSnapshotsForTesting
+        ) ?? UsageTrendHistory(accountBoundary: currentAccountBoundary)
 
         let persistedState = snapshotStore.loadState()
         if let persistedState {
@@ -279,7 +288,8 @@ final class AppState: ObservableObject {
             sleep: sleep,
             initialNetworkReachability: initialNetworkReachability,
             accountBoundaryProvider: { nil },
-            allowsUnboundSnapshotsForTesting: true
+            allowsUnboundSnapshotsForTesting: true,
+            usageTrendStore: nil
         )
     }
 #endif
@@ -1126,6 +1136,7 @@ final class AppState: ObservableObject {
                 // not be replaced. A later launch validates that checkpoint
                 // against the then-current identity again.
                 AppLogger.snapshot.error("App state commit was not persisted; retaining fail-closed account state in memory")
+                clearUsageTrend()
                 publishRuntimeState(event, resolvedStatus: resolvedStatus)
             } else {
                 AppLogger.snapshot.error("App state commit was not persisted; retaining the last committed presentation")
@@ -1135,8 +1146,56 @@ final class AppState: ObservableObject {
             return
         }
 
+        reconcileUsageTrend(with: event.persistedState.snapshot)
         publishRuntimeState(event, resolvedStatus: resolvedStatus)
         onRefreshSchedulingStateChanged?(refreshSchedulingState)
+    }
+
+    private func reconcileUsageTrend(with snapshot: QuotaSnapshot) {
+        guard let sample = UsageTrendMetric.weeklySample(from: snapshot) else {
+            clearUsageTrend()
+            return
+        }
+
+        let currentBoundary = accountBoundaryProvider()
+        let acceptedBoundary: QuotaAccountBoundary?
+        if let snapshotBoundary = snapshot.accountBoundary {
+            guard snapshotBoundary.matches(currentBoundary) else {
+                clearUsageTrend()
+                return
+            }
+            acceptedBoundary = snapshotBoundary
+        } else {
+            guard allowsUnboundSnapshotsForTesting else {
+                clearUsageTrend()
+                return
+            }
+            acceptedBoundary = nil
+        }
+
+        let historyMatchesBoundary: Bool
+        if acceptedBoundary == nil {
+            historyMatchesBoundary = usageTrendHistory.accountBoundary == nil
+        } else {
+            historyMatchesBoundary = usageTrendHistory.accountBoundary?.matches(acceptedBoundary) == true
+        }
+        if !historyMatchesBoundary {
+            usageTrendHistory = UsageTrendHistory(accountBoundary: acceptedBoundary)
+        }
+
+        usageTrendHistory.append(sample)
+        usageTrendAnalysis = UsageTrendAnalyzer.analyze(
+            history: usageTrendHistory,
+            currentResetAt: sample.resetAt
+        )
+        if usageTrendStore?.save(usageTrendHistory) == false {
+            AppLogger.snapshot.error("Failed to persist usage trend history")
+        }
+    }
+
+    private func clearUsageTrend() {
+        usageTrendHistory = UsageTrendHistory(accountBoundary: nil)
+        usageTrendAnalysis = .unavailable
     }
 
     private func shouldPublishFailClosedStateAfterPersistenceFailure(

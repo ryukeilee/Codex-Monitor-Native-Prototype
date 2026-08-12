@@ -117,6 +117,7 @@ struct StatusPopoverView: View {
                     onLayoutChange()
                 }
             )
+            UsageTrendView(analysis: appState.usageTrendAnalysis)
             launchAtLoginSection
             actions
             diagnostics

@@ -2,7 +2,7 @@
 
 本文件只保存稳定架构信息、已确认设计、已解决的重要问题与已验证区域。**不保存**单次修改细节、临时日志、猜测。详细信息以 `AGENTS.md`、`CLAUDE.md` 为权威来源，本文件是面向维护 Loop 的长期摘要。内容有变化时（如模块迁移、新不变量），只在这里更新，不记录过程。
 
-最后更新：2026-08-09（基础设施初始化，从 AGENTS.md/CLAUDE.md/README.md 提炼）
+最后更新：2026-08-12（新增账号隔离的周额度趋势架构）
 
 ---
 
@@ -29,6 +29,7 @@
 - **账号边界 fail-closed**：真实快照绑定 `QuotaAccountBoundary`，只持久化域分隔 SHA-256 指纹；身份匹配才允许展示，否则清空显示 `--%`；跨刷新身份变化也失败关闭。持久化写失败不得复活失效快照；Widget 端主机显式失效时必须丢弃旧真实恢复源。
 - **持久化**：`PersistenceEnvelope`（formatVersion + revision + SHA-256 checksum + 新旧互读兼容）。`SnapshotStore` 用 UserDefaults（主键+backup+corrupt 三份，带校验回滚）；`WidgetDisplayStateStore` 用 App Group 文件（flock 事务锁 + backup 恢复 + 旧格式迁移），Widget 端以 `savedAt` 判断过期并带时钟偏斜容差。写保护：非真实数据不得覆盖真实数据；更旧真实快照不得覆盖更新的；新格式不得被旧版本覆盖。
 - **时间语义**：`QuotaTemporalSemantics` 是墙钟语义唯一来源（新鲜度、恢复、过期、时钟回拨）；测试注入 `now` 闭包，不依赖 run loop。
+- **周额度趋势**：主 App 通过独立的 `UsageTrendStore` 按账号/会话边界保存可信真实周额度样本，不进入共享 Widget payload。`UsageTrendAnalyzer` 只分析同一连续序列；额度重置与异常跳变都会开启新基线，至少 3 个样本且跨度 10 分钟后才计算速度与耗尽预测。
 - **安装/单实例**：`AppInstallationAuthority` 校验安装身份；`SingleInstanceCoordinator` 仲裁单实例所有权（redirect 首选安装、拒绝无效安装、版本与签名锚点比较）。
 
 ## 已解决的重要问题（避免重复调查）

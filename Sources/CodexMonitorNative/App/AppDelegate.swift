@@ -140,7 +140,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             initialNetworkReachability: nil,
             accountBoundaryProvider: {
                 CodexAuthIdentityReader.currentBoundary()
-            }
+            },
+            usageTrendStore: UsageTrendStore()
         )
         let launchAtLoginManager = LaunchAtLoginManager(
             currentInstallationIdentity: currentInstallationIdentity,
