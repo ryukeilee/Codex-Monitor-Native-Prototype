@@ -143,6 +143,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             },
             usageTrendStore: UsageTrendStore()
         )
+        let quotaAnomalyNotifier = QuotaAnomalyNotifier()
+        state.onQuotaAnomalyDetected = { anomaly in
+            quotaAnomalyNotifier.notify(anomaly)
+        }
         let launchAtLoginManager = LaunchAtLoginManager(
             currentInstallationIdentity: currentInstallationIdentity,
             allowsAutomaticReconciliation: allowsAutomaticLoginItemReconciliation

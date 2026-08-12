@@ -71,7 +71,7 @@ final class UsageTrendTests: XCTestCase {
         var history = UsageTrendHistory(accountBoundary: .testDefault)
         history.append(sample(at: base, remaining: 80))
         history.append(sample(at: base.addingTimeInterval(10 * 60), remaining: 79))
-        history.append(sample(at: base.addingTimeInterval(15 * 60), remaining: 40))
+        let anomaly = history.append(sample(at: base.addingTimeInterval(15 * 60), remaining: 40))
 
         let analysis = UsageTrendAnalyzer.analyze(history: history, currentResetAt: nil)
 
@@ -79,6 +79,34 @@ final class UsageTrendTests: XCTestCase {
         XCTAssertEqual(analysis.state, .insufficientData)
         XCTAssertEqual(analysis.latestNotice, .anomalousJump)
         XCTAssertNil(analysis.ratePercentPerHour)
+        XCTAssertEqual(anomaly?.previous.remainingPercent, 79)
+        XCTAssertEqual(anomaly?.current.remainingPercent, 40)
+        XCTAssertEqual(anomaly?.change, -39)
+    }
+
+    func testResetAndDuplicateSamplesDoNotProduceAnomaly() {
+        let base = Date(timeIntervalSince1970: 55_000)
+        let firstReset = base.addingTimeInterval(60 * 60)
+        let nextReset = firstReset.addingTimeInterval(7 * 24 * 60 * 60)
+        var history = UsageTrendHistory(accountBoundary: .testDefault)
+        XCTAssertNil(history.append(sample(at: base, remaining: 20, resetAt: firstReset)))
+        XCTAssertNil(history.append(sample(at: base.addingTimeInterval(10 * 60), remaining: 95, resetAt: nextReset)))
+        XCTAssertNil(history.append(sample(at: base.addingTimeInterval(10 * 60), remaining: 10, resetAt: nextReset)))
+        XCTAssertEqual(history.latestNotice, .quotaReset)
+    }
+
+    func testNotificationPayloadDescribesDetectedChange() {
+        let base = Date(timeIntervalSince1970: 56_000)
+        let anomaly = QuotaAnomaly(
+            previous: sample(at: base, remaining: 79),
+            current: sample(at: base.addingTimeInterval(60), remaining: 40)
+        )
+
+        let payload = QuotaAnomalyNotificationPayload.make(for: anomaly)
+
+        XCTAssertEqual(payload.identifier, "codex.monitor.quota-anomaly.56060.0")
+        XCTAssertEqual(payload.title, "Codex 额度异常变化")
+        XCTAssertEqual(payload.body, "周额度从 79%下降到 40%（39 个百分点），请确认账号活动。")
     }
 
     func testOutOfOrderSampleIsIgnored() {
@@ -234,6 +262,38 @@ final class UsageTrendAppStateTests: XCTestCase {
 
         XCTAssertEqual(appState.usageTrendAnalysis, .unavailable)
         XCTAssertNil(trendStore.load(matching: .testOtherAccount))
+    }
+
+    func testAnomalousRefreshEmitsExactlyOneReminderEvent() async {
+        let suiteName = "CodexMonitorNativeTests.quotaAnomalyAppState.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let base = Date(timeIntervalSince1970: 110_000)
+        let resetAt = base.addingTimeInterval(24 * 3600)
+        let service = UsageTrendSequenceRefreshService(snapshots: [
+            makeSnapshot(at: base, remaining: 80, resetAt: resetAt),
+            makeSnapshot(at: base.addingTimeInterval(5 * 60), remaining: 40, resetAt: resetAt),
+            makeSnapshot(at: base.addingTimeInterval(10 * 60), remaining: 39, resetAt: resetAt)
+        ])
+        let appState = AppState(
+            snapshotStore: SnapshotStore(defaults: defaults, key: "snapshot"),
+            refreshService: service,
+            now: { base.addingTimeInterval(10 * 60) },
+            accountBoundaryProvider: { .testDefault },
+            usageTrendStore: UsageTrendStore(defaults: defaults, key: "trend")
+        )
+        defer { appState.shutdown() }
+        var anomalies: [QuotaAnomaly] = []
+        appState.onQuotaAnomalyDetected = { anomalies.append($0) }
+
+        await appState.refreshNow(trigger: .manual)
+        await appState.refreshNow(trigger: .manual)
+        await appState.refreshNow(trigger: .manual)
+
+        XCTAssertEqual(anomalies.count, 1)
+        XCTAssertEqual(anomalies.first?.previous.remainingPercent, 80)
+        XCTAssertEqual(anomalies.first?.current.remainingPercent, 40)
+        XCTAssertEqual(appState.usageTrendAnalysis.samples.map(\.remainingPercent), [40, 39])
     }
 
     private func makeSnapshot(

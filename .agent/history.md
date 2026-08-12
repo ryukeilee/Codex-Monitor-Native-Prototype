@@ -120,3 +120,15 @@
 - **剩余风险**：耗尽时间是按最近连续样本的平均速度线性外推，不代表服务端保证；首次启用或重置/异常跳变后需等待至少 10 分钟和 3 次成功刷新。
 
 ---
+
+### Feature 2 — 额度异常变化检测与提醒
+
+- **日期**：2026-08-12
+- **类型**：用户明确授权的新功能开发（非 Maintenance Loop）。
+- **目标**：在可信真实周额度发生异常变化时检测并提醒，同时保持账号隔离、趋势重建、菜单栏和 Widget 行为不变。
+- **设计**：复用 `UsageTrendHistory` 已有异常阈值；新增 `QuotaAnomaly` 事件承载前后样本。只有同一账号/会话边界内新接受的异常样本触发一次事件；已知重置、重复/乱序、mock 与身份不匹配数据均不提醒。主 App 使用 `UserNotifications` 请求 alert/sound 权限并投递即时通知，前台时也展示 banner；拒绝权限或投递失败只记录日志，不影响额度状态提交。
+- **修改**：扩展 `Core/UsageTrend.swift` 返回结构化异常事件；在 `Shared/AppState.swift` 的可信趋势协调点发布事件；新增 `System/QuotaAnomalyNotifier.swift` 并在 `App/AppDelegate.swift` 接线；`UsageTrendTests.swift` 增加异常事件、重置/重复抑制、通知文案和单次发布测试。未修改 Widget payload、共享 Widget 源文件、持久化 schema、签名或安装配置。
+- **验证**：`swift test --filter UsageTrend`（13/0 通过）；`swift test`（557/0 通过）；`swift build -c debug`（exit 0）；`git diff --check`（exit 0）；`./script/build_and_run.sh --verify` 通过，确认 `/Applications/CodexMonitorNative.app` 正在运行，主 App 本地 ad-hoc 签名、Widget Apple Development 签名及 sandbox/App Group entitlements、版本、运行路径、单实例 owner、旧副本重定向与 Widget 绑定全部通过。未人为制造真实账号额度异常，因此通知中心的实际权限弹窗与 banner 外观仍需人工确认。
+- **剩余风险**：用户拒绝系统通知权限后不会收到提醒；异常阈值是确定性启发式规则，服务端未提供异常语义，提醒表示“建议确认”而非确认存在未授权使用。
+
+---

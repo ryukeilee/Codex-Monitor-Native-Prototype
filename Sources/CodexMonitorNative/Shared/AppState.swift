@@ -116,6 +116,11 @@ final class AppState: ObservableObject {
     /// back to AppState without recursion.
     var onRefreshRequested: (@MainActor (RefreshTrigger) -> Void)?
 
+    /// Emitted once for each newly accepted anomalous weekly quota sample.
+    /// AppState owns detection so reminders inherit the same trusted real-data
+    /// and account/session boundary checks as trend analysis.
+    var onQuotaAnomalyDetected: (@MainActor (QuotaAnomaly) -> Void)?
+
     // MARK: - Private
 
     private let snapshotStore: SnapshotStore
@@ -1183,13 +1188,16 @@ final class AppState: ObservableObject {
             usageTrendHistory = UsageTrendHistory(accountBoundary: acceptedBoundary)
         }
 
-        usageTrendHistory.append(sample)
+        let anomaly = usageTrendHistory.append(sample)
         usageTrendAnalysis = UsageTrendAnalyzer.analyze(
             history: usageTrendHistory,
             currentResetAt: sample.resetAt
         )
         if usageTrendStore?.save(usageTrendHistory) == false {
             AppLogger.snapshot.error("Failed to persist usage trend history")
+        }
+        if let anomaly {
+            onQuotaAnomalyDetected?(anomaly)
         }
     }
 

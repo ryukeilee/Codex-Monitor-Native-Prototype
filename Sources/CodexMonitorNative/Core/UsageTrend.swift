@@ -5,6 +5,15 @@ enum UsageTrendNotice: String, Codable, Equatable {
     case anomalousJump
 }
 
+struct QuotaAnomaly: Equatable {
+    let previous: UsageTrendSample
+    let current: UsageTrendSample
+
+    var change: Int {
+        current.remainingPercent - previous.remainingPercent
+    }
+}
+
 struct UsageTrendSample: Codable, Equatable, Identifiable {
     let recordedAt: Date
     let remainingPercent: Int
@@ -41,14 +50,15 @@ struct UsageTrendHistory: Codable, Equatable {
         self.schemaVersion = schemaVersion
     }
 
-    mutating func append(_ sample: UsageTrendSample) {
+    @discardableResult
+    mutating func append(_ sample: UsageTrendSample) -> QuotaAnomaly? {
         guard let previous = samples.last else {
             samples = [sample]
             latestNotice = nil
-            return
+            return nil
         }
 
-        guard sample.recordedAt > previous.recordedAt else { return }
+        guard sample.recordedAt > previous.recordedAt else { return nil }
 
         let elapsed = sample.recordedAt.timeIntervalSince(previous.recordedAt)
         let change = sample.remainingPercent - previous.remainingPercent
@@ -63,7 +73,7 @@ struct UsageTrendHistory: Codable, Equatable {
         if change >= 10 || (change > 0 && resetDeadlineAdvanced) || crossedKnownReset {
             samples = [sample]
             latestNotice = .quotaReset
-            return
+            return nil
         }
 
         let isUnexpectedIncrease = change > 0
@@ -72,12 +82,13 @@ struct UsageTrendHistory: Codable, Equatable {
         guard !isUnexpectedIncrease, !isRapidDrop, !isExtremeDrop else {
             samples = [sample]
             latestNotice = .anomalousJump
-            return
+            return QuotaAnomaly(previous: previous, current: sample)
         }
 
         samples.append(sample)
         latestNotice = nil
         prune(relativeTo: sample.recordedAt)
+        return nil
     }
 
     private mutating func prune(relativeTo newestDate: Date) {
