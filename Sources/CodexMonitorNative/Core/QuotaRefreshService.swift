@@ -92,6 +92,33 @@ struct QuotaRefreshService: QuotaRefreshing {
                 from: previousSnapshot,
                 for: snapshot
             )
+            if case ResetCreditsDetailError.noAvailableCredits = error,
+               reusableDetails.isEmpty {
+                // The server explicitly reported no available reset credits:
+                // that is a normal account state, not a detail fetch failure.
+                // Keep the neutral app-server count presentation.
+                return QuotaSnapshot(
+                    weeklyQuotaPercent: snapshot.weeklyQuotaPercent,
+                    fiveHourQuotaPercent: snapshot.fiveHourQuotaPercent,
+                    weeklyQuotaState: snapshot.weeklyQuotaState,
+                    fiveHourQuotaState: snapshot.fiveHourQuotaState,
+                    resetAvailableCount: snapshot.resetAvailableCount,
+                    resetCreditDetailsState: .appServerCountOnly,
+                    resetCreditDiagnostic: nil,
+                    resetCreditDetails: [],
+                    resetCreditStatusSummary: [],
+                    resetCreditTimeEntries: [],
+                    resetCreditRawFields: [],
+                    fiveHourResetAt: snapshot.fiveHourResetAt,
+                    resetBanks: snapshot.resetBanks,
+                    refreshedAt: snapshot.refreshedAt,
+                    dataSource: snapshot.dataSource,
+                    errorMessage: snapshot.errorMessage,
+                    schemaVersion: snapshot.schemaVersion,
+                    quotaWindows: snapshot.quotaWindows,
+                    accountBoundary: snapshot.accountBoundary
+                )
+            }
             let fallbackDescription = reusableDetails.isEmpty
                 ? "app-server count only"
                 : "app-server count with previous unexpired detail times"

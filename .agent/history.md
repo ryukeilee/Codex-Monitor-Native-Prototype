@@ -109,6 +109,18 @@
 
 ---
 
+### Loop 5 — noAvailableCredits 被错误归类为详情获取失败
+
+- **日期**：2026-08-13
+- **问题**：账号当前无可用重置额度（正常业务状态）被当作"详情获取失败"处理：Popover 显示"详情失败：没有 available credits"，且真实应用每 15 分钟记录一条 error 级日志 `Reset credits detail fetch unavailable (没有 available credits); using app-server count only`，持续污染错误监控。
+- **证据**：`log show --last 24h`（PID 16536，2026-08-13 00:22–13:12 连续 60+ 条，间隔 15 分钟 = `AdaptiveRefreshCadencePolicy.stableInterval`）；`ResetCreditsDetailProvider.parsePayload` 对 credits 数组无 available 条目抛 `noAvailableCredits`，与网络故障共用同一 `.unavailable` + diagnostic 降级路径（`QuotaRefreshService.enrichResetCreditsDetails` catch 分支）；对比 UI 对 `.detailed` + count==0 有专门中性文案"当前没有可用 reset credit"、`.appServerCountOnly` 本就是中性状态。
+- **原因**：`noAvailableCredits` 是服务端明确返回的正常状态（当前无可用重置额度），不是获取故障；错误分类不当导致误导文案与持续 error 级日志（`Logger.warning` 在本机 macOS 上经 unified logging 显示为 E/error 级，全项目一致，非本消息特有）。
+- **修改**：`Sources/CodexMonitorNative/Core/QuotaRefreshService.swift`（enrichResetCreditsDetails catch 分支特判 `noAvailableCredits` 且无可复用详情时，返回中性 `.appServerCountOnly`、diagnostic 置 nil、不记录日志；有可复用详情时保持原有 `.unavailable` 降级不变，复用条件未动）；`Tests/CodexMonitorNativeTests/QuotaRefreshServiceTests.swift`（+2 测试：无复用详情 → 中性状态；有复用详情 → 保持 .unavailable，锁定边界行为；+1 测试桩 `NoAvailableCreditsProvider`）。未改 UI/格式化/Widget 文件、未改持久化 schema（`.appServerCountOnly` 是既有 case）。
+- **验证**：`swift test --filter QuotaRefreshServiceTests`（13/0，含新增 2 测试）；`swift test --filter StatusPopoverFormattingTests --filter ResetCreditsDetailProviderTests --filter WidgetPresentationTests --filter WidgetTimelineBridgeTests`（132/0）；`swift test`（559/0，557+2）；`swift build -c debug`（exit 0）。
+- **剩余风险**：当前运行的 App（PID 16536）仍是旧二进制，日志行为变化需下次启动/更新后生效，未实测新二进制下的日志输出；Popover 文案变化（"详情失败：没有 available credits" → "当前仅显示 Codex 提供的次数"）属于可见行为，未做 QA_CHECKLIST 人工桌面检查（本环境无 GUI 访问），已由 `StatusPopoverFormattingTests` 覆盖中性状态文案路径。不涉及打包/签名/安装/Widget 集成改动，未运行 `--verify`。
+
+---
+
 ### Feature 1 — 周额度消耗趋势与耗尽预测
 
 - **日期**：2026-08-12

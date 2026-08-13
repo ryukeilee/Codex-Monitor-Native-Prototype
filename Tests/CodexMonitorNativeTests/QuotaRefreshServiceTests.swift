@@ -77,6 +77,76 @@ final class QuotaRefreshServiceTests: XCTestCase {
         XCTAssertTrue(refreshed.resetCreditStatusSummary.isEmpty)
     }
 
+    func testRefreshTreatsNoAvailableCreditsAsNormalAppServerCountState() async throws {
+        let appServerSnapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 70,
+            fiveHourQuotaPercent: 64,
+            resetAvailableCount: 0,
+            resetCreditDetailsState: .appServerCountOnly,
+            fiveHourResetAt: makeDate("2026-06-19T14:10:00Z"),
+            refreshedAt: makeDate("2026-06-19T12:40:00Z"),
+            dataSource: .real,
+            accountBoundary: .testDefault
+        )
+
+        let service = QuotaRefreshService(
+            realProvider: StubRealQuotaProvider(snapshot: appServerSnapshot),
+            resetCreditsDetailProvider: NoAvailableCreditsProvider(),
+            mockProvider: MockQuotaProvider()
+        )
+
+        let refreshed = try await service.refresh(basedOn: QuotaSnapshot.notConnected)
+
+        XCTAssertEqual(refreshed.resetAvailableCount, 0)
+        XCTAssertEqual(refreshed.resetCreditDetailsState, .appServerCountOnly)
+        XCTAssertNil(refreshed.resetCreditDiagnostic)
+        XCTAssertTrue(refreshed.resetCreditDetails.isEmpty)
+        XCTAssertTrue(refreshed.resetCreditStatusSummary.isEmpty)
+    }
+
+    func testRefreshKeepsUnavailableFallbackWhenNoAvailableCreditsButReusableDetailsExist() async throws {
+        let earlyExpiry = makeDate("2026-06-19T18:00:00Z")
+        let previous = QuotaSnapshot(
+            weeklyQuotaPercent: 70,
+            fiveHourQuotaPercent: 64,
+            resetAvailableCount: 1,
+            resetCreditDetailsState: .detailed,
+            resetCreditDetails: [
+                ResetCreditDetailSnapshot(
+                    ordinal: 1,
+                    status: "available",
+                    grantedAt: makeDate("2026-06-19T10:00:00Z"),
+                    expiresAt: earlyExpiry
+                )
+            ],
+            resetCreditStatusSummary: [ResetCreditStatusSummary(status: "available", count: 1)],
+            refreshedAt: makeDate("2026-06-19T12:40:00Z"),
+            dataSource: .real,
+            accountBoundary: .testDefault
+        )
+        let appServerSnapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 69,
+            fiveHourQuotaPercent: 63,
+            resetAvailableCount: 1,
+            resetCreditDetailsState: .appServerCountOnly,
+            refreshedAt: makeDate("2026-06-19T12:45:00Z"),
+            dataSource: .real,
+            accountBoundary: .testDefault
+        )
+        let service = QuotaRefreshService(
+            realProvider: StubRealQuotaProvider(snapshot: appServerSnapshot),
+            resetCreditsDetailProvider: NoAvailableCreditsProvider(),
+            mockProvider: MockQuotaProvider()
+        )
+
+        let refreshed = try await service.refresh(basedOn: previous)
+
+        XCTAssertEqual(refreshed.resetAvailableCount, 1)
+        XCTAssertEqual(refreshed.resetCreditDetailsState, .unavailable)
+        XCTAssertEqual(refreshed.resetCreditDiagnostic?.summary, "没有 available credits")
+        XCTAssertEqual(refreshed.resetCreditDetails.compactMap(\.expiresAt), [earlyExpiry])
+    }
+
     func testRefreshKeepsMatchingUnexpiredResetCreditTimesWhenDetailRefreshFails() async throws {
         let earlyExpiry = makeDate("2026-06-19T18:00:00Z")
         let lateExpiry = makeDate("2026-06-20T12:00:00Z")
@@ -410,6 +480,14 @@ private struct FailingResetCreditsProvider: ResetCreditsDetailRefreshing, Sendab
         for _: QuotaAccountBoundary
     ) async throws -> ResetCreditsDetailPayload {
         throw ResetCreditsDetailError.unexpectedStatusCode(503)
+    }
+}
+
+private struct NoAvailableCreditsProvider: ResetCreditsDetailRefreshing, Sendable {
+    func fetchDetails(
+        for _: QuotaAccountBoundary
+    ) async throws -> ResetCreditsDetailPayload {
+        throw ResetCreditsDetailError.noAvailableCredits
     }
 }
 
