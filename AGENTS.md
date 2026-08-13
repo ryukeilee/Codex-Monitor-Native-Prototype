@@ -7,14 +7,14 @@ This repository is a macOS 14+ menu bar app built with Swift 6 and Swift Package
 Primary app code lives in `Sources/CodexMonitorNative` and is split by responsibility:
 
 - `App/` — app lifecycle and `@main` entry point (`CodexMonitorNativeApp.swift`), `AppDelegate` NSApplication delegate with single-instance ownership claiming, installation identity revalidation, popover/activation lifecycle, status bar wiring, popover controller, and widget timeline bridge
-- `Core/` — quota refresh, scheduling, snapshot persistence, Codex RPC discovery, and providers (real/mock)
-- `UI/` — SwiftUI popover views, metallic panel decorative components, reactor visualization, formatting helpers, interaction policy, and self-check snapshot
+- `Core/` — quota refresh, scheduling, snapshot persistence, Codex RPC discovery, providers (real/mock), reset credit details, and usage trend storage/analysis
+- `UI/` — SwiftUI popover views, metallic panel decorative components, reactor visualization, formatting helpers, interaction policy, self-check snapshot, and usage trend view/formatting
 - `Shared/` — shared models (`AppState`, `WidgetDisplayState`), data source protocols, quota decision/status types, health diagnostic (`RealQuotaHealthDiagnostic`), OSLog subsystem/category definitions (`AppLogger`), and widget presentation helpers
-- `System/` — platform integrations: single-instance arbitration (`SingleInstanceCoordinator`), installation identity and authority (`AppInstallationIdentity` + `AppInstallationAuthority`), launch-at-login, sleep/wake, network reachability, system clock monitoring, and Codex auth boundary observer
+- `System/` — platform integrations: single-instance arbitration (`SingleInstanceCoordinator`), installation identity and authority (`AppInstallationIdentity` + `AppInstallationAuthority`), launch-at-login, sleep/wake, network reachability, system clock monitoring, Codex auth boundary observer, and quota anomaly notification
 
 Widget extension source lives in `Sources/CodexMonitorWidgetExtension/CodexMonitorWidget.swift`.
 
-Tests live in `Tests/CodexMonitorNativeTests` (currently 544 tests, 0 failures). Runtime assets and entitlements are in `Assets/`. Local packaging and run helpers are in `script/`. Manual verification guidance lives in `VERIFICATION.md` and `QA_CHECKLIST.md`. Implementation plans live in `docs/superpowers/plans/`. Pi agent worktree sessions are tracked in `.claude/worktrees/`. Built app bundles are emitted to `dist/`; treat `dist/`, `.build/`, and `build/` as generated output, not source.
+Tests live in `Tests/CodexMonitorNativeTests` (currently 559 tests, 0 failures). Runtime assets and entitlements are in `Assets/`. Local packaging and run helpers are in `script/`. Manual verification guidance lives in `VERIFICATION.md` and `QA_CHECKLIST.md`. Implementation plans live in `docs/superpowers/plans/`. Pi agent worktree sessions are tracked in `.claude/worktrees/`. Built app bundles are emitted to `dist/`; treat `dist/`, `.build/`, and `build/` as generated output, not source.
 
 The Xcode widget target directly compiles selected app sources; the authoritative list is the widget target's Sources build phase in `CodexMonitorWidgetExtension.xcodeproj/project.pbxproj`, not the SwiftPM target declaration. Currently it includes files from:
 
@@ -40,18 +40,20 @@ Unless a task explicitly changes the product contract:
 - A failed real refresh keeps the last successful real snapshot and surfaces the typed failure state; it must not clear or relabel cached data as fresh.
 - Cached real quota data may be restored, merged, or reused only when its validated account/session boundary matches the current Codex identity. Missing, malformed, changed, or unverifiable identity must fail closed so one account's quota is never shown for another account. Fail-closed invalidation must also be published when persistence is unavailable: a persistence write failure must not revive a real snapshot whose account/session ownership is no longer valid, and the Widget must drop old real recovery sources whenever the host explicitly invalidates them, even when the primary state file cannot be replaced or decoded.
 - The popover, status-item tooltip, and Widget derive quota windows from the shared presentation path. Keep ordering, filtering, labels, progress, reset times, and overflow behavior semantically aligned.
+- Usage trend history and anomaly alerts consume only trusted real weekly quota samples inside the validated account/session boundary. Quota resets and anomalous jumps start a new trend baseline, and no alert fires for mock data, unbound snapshots, or mismatched identity samples.
 
 ## Build, Test, and Development Commands
 
 - `swift build -c debug`: build the app for local development
 - `swift build -c release`: build the release binary
-- `swift test`: run the full XCTest suite (currently 544 tests)
+- `swift test`: run the full XCTest suite (currently 559 tests)
 - `swift test --filter <TestType-or-method>`: run the smallest relevant XCTest subset while iterating
 - `./script/build_and_run.sh`: build, package, sign locally, and launch the app bundle
 - `./script/build_and_run.sh --debug`: build and launch the packaged app under LLDB
 - `./script/build_and_run.sh --verify`: run the unified installation acceptance flow; it replaces the app at `INSTALL_APP_PATH`, launches it, and verifies app/Widget versions, the running path, and Widget binding
 - `./script/build_and_run.sh --logs`: stream app process logs for manual debugging
 - `./script/build_and_run.sh --telemetry`: stream app subsystem telemetry logs
+- `./script/build-and-install.sh`: legacy compatibility entry point that forwards to `./script/build_and_run.sh --verify`
 
 The packaging script also builds the widget extension when `CodexMonitorWidgetExtension.xcodeproj` is present.
 
@@ -107,7 +109,7 @@ No formatter or linter is currently checked in, so keep diffs small and style-co
 
 ## Testing and Definition of Done
 
-Use XCTest in `Tests/CodexMonitorNativeTests`. Name test files after the production type, and use method names like `testFailedRefreshKeepsLastSuccessfulSnapshot`. The current test suite (544 tests) covers the following areas:
+Use XCTest in `Tests/CodexMonitorNativeTests`. Name test files after the production type, and use method names like `testFailedRefreshKeepsLastSuccessfulSnapshot`. The current test suite (559 tests) covers the following areas:
 
 | Test area | Representative test files |
 |---|---|
@@ -120,6 +122,8 @@ Use XCTest in `Tests/CodexMonitorNativeTests`. Name test files after the product
 | UI presentation | `StatusPopoverFormattingTests`, `StatusPopoverBehaviorTests`, `StatusSelfCheckSnapshotTests`, `MechanicalEnergyCoreLayoutTests` |
 | Widget state & timeline | `WidgetPresentationTests`, `WidgetTimelineBridgeTests` |
 | Reset credits | `ResetCreditsDetailProviderTests` |
+| Usage trend & anomaly alerts | `UsageTrendTests` |
+| Refresh reliability probes | `ReliabilityProbeTests` |
 | Deterministic fault scenarios | `DeterministicFaultScenarioTests` |
 | Refresh consistency regression | `RefreshConsistencyRegressionTests` |
 | Quota decision logic | `QuotaDecisionTests` |
