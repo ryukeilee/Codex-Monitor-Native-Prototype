@@ -144,3 +144,20 @@
 - **剩余风险**：用户拒绝系统通知权限后不会收到提醒；异常阈值是确定性启发式规则，服务端未提供异常语义，提醒表示“建议确认”而非确认存在未授权使用。
 
 ---
+
+### Loop 6 — 无有效证据，本轮不修改
+
+- **日期**：2026-08-14
+- **问题**：未发现可处理的高价值问题，按 `loop.md` §2/§3 结束本轮，不修改代码。
+- **检查范围**（Observe 阶段）：
+  - `git status`：工作区 clean，无未提交修改、无未跟踪文件；`git diff --stat` 为空；`git log --oneline -10`：最新提交 `bb9497f docs: remove CLAUDE.md and sync AGENTS.md with current project`（纯文档清理，无代码改动），无在途分支或未完成事项。
+  - 全量测试 `swift test`：559 个，0 失败（2026-08-14 12:48 执行，与 AGENTS.md / Loop 5 记录一致）。
+  - `rg -n "TODO|FIXME|HACK" Sources Tests docs`：无匹配。
+  - 已知问题文档 `VERIFICATION.md` / `QA_CHECKLIST.md` / `README.md`：自 `bfa11fc` 后无修改（`git log -- <docs>` 确认）；未勾选项均为人工桌面行为检查（Full-Screen Space、Real Sleep/Wake、Manual Refresh UX 等），非代码缺陷。
+  - 应用日志：App（PID 30564）与 Widget（PID 30571）自 2026-08-13 13:33 起常驻运行；`log show --last 24h` 中 subsystem 含 `CodexMonitor` 的 error 级输出全部来自 **xctest 测试进程**（PID 59665/99180/2427 等）：`Launch at login registration/unregistration failed（SMAppServiceErrorDomain 3/7/11/12）` 属 `LaunchAtLoginManagerTests` 预期失败路径模拟（Loop 4 已核实）；`Reset credits detail fetch unavailable（HTTP 503 / 没有 available credits）` 属 `QuotaRefreshServiceTests` 对降级路径的断言模拟，其中 `没有 available credits ... with previous unexpired detail times` 正是 Loop 5 明确保留的“有可复用详情 → 保持 `.unavailable`”边界路径，均有测试锁定。真实 App 进程 24h 内无 error/fault/crash 日志。
+  - 用户反馈：本次会话仅要求执行一次 Loop，无具体问题场景。
+- **未发现高价值问题的原因**：按 §2 有效证据清单逐项对照——无可复现 Bug、无测试失败、无行为异常（相对 Product Invariants）、无用户反馈、无带代码路径证据的稳定性/性能风险、无测试缺口（AGENTS.md 测试领域表各领域均有覆盖文件）。测试进程的预期模拟日志与文档中的人工发布门禁项均非代码缺陷证据，禁止以“顺手优化”或猜测式修改替代。
+- **验证状态**：`swift test`（559/0 通过）已执行；`swift build -c debug` 未运行（本轮无代码改动，无构建变化）；`./script/build_and_run.sh --verify` 与 QA 人工检查未运行——不涉及打包/签名/安装/Widget 集成或可见行为变更，不满足运行门槛。
+- **剩余风险**：无新增风险。Loop 5 记录的遗留项仍在跟踪：运行中的 App（PID 30564，13:33 启动）启动时间早于修复提交 `2c0187c`（13:34），为旧二进制，Loop 5 的日志行为变化需下次启动/更新后生效——已确认 24h 内旧二进制未产生 error 级日志，修复后行为待其重启后复核；遗留人工桌面验证项继续由发布前人工门禁覆盖，不构成本 Loop 的修改依据。
+
+---
