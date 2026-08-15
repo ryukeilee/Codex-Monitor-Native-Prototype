@@ -161,3 +161,19 @@
 - **剩余风险**：无新增风险。Loop 5 记录的遗留项仍在跟踪：运行中的 App（PID 30564，13:33 启动）启动时间早于修复提交 `2c0187c`（13:34），为旧二进制，Loop 5 的日志行为变化需下次启动/更新后生效——已确认 24h 内旧二进制未产生 error 级日志，修复后行为待其重启后复核；遗留人工桌面验证项继续由发布前人工门禁覆盖，不构成本 Loop 的修改依据。
 
 ---
+
+### Loop 7 — 无有效证据，本轮不修改
+
+- **日期**：2026-08-16
+- **问题**：未发现可处理的高价值问题，按 `loop.md` §2/§3 结束本轮，不修改代码。
+- **检查范围**（Observe 阶段）：
+  - `git status --short` / `git log --oneline -10` / `git diff --stat`：工作区 clean，无未提交修改、无未跟踪文件；HEAD 为 `c30d991 docs: record loop 6 maintenance session (no code change)`，自 Loop 6 记录后仓库无任何新提交，无在途分支或未完成事项。
+  - 全量测试 `swift test`：559 个，0 失败（2026-08-16 00:40 执行，与 AGENTS.md / Loop 6 记录一致）。
+  - `rg -n "TODO|FIXME|HACK"`（Sources/Tests 的 .swift 与 docs）：无匹配。
+  - 已知问题文档 `VERIFICATION.md` / `QA_CHECKLIST.md` / `README.md`：`git diff bfa11fc HEAD --stat` 为空，三份文档自 `bfa11fc` 后无修改；未勾选项均为人工桌面行为检查（Full-Screen Space、Real Sleep/Wake、Manual Refresh UX 等），非代码缺陷。
+  - 应用日志：`log show --last 24h`（subsystem 含 CodexMonitor，排除 xctest 进程）0 条 error/fault/crash 级输出。App 进程仍为 PID 30564（2026-08-13 13:33 启动，旧二进制，早于 Loop 5 修复提交 `2c0187c` 13:34），24h 内未产生 error 级日志——与 Loop 6 跟踪项一致：当前账号状态未触发"无可用重置额度"路径，修复后行为待该进程重启后复核，非代码缺陷证据。
+  - 用户反馈：本次会话仅要求执行一次 Loop，无具体问题场景。
+- **未发现高价值问题的原因**：按 §2 有效证据清单逐项对照——无可复现 Bug、无测试失败（559/0）、无行为异常（相对 Product Invariants）、无用户反馈、无带代码路径证据的稳定性/性能风险、无测试缺口（AGENTS.md 测试领域表各领域均有覆盖文件）。文档未验证项与旧二进制遗留跟踪项均非代码缺陷证据，禁止以"顺手优化"或猜测式修改替代。
+- **验证状态**：`swift test`（559/0 通过）已执行；`swift build -c debug` 未运行（本轮无代码改动，无构建变化）；`./script/build_and_run.sh --verify` 与 QA 人工检查未运行——不涉及打包/签名/安装/Widget 集成或可见行为变更，不满足运行门槛。
+- **剩余风险**：无新增风险。遗留跟踪项：运行中的 App（PID 30564）为旧二进制，Loop 5 日志行为变化待其重启后复核（24h 内已确认无 error 日志）；遗留人工桌面验证项继续由发布前人工门禁覆盖，不构成本 Loop 的修改依据。附带观察（非本轮修改对象）：`memory.md` 中测试数量仍记 544，实际为 559（AGENTS.md 明确以 `swift test` 实际结果为准），属文档滞后，记录备查。
+
