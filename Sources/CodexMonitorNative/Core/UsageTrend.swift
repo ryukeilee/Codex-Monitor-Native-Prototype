@@ -139,6 +139,12 @@ struct UsageTrendAnalysis: Equatable {
 enum UsageTrendAnalyzer {
     static let minimumSampleCount = 3
     static let minimumObservationInterval: TimeInterval = 10 * 60
+    // Robustness tuning — conservative to avoid false exhaustion.
+    private static let idleGapThreshold: TimeInterval = 90 * 60
+    private static let idleMaxConsumption: Int = 1
+    private static let lowVariationThreshold: Int = 2
+    private static let lowRateThreshold: Double = 0.7 // %/h below this is considered stable/noise
+    private static let maximumCredibleExhaustionHours: Double = 14 * 24
 
     static func analyze(
         history: UsageTrendHistory,
@@ -163,7 +169,25 @@ enum UsageTrendAnalyzer {
             )
         }
 
-        let consumed = first.remainingPercent - last.remainingPercent
+        // 1. Effective window after long idle with near-zero consumption.
+        let effective = trimmedAfterIdleGap(samples)
+        let working: [UsageTrendSample]
+        let workingSpan: TimeInterval
+        if effective.count >= minimumSampleCount,
+           let ef = effective.first, let el = effective.last,
+           el.recordedAt.timeIntervalSince(ef.recordedAt) >= minimumObservationInterval {
+            working = effective
+            workingSpan = el.recordedAt.timeIntervalSince(ef.recordedAt)
+        } else {
+            working = samples
+            workingSpan = span
+        }
+
+        guard let wFirst = working.first, let wLast = working.last else {
+            return .unavailable
+        }
+
+        let consumed = wFirst.remainingPercent - wLast.remainingPercent
         guard consumed > 0 else {
             return UsageTrendAnalysis(
                 state: .stable,
@@ -175,8 +199,23 @@ enum UsageTrendAnalyzer {
             )
         }
 
-        let rate = Double(consumed) / (span / 3600)
-        guard rate.isFinite, rate > 0 else {
+        // Low variation: require meaningful total drop to predict exhaustion.
+        // Evidence不足时宁可不预测
+        if consumed < lowVariationThreshold {
+            // If span is at least 30 min and drop is only 1%, it's noise
+            if workingSpan >= 30 * 60 {
+                return UsageTrendAnalysis(
+                    state: .insufficientData,
+                    samples: samples,
+                    ratePercentPerHour: nil,
+                    exhaustionAt: nil,
+                    resetAt: resetAt,
+                    latestNotice: history.latestNotice
+                )
+            }
+            // For shorter spans, 1% drop is also weak — treat as insufficient
+            // but keep compatibility for edge where 1% over 10-20 min could be noise
+            // Require at least 2% total to be confident.
             return UsageTrendAnalysis(
                 state: .insufficientData,
                 samples: samples,
@@ -187,15 +226,206 @@ enum UsageTrendAnalyzer {
             )
         }
 
-        let hoursToExhaustion = Double(last.remainingPercent) / rate
+        // Base rate from end-to-end (time-weighted, robust to irregular intervals)
+        let baseRate = Double(consumed) / (workingSpan / 3600)
+        guard baseRate.isFinite, baseRate > 0 else {
+            return UsageTrendAnalysis(
+                state: .insufficientData,
+                samples: samples,
+                ratePercentPerHour: nil,
+                exhaustionAt: nil,
+                resetAt: resetAt,
+                latestNotice: history.latestNotice
+            )
+        }
+
+        // Very low rate is indistinguishable from stable given sample noise.
+        if baseRate < lowRateThreshold {
+            // Check if recent segment shows stronger evidence
+            let recentRateForLow = recentWindowRate(working)
+            if let rr = recentRateForLow.rate, rr >= 1.5, recentRateForLow.consumed >= 2 {
+                // Recent stronger signal overrides low average — continue to burst logic
+            } else {
+                return UsageTrendAnalysis(
+                    state: .stable,
+                    samples: samples,
+                    ratePercentPerHour: 0,
+                    exhaustionAt: nil,
+                    resetAt: resetAt,
+                    latestNotice: history.latestNotice
+                )
+            }
+        }
+
+        // 2. Recent burst handling — avoid long-term average diluting recent spike.
+        var finalRate = baseRate
+        let recent = recentWindowRate(working)
+        if let rRate = recent.rate, let rSpan = recent.span, rSpan >= minimumObservationInterval,
+           recent.consumed >= 2, rRate.isFinite, rRate > 0 {
+            // Only blend if recent is meaningfully faster than base
+            if rRate > baseRate * 1.5 && rRate - baseRate > 1.5 {
+                finalRate = 0.75 * rRate + 0.25 * baseRate
+            } else if rRate > baseRate * 1.3 && rRate - baseRate > 1.0 {
+                finalRate = 0.60 * rRate + 0.40 * baseRate
+            }
+        }
+
+        guard finalRate.isFinite, finalRate > 0 else {
+            return UsageTrendAnalysis(
+                state: .insufficientData,
+                samples: samples,
+                ratePercentPerHour: nil,
+                exhaustionAt: nil,
+                resetAt: resetAt,
+                latestNotice: history.latestNotice
+            )
+        }
+
+        // 3. Variance / irregular-interval sanity: suppress if residuals show high noise relative to signal
+        if isPredictionUnreliable(samples: working, rate: finalRate) {
+            return UsageTrendAnalysis(
+                state: .insufficientData,
+                samples: samples,
+                ratePercentPerHour: nil,
+                exhaustionAt: nil,
+                resetAt: resetAt,
+                latestNotice: history.latestNotice
+            )
+        }
+
+        let hoursToExhaustion = Double(wLast.remainingPercent) / finalRate
+        guard hoursToExhaustion.isFinite, hoursToExhaustion > 0,
+              hoursToExhaustion <= maximumCredibleExhaustionHours else {
+            return UsageTrendAnalysis(
+                state: .insufficientData,
+                samples: samples,
+                ratePercentPerHour: nil,
+                exhaustionAt: nil,
+                resetAt: resetAt,
+                latestNotice: history.latestNotice
+            )
+        }
+
         return UsageTrendAnalysis(
             state: .consuming,
             samples: samples,
-            ratePercentPerHour: rate,
-            exhaustionAt: last.recordedAt.addingTimeInterval(hoursToExhaustion * 3600),
+            ratePercentPerHour: finalRate,
+            exhaustionAt: wLast.recordedAt.addingTimeInterval(hoursToExhaustion * 3600),
             resetAt: resetAt,
             latestNotice: history.latestNotice
         )
+    }
+
+    // MARK: - Idle trimming
+
+    private static func trimmedAfterIdleGap(_ samples: [UsageTrendSample]) -> [UsageTrendSample] {
+        guard samples.count >= 3 else { return samples }
+        var lastIdleIndex: Int?
+        for i in 1..<samples.count {
+            let gap = samples[i].recordedAt.timeIntervalSince(samples[i - 1].recordedAt)
+            let consumed = samples[i - 1].remainingPercent - samples[i].remainingPercent
+            // Long gap with near-zero consumption signals idle period
+            if gap >= idleGapThreshold && consumed <= idleMaxConsumption && consumed >= 0 {
+                lastIdleIndex = i
+            }
+        }
+        if let idx = lastIdleIndex, samples.count - idx >= 2 {
+            return Array(samples[idx...])
+        }
+        return samples
+    }
+
+    // MARK: - Recent window
+
+    private struct RecentInfo {
+        let rate: Double?
+        let span: TimeInterval?
+        let consumed: Int
+    }
+
+    private static func recentWindowRate(_ samples: [UsageTrendSample]) -> RecentInfo {
+        guard samples.count >= 2, let last = samples.last else {
+            return RecentInfo(rate: nil, span: nil, consumed: 0)
+        }
+        // Target at least 30 min or at least 3 points, whichever covers more recent history
+        let targetSpan: TimeInterval = 30 * 60
+        var startIndex = samples.count - 1
+        // Walk backwards until we cover targetSpan or have 4 points
+        for i in stride(from: samples.count - 1, through: 0, by: -1) {
+            let span = last.recordedAt.timeIntervalSince(samples[i].recordedAt)
+            let count = samples.count - i
+            if span >= targetSpan || count >= 4 {
+                startIndex = i
+                break
+            }
+            // If we reach the beginning without hitting target, include all
+            if i == 0 { startIndex = 0 }
+        }
+        let window = Array(samples[startIndex...])
+        guard window.count >= 2, let first = window.first else {
+            return RecentInfo(rate: nil, span: nil, consumed: 0)
+        }
+        let span = last.recordedAt.timeIntervalSince(first.recordedAt)
+        let consumed = first.remainingPercent - last.remainingPercent
+        guard span > 0 else { return RecentInfo(rate: nil, span: span, consumed: consumed) }
+        let rate = Double(consumed) / (span / 3600)
+        return RecentInfo(rate: rate, span: span, consumed: consumed)
+    }
+
+    // MARK: - Unreliability check (low evidence / high variance)
+
+    private static func isPredictionUnreliable(samples: [UsageTrendSample], rate: Double) -> Bool {
+        guard samples.count >= 3, rate > 0 else { return true }
+        // Compute linear fit residuals to detect high noise vs small slope
+        // x = hours since first, y = remaining
+        guard let first = samples.first else { return false }
+        let n = Double(samples.count)
+        var sumX = 0.0, sumY = 0.0, sumX2 = 0.0, sumXY = 0.0
+        var ys: [Double] = []
+        var xs: [Double] = []
+        for s in samples {
+            let x = s.recordedAt.timeIntervalSince(first.recordedAt) / 3600
+            let y = Double(s.remainingPercent)
+            xs.append(x); ys.append(y)
+            sumX += x; sumY += y; sumX2 += x * x; sumXY += x * y
+        }
+        let denom = n * sumX2 - sumX * sumX
+        // If denom ~0 (all x same, shouldn't happen due to span check), skip
+        guard abs(denom) > 1e-9 else { return false }
+        let slope = (n * sumXY - sumX * sumY) / denom // negative for consumption
+        let intercept = (sumY - slope * sumX) / n
+        // R^2 and residual std
+        let meanY = sumY / n
+        var ssTot = 0.0, ssRes = 0.0
+        var maxAbsResidual = 0.0
+        for i in 0..<samples.count {
+            let pred = slope * xs[i] + intercept
+            let res = ys[i] - pred
+            ssRes += res * res
+            ssTot += (ys[i] - meanY) * (ys[i] - meanY)
+            maxAbsResidual = max(maxAbsResidual, abs(res))
+        }
+        // If total variance is tiny (<1% range), it's low variation — already handled, but high residual relative to slope is unreliable
+        let rmse = sqrt(ssRes / n)
+        // If RMSE is large (>3%) and rate is modest (<4%/h), evidence is weak
+        if rmse > 3.0 && rate < 4.0 {
+            // Also require R^2 low
+            let r2: Double = ssTot > 1e-9 ? 1 - ssRes / ssTot : 0
+            if r2 < 0.35 {
+                return true
+            }
+            if maxAbsResidual > 5.0 {
+                return true
+            }
+        }
+        // If RMSE dominates the total drop, unreliable
+        if let firstS = samples.first, let lastS = samples.last {
+            let totalDrop = Double(firstS.remainingPercent - lastS.remainingPercent)
+            if totalDrop > 0 && rmse > totalDrop * 0.6 && totalDrop < 5 {
+                return true
+            }
+        }
+        return false
     }
 }
 
