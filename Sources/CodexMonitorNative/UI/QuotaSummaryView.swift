@@ -6,6 +6,8 @@ struct QuotaSummaryView: View {
     @Binding private var showsAllResetCredits: Bool
     @Binding private var showsResetCreditFields: Bool
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     init(
         presentationSnapshot: QuotaPresentationSnapshot,
         showsAllResetCredits: Binding<Bool> = .constant(false),
@@ -45,6 +47,14 @@ struct QuotaSummaryView: View {
                 resetCreditsSection(resetCreditsSummary)
             }
         }
+        // Card insertion/removal (a window flipping live↔cached/unavailable
+        // across refreshes, or the first snapshot arriving) animates in place
+        // instead of snapping the grid around. Keyed on card identity so
+        // disclosure toggles and countdown ticks never trigger it.
+        .animation(
+            reduceMotion ? nil : .easeInOut(duration: 0.28),
+            value: quotaItems.map(\.id)
+        )
         .onChange(of: showsAllResetCredits) { _, _ in
             onLayoutChange(
                 QuotaDisclosureLayoutPolicy.requiresParentViewport(
@@ -213,6 +223,8 @@ struct QuotaGaugeView: View {
     let status: QuotaRefreshStatus
     let accessibilitySortPriority: Double
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     private var accessibilityState: StatusPopoverAccessibilityContract.QuotaCardState {
         StatusPopoverAccessibilityContract.quotaCardState(for: item, status: status)
     }
@@ -244,6 +256,7 @@ struct QuotaGaugeView: View {
                 .foregroundStyle(MetallicPalette.foreground)
                 .lineLimit(nil)
                 .fixedSize(horizontal: true, vertical: false)
+                .contentTransition(reduceMotion ? .identity : .numericText())
             if let historyCaption = item.historyCaption {
                 Text(historyCaption)
                     .font(.caption2)
@@ -270,6 +283,11 @@ struct QuotaGaugeView: View {
                 .foregroundStyle(MetallicPalette.muted)
                 .lineLimit(1)
         }
+        // State transitions (refresh result, cache provenance flip, recovery
+        // boundary) animate inside the card instead of snapping: progress bar
+        // width, caption/badge insertion, and numeric rolls all share this
+        // item-keyed scope. Reduce Motion keeps the previous instant swap.
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.28), value: item)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(10)
         .background(MetallicPalette.card)

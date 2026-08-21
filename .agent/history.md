@@ -255,4 +255,24 @@
   - QA 人工桌面检查未执行：本环境无 GUI。真实 Popover 的交互手感、展开"全部 N"后布局需发布前按 QA_CHECKLIST C.4/C.5 人工确认（离屏渲染已覆盖静态布局证据）。
 - **剩余风险**：① 徽标隐藏依赖"header 状态行已表达快照级新鲜度"这一前提，若未来 header 简化需同步复核策略；② 重置额度单行的行尾次要文本在极窄窗口依赖 `minimumScaleFactor(0.78)` 缩放，极端本地化文案可能触底；③ SingleInstanceCoordinatorTests 预存在时序波动仍未修复（独立子系统，建议单独 Loop 用注入时钟改造）。后续降密候选（未处理）：周额度趋势卡 sparkline 默认折叠、额度卡"恢复/还需"两行合并的排版方案。
 
+### Loop 13 — 额度卡状态切换体验：消除状态迁移视觉跳动
+
+- **日期**：2026-08-21
+- **问题**：额度卡在刷新/缓存/异常/恢复状态之间切换时存在视觉跳动：① header 指示器 `if refreshing { ProgressView } else { Image }` 视图身份硬切换，每次刷新周期两次闪变且相邻更新时间戳可能因固有尺寸不同位移；② 卡片内百分比数字与进度条宽度变化无任何动画，刷新成功/恢复后瞬间跳变；③ 恢复边界徽标出现 + 百分比翻 "--" 全部瞬变；④ 窗口 state live↔cached/unavailable 翻转导致整张卡片从网格消失/重现，网格瞬时重排。
+- **证据**：用户目标"优化现有额度卡状态切换体验，减少刷新、缓存、异常和恢复状态之间的视觉跳动，提升状态变化时的信息层级和交互一致性；保持现有额度逻辑、Widget、VoiceOver、持久化和测试契约不变"（loop.md §2 用户反馈类证据）。代码路径：`StatusPopoverView.swift` L147-155（header if/else 指示器）；`QuotaSummaryView.swift` L242-252（caption 独立行）、L253-271（进度条/恢复行无动画）；全 UI 层无 `.animation`/`.contentTransition`（grep 证实仅 disclosure/hover 有局部动画）。测试契约核查：`StatusPopoverBehaviorTests` 仅断言辅助功能字符串与格式化函数，无视图结构断言；`QuotaGaugeView` 仅被 popover 的 `QuotaSummaryView` 使用，不在 Widget pbxproj 双编译清单。
+- **修改**：`Sources/CodexMonitorNative/UI/QuotaSummaryView.swift`（+18/-0：① `QuotaSummaryView` 外层 VStack 加 reduce-motion 感知的 `.animation(_:value: quotaItems.map(\.id))`，卡片插入/移除原地过渡而非网格瞬断，键控卡片 id 故披露开关与倒计时 tick 不触发；② `QuotaGaugeView` 内容 VStack 加 `.animation(_:value: item)` 作用域动画覆盖进度条宽度/caption 与徽标插入移除/文本替换；③ 百分比 Text 加 `.contentTransition(.numericText())` 数字滚动）；`Sources/CodexMonitorNative/UI/StatusPopoverView.swift`（+19/-5：header 指示器改固定 16×16 ZStack 交叉淡入淡出，消除视图身份硬切换与时间戳位移）。三处动画均遵循代码库既有 `@Environment(\.accessibilityReduceMotion)` → nil 模式。不改辅助功能契约（label/value/hint/identifier 全部原样）、格式化层、Widget 投影、菜单栏、持久化；改动文件均不在 Widget pbxproj 双编译清单。
+- **执行期证据修正**：原计划包含把 `historyCaption` 行移至百分比同行内联，但核查 `preferredCurrentQuotaWindows`/legacy fallback 均只保留 `.isCurrent`（== `.live`）窗口（自 `18d7674` 起），生产路径产出的 display item 的 `fieldState` 恒为 `.live`，caption 永远为 nil——该行是死路径，内联重构属无观察效果改动，按"禁止无证据修改"回退；真实发生的缓存态跳动是整卡消失/重现的网格重排，改用 id 键控动画处理。
+- **验证**：
+  - `swift build -c debug`：exit 0。
+  - 窄相关测试 `--filter StatusPopoverBehaviorTests --filter QuotaCardDensityPolicyTests --filter StatusPopoverFormattingTests`：79/0；追加 Widget 投影相关后 140/0。
+  - **渲染视觉验证**（临时 XCTest + NSWindow 层级 NSHostingView 离屏渲染 PNG @2x + modlens/Vision OCR，验证后临时文件已删除）：四状态静态布局高度与改动前一致（成功 483pt、失败 506pt），动画修饰符不影响静态布局；A 周 window 翻 cached→整卡按产品语义消失、余卡完好；B 正常双卡无徽标无 caption；C networkFailed 保留 42%/96% 可信数字 + header「网络异常」+ 底部「读取失败，显示上次快照」；D 真实 in-flight 刷新（阻塞式 service 驱动 `status=refreshing`）header「读取中」+ spinner + 数字保留 + 底部「读取中，暂用上次快照」。
+  - `swift test` 全量 ×3：583 执行，失败分别为 9/14/17 个断言，全部位于 `SingleInstanceCoordinatorTests` 预存在时序敏感族且失败集合随运行波动；基线对照：`git stash -u` 干净树隔离复跑同套件失败 10/25（劣于本树 9/25）——证实为环境负载相关的预存在波动（Loop 10/11/12 已三次记录同类现象），与本轮不相交模块改动无关。
+  - 未运行 `./script/build_and_run.sh --verify`：不涉及打包/签名/安装/Widget 集成改动，不满足运行门槛。
+  - QA 人工桌面检查未执行：本环境无 GUI。动画手感（时长/曲线是否合意）、Reduce Motion 开关行为需发布前按 QA_CHECKLIST 人工确认（离屏渲染已覆盖静态布局证据；动画语义由作用域键控保证只影响状态迁移）。
+- **剩余风险**：① 面板底部 `freshnessSummary` 行在刷新开始/结束与失败/恢复时插入/移除会使面板高度变化 ±23pt（C/D 渲染实测），属 NSPopover contentSize 更新，本轮未动（该行是失败态下"显示上次快照"的唯一文字载体，删除会丢信息；如需消除需在 PopoverController 层做高度动画，超出本轮最小 diff）；② 动画时长 0.28s/0.18s 为启发式，待人工 QA 手感校准；③ SingleInstanceCoordinatorTests 预存在时序波动仍未修复（独立子系统，建议单独 Loop 用注入时钟改造）。
+- **验收与发布（用户指令：运行一次 loop 后本机签名安装运行 app，直接合并提交推送）**：
+  - 发布前全量 `swift test`：583 执行，仅 `SingleInstanceCoordinatorTests` 预存在时序族 2 用例/10 断言失败（本会话内已用干净树基线证明为环境负载相关，与本轮改动无关），其余全部通过。
+  - `./script/build_and_run.sh --verify`：通过（exit 0）。主应用与 Widget appex codesign 校验 valid on disk + satisfies Designated Requirement；安装至 `/Applications/CodexMonitorNative.app` 版本 0.1.0 (1)；运行进程 PID 50421（12:38:45 启动，路径为安装版），Widget 扩展进程同步运行。
+  - 随后按用户指令 commit 并 push 本轮全部改动（源码 2 文件 + `.agent/` 记录 2 文件）。
+
 

@@ -25,6 +25,7 @@ struct StatusPopoverView: View {
     @State private var isQuotaExpanded = false
     @State private var showsAllResetCredits = false
     @State private var showsResetCreditFields = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(
         appState: AppState,
@@ -144,15 +145,23 @@ struct StatusPopoverView: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 8)
-            if effectiveStatus == .refreshing {
-                ProgressView()
-                    .controlSize(.small)
-                    .tint(MetallicPalette.redBright)
-            } else {
+            // Fixed-size crossfade between the idle glyph and the refresh
+            // spinner: swapping view identity used to flash twice per refresh
+            // cycle and nudge the adjacent timestamp because the two glyphs
+            // have different intrinsic sizes.
+            ZStack {
                 Image(systemName: "arrow.clockwise")
                     .font(.headline.weight(.medium))
                     .foregroundStyle(MetallicPalette.muted)
+                    .opacity(effectiveStatus == .refreshing ? 0 : 1)
+                if effectiveStatus == .refreshing {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(MetallicPalette.redBright)
+                }
             }
+            .frame(width: 16, height: 16)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: effectiveStatus)
             Text(refreshTimeText)
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(MetallicPalette.muted)
