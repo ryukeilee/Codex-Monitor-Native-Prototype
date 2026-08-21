@@ -10,6 +10,7 @@ struct RefreshSchedulingState: Equatable {
     let lastAttemptAt: Date?
     let failureCount: Int
     let backoffInterval: TimeInterval
+    var staleAfterInterval: TimeInterval = QuotaTemporalSemantics.defaultStaleAfterInterval
 }
 
 enum RefreshScheduleReason: Equatable {
@@ -173,6 +174,20 @@ final class RefreshScheduler {
     private(set) var nextReason: RefreshScheduleReason?
     private(set) var coalescedTriggerCount = 0
 
+    /// Cumulative lifecycle diagnostics: why the last physical refresh ran,
+    /// how often recovery triggers were folded into the running cadence, and
+    /// which lifecycle pauses currently hold the scheduler.
+    private(set) var lastFiredTrigger: AppState.RefreshTrigger?
+    private(set) var lastFiredAt: Date?
+    private(set) var freshnessGatedTriggerCount = 0
+
+    /// True when an automatic intent is parked until the failure-backoff
+    /// deadline (or the next scheduled fire) releases it.
+    var hasDeferredAutomaticTrigger: Bool { pendingAutomaticTrigger != nil }
+
+    /// Lifecycle pauses currently held; empty means the cadence timer runs.
+    var activePauseReasons: Set<PauseReason> { pauseReasons }
+
     var isPaused: Bool { !pauseReasons.isEmpty }
     var isRefreshing: Bool { refreshInFlight }
     var hasActiveRefreshTask: Bool { refreshTask != nil }
@@ -221,7 +236,14 @@ final class RefreshScheduler {
 
     /// Replaces the former repeating interval update. AppState sends a new
     /// value after every meaningful refresh state transition.
+    ///
+    /// Presentation-only publications (temporal reconciliation after a
+    /// time-zone or calendar change, network-loss bookkeeping) republish the
+    /// same scheduling inputs. Recomputing the deadline for those would push
+    /// the pending automatic refresh a full interval into the future every
+    /// time, so an unchanged state keeps the already scheduled fire date.
     func updateSchedule(with state: RefreshSchedulingState) {
+        let previousState = latestState
         latestState = state
         if state.status == .success, state.snapshot.dataSource == .real {
             comparisonSnapshot = previousSuccessfulSnapshot
@@ -232,6 +254,7 @@ final class RefreshScheduler {
             scheduleChangedWhileRefreshing = true
             return
         }
+        guard nextFireAt == nil || previousState != state else { return }
         scheduleNextRefreshIfPossible()
     }
 
@@ -257,6 +280,33 @@ final class RefreshScheduler {
             )
             AppLogger.refresh.info("Coalesced \(self.triggerName(for: trigger), privacy: .public) refresh with active adaptive request")
             return
+        }
+
+        // Environment-recovery signals are redundant while the cached real
+        // snapshot is fresh and no failure backoff is running: the scheduled
+        // cadence re-anchors the data before it can go stale. Folding them
+        // into the running cadence avoids a full provider cycle (process spawn
+        // plus RPC) per network flap or short system sleep.
+        if trigger.isEnvironmentRecoveryRefresh,
+           let state = latestState,
+           state.failureCount == 0,
+           state.snapshot.dataSource == .real,
+           let lastSuccessAt = state.lastSuccessAt {
+            let stableAnchor = lastSuccessAt.addingTimeInterval(
+                AdaptiveRefreshCadencePolicy.stableInterval
+            )
+            let isDataFresh = QuotaTemporalSemantics.freshness(
+                lastSuccessAt: lastSuccessAt,
+                now: clock.now,
+                staleAfterInterval: state.staleAfterInterval
+            ).isFresh
+            if clock.now < stableAnchor, isDataFresh {
+                freshnessGatedTriggerCount += 1
+                let dataAge = clock.now.timeIntervalSince(lastSuccessAt)
+                AppLogger.refresh.info("Freshness-gated \(self.triggerName(for: trigger), privacy: .public) refresh; data age \(dataAge, format: .fixed(precision: 0))s; keeping the scheduled cadence")
+                scheduleNextRefreshIfPossible(recoveryAnchor: stableAnchor)
+                return
+            }
         }
 
         if !trigger.bypassesFailureBackoff,
@@ -292,7 +342,11 @@ final class RefreshScheduler {
         scheduleNextRefreshIfPossible()
     }
 
-    private func scheduleNextRefreshIfPossible() {
+    /// - Parameters:
+    ///   - recoveryAnchor: Optional upper bound produced by a freshness-gated
+    ///     recovery trigger. The recreated deadline never lands after this
+    ///     instant, so gated data is re-anchored before it can go stale.
+    private func scheduleNextRefreshIfPossible(recoveryAnchor: Date? = nil) {
         cancelScheduledRefresh()
         guard isRunning, !isPaused, !refreshInFlight else { return }
 
@@ -309,9 +363,15 @@ final class RefreshScheduler {
             previousSuccessfulSnapshot: comparisonSnapshot,
             now: clock.now
         )
-        nextFireAt = decision.fireAt
+        var fireAt = decision.fireAt
+        if let recoveryAnchor,
+           recoveryAnchor > clock.now,
+           fireAt > recoveryAnchor {
+            fireAt = recoveryAnchor
+        }
+        nextFireAt = fireAt
         nextReason = decision.reason
-        clock.schedule(at: decision.fireAt) { [weak self] in
+        clock.schedule(at: fireAt) { [weak self] in
             self?.scheduledDeadlineDidFire()
         }
     }
@@ -335,6 +395,8 @@ final class RefreshScheduler {
         let expectedGeneration = refreshGeneration
         let failureCountBeforeRefresh = latestState?.failureCount ?? 0
         let refreshAction = onRefresh
+        lastFiredTrigger = trigger
+        lastFiredAt = clock.now
         AppLogger.refresh.info("Starting adaptive \(self.triggerName(for: trigger), privacy: .public) refresh")
 
         refreshTask = Task { @MainActor [weak self] in
@@ -438,6 +500,20 @@ private extension AppState.RefreshTrigger {
             return true
         case .scheduled, .networkChanged, .temporalBoundary,
              .systemClockChange:
+            return false
+        }
+    }
+
+    /// Environment-recovery and path-change signals whose only purpose is
+    /// refreshing possibly stale data. They are subject to freshness gating:
+    /// while the cached real snapshot is fresh and healthy they carry no new
+    /// information the running cadence would not deliver anyway.
+    var isEnvironmentRecoveryRefresh: Bool {
+        switch self {
+        case .wake, .networkRestored, .networkChanged:
+            return true
+        case .manual, .scheduled, .temporalBoundary,
+             .systemClockChange, .accountBoundaryChanged:
             return false
         }
     }

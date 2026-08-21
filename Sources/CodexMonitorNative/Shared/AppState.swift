@@ -97,6 +97,12 @@ final class AppState: ObservableObject {
     )
     private(set) var usageTrendAnalysis: UsageTrendAnalysis = .unavailable
 
+    /// Lifecycle diagnostics for the managed refresh pipeline: the trigger of
+    /// the request currently in flight (nil when idle) and the trigger that
+    /// most recently entered execution.
+    var activeRefreshTrigger: AppState.RefreshTrigger? { activeRefresh?.trigger }
+    private(set) var lastRefreshTrigger: AppState.RefreshTrigger?
+
     // MARK: - Backoff
 
     /// The current backoff interval, if consecutive failures are escalating.
@@ -159,7 +165,8 @@ final class AppState: ObservableObject {
             lastSuccessAt: lastSuccessAt,
             lastAttemptAt: lastAttemptAt,
             failureCount: failureCount,
-            backoffInterval: backoffInterval
+            backoffInterval: backoffInterval,
+            staleAfterInterval: staleAfterInterval
         )
     }
 
@@ -479,7 +486,7 @@ final class AppState: ObservableObject {
         }
 
         let refreshID = UUID()
-        activeRefresh = ActiveRefresh(id: refreshID, waiters: waiters)
+        activeRefresh = ActiveRefresh(id: refreshID, trigger: trigger, waiters: waiters)
         let baselineSnapshot = beginRefresh(trigger: trigger)
 
         // A synchronous observer of the refreshing presentation can shut the
@@ -555,6 +562,7 @@ final class AppState: ObservableObject {
 
     private func beginRefresh(trigger: RefreshTrigger) -> QuotaSnapshot {
         let triggerName = triggerName(for: trigger)
+        lastRefreshTrigger = trigger
         let currentBoundary = accountBoundaryProvider()
         lastObservedAccountBoundary = currentBoundary
         _ = discardCachedSnapshotIfAccountBoundaryIsUnverified(
@@ -1453,6 +1461,7 @@ private final class AppStateTaskResources {
 
 private struct ActiveRefresh {
     let id: UUID
+    let trigger: AppState.RefreshTrigger
     var waiters: [CheckedContinuation<Void, Never>]
     var isInvalidated = false
 

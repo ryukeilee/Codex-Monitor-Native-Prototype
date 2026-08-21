@@ -14,7 +14,7 @@ Primary app code lives in `Sources/CodexMonitorNative` and is split by responsib
 
 Widget extension source lives in `Sources/CodexMonitorWidgetExtension/CodexMonitorWidget.swift`.
 
-Tests live in `Tests/CodexMonitorNativeTests` (currently 559 tests, 0 failures). Runtime assets and entitlements are in `Assets/`. Local packaging and run helpers are in `script/`. Manual verification guidance lives in `VERIFICATION.md` and `QA_CHECKLIST.md`. Implementation plans live in `docs/superpowers/plans/`. Pi agent worktree sessions are tracked in `.claude/worktrees/`. Built app bundles are emitted to `dist/`; treat `dist/`, `.build/`, and `build/` as generated output, not source.
+Tests live in `Tests/CodexMonitorNativeTests` (currently 577 tests, 0 failures). Runtime assets and entitlements are in `Assets/`. Local packaging and run helpers are in `script/`. Manual verification guidance lives in `VERIFICATION.md` and `QA_CHECKLIST.md`. Implementation plans live in `docs/superpowers/plans/`. Pi agent worktree sessions are tracked in `.claude/worktrees/`. Built app bundles are emitted to `dist/`; treat `dist/`, `.build/`, and `build/` as generated output, not source.
 
 The Xcode widget target directly compiles selected app sources; the authoritative list is the widget target's Sources build phase in `CodexMonitorWidgetExtension.xcodeproj/project.pbxproj`, not the SwiftPM target declaration. Currently it includes files from:
 
@@ -46,7 +46,7 @@ Unless a task explicitly changes the product contract:
 
 - `swift build -c debug`: build the app for local development
 - `swift build -c release`: build the release binary
-- `swift test`: run the full XCTest suite (currently 559 tests)
+- `swift test`: run the full XCTest suite (currently 577 tests)
 - `swift test --filter <TestType-or-method>`: run the smallest relevant XCTest subset while iterating
 - `./script/build_and_run.sh`: build, package, sign locally, and launch the app bundle
 - `./script/build_and_run.sh --debug`: build and launch the packaged app under LLDB
@@ -109,7 +109,7 @@ No formatter or linter is currently checked in, so keep diffs small and style-co
 
 ## Testing and Definition of Done
 
-Use XCTest in `Tests/CodexMonitorNativeTests`. Name test files after the production type, and use method names like `testFailedRefreshKeepsLastSuccessfulSnapshot`. The current test suite (559 tests) covers the following areas:
+Use XCTest in `Tests/CodexMonitorNativeTests`. Name test files after the production type, and use method names like `testFailedRefreshKeepsLastSuccessfulSnapshot`. The current test suite (577 tests) covers the following areas:
 
 | Test area | Representative test files |
 |---|---|

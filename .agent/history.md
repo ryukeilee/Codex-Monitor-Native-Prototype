@@ -211,4 +211,32 @@
   - 本轮 Loop 记录与 \\`memory.md\\` 同步后将执行 \\`./script/build_and_run.sh --verify\\` 进行签名安装验收（见 Loop 9 后续验收记录）。
 - **剩余风险**：极低。近期加权阈值（1.3×/1.5×）为启发式，对恰好处于阈值附近的节奏变化可能保持基准速率；>14 天抑制与 0.7%/h 稳定阈值偏保守，极慢但持续消耗的场景会显示“当前速度下不会耗尽”而非远期时刻，符合“证据不足不预测”原则。未涉及 GUI 人工门禁项。
 
+### Loop 10 — 统一后台刷新协调：调度锚点幂等 + 恢复触发新鲜度门控 + 刷新生命周期可观测性
+
+- **日期**：2026-08-21
+- **问题**：① 任何状态发布（时区/日历/本地化变化的 temporal reconciliation、网络不可用记账等）都会把下一次自动刷新的截止点重置为“现在+完整间隔”，环境扰动反复发生时自动刷新被无限推迟；② 唤醒/网络恢复/路径变化触发在缓存真实快照仍然新鲜且无失败时也立即发起完整 provider 周期（spawn codex app-server + RPC），短睡眠与网络抖动场景下是纯浪费请求；③ 缺少判断“上次刷新为什么跑、调度器处于什么生命周期”的结构化诊断。
+- **证据**：用户目标明确要求审查 RefreshScheduler/QuotaRefreshService/AppState 触发关系并统一协调。代码路径：`RefreshScheduler.updateSchedule` 无条件 `scheduleNextRefreshIfPossible()`（以 `clock.now` 重算 bootstrap/stable/rapid 锚点）；`AppDelegate` becameReachable/wake 路径无条件 `requestRefresh(.networkRestored)`；生产代码无 `.wake` 发射点（唤醒恢复经 network observer 重启后的 .networkRestored 完成）。审查同时确认：所有产品刷新入口已统一经 scheduler 单入口 + AppState active/pending 双层合并（同一时间仅一个物理请求，已有测试锁定 maximumConcurrentCalls==1）；AppState freshness task 与 scheduler resetBoundary 双跟踪同一时间边界，边界处多一次 reconciliation 发布但物理请求唯一且发布携带 savedAt 重锚定语义——评估后接受现状不做所有权重构。
+- **原因**：updateSchedule 无法区分“刷新完成后的有意义状态迁移”与“展示性重发布”；恢复类触发缺少新鲜度判定输入。
+- **修改**：`Sources/CodexMonitorNative/Core/RefreshScheduler.swift`（① updateSchedule 幂等：非刷新中且输入未变且已有未来 deadline 时跳过重调度；② RefreshSchedulingState 增加 staleAfterInterval 字段（默认值保持兼容）；③ requestRefresh 新鲜度门控：wake/networkRestored/networkChanged 在 failureCount==0 && 真实快照 fresh && now<lastSuccess+stableInterval 时折叠进现有 cadence，scheduleNextRefreshIfPossible(recoveryAnchor:) 把 deadline 收紧到 ≤lastSuccess+stableInterval 避免 stale 窗口；manual/accountBoundaryChanged 永不门控，退避窗口内行为不变；④ 新增 lastFiredTrigger/lastFiredAt/freshnessGatedTriggerCount/hasDeferredAutomaticTrigger/activePauseReasons 诊断与门控日志）；`Sources/CodexMonitorNative/Shared/AppState.swift`（refreshSchedulingState 传递 staleAfterInterval；ActiveRefresh 携带 trigger，暴露 activeRefreshTrigger 计算属性与 lastRefreshTrigger）；`Tests/CodexMonitorNativeTests/RefreshSchedulerTests.swift`（+11 确定性测试：锚点幂等、失败输入重算、门控折叠、收紧、stale/老化立即刷新、退避禁用门控、manual/accountBoundary 不门控、networkChanged 门控、mock/无数据不门控、调度器诊断、AppState 触发诊断）。未改额度解析、Widget 展示、菜单栏行为、持久化格式；两文件均不在 Widget 双编译清单，无需 pbxproj 同步。实施计划与跨轮账本：`docs/superpowers/plans/refresh-coordination-unification.md`。
+- **验证**：
+  - `swift test --filter RefreshSchedulerTests`：25/0（原 14 + 新增 11）。
+  - `swift test --filter AppStateTests --filter RefreshConsistencyRegressionTests --filter DeterministicFaultScenarioTests --filter WidgetTimelineBridgeTests --filter SleepWakeObserverTests --filter NetworkReachabilityObserverTests --filter SystemClockObserverTests`：158/0。
+  - `swift test` 全量 ×2：577 测试，失败分别为 13 与 7，全部位于 `SingleInstanceCoordinatorTests` 预存在时序敏感族（handoff deadline 型断言）。基线对照：改动前干净工作树全量 ×3 失败 3/8/9，该套件单独运行在低负载下连续两次结果仍不同（2 个→1 个失败用例），Loop 9 同日早间曾记录 566/0 全过——证明该族测试在本机处于边际时序状态、与环境负载相关，与本次改动（不相交模块）无关。
+  - `swift build -c debug`：exit 0。
+  - 文档同步：AGENTS.md 测试数量 559→577（3 处）、memory.md 最后更新与刷新管线架构事实。
+  - 未运行 `./script/build_and_run.sh --verify`：不涉及打包/签名/安装/Widget 集成改动。未做 QA_CHECKLIST 人工桌面检查：本环境无 GUI；刷新时机变化（启动时缓存 <15 分钟则跳过即时恢复刷新、由 cadence 在 ≤lastSuccess+15min 补齐）属可见时序行为，已由确定性测试覆盖语义。
+- **剩余风险**：① SingleInstanceCoordinatorTests 的预存在时序波动未修复（不同子系统，超出本轮范围），建议独立 Loop 用注入时钟改造该族 deadline 断言；② 启动时若持久化快照 <15 分钟且无失败，首刷推迟到 cadence 截止点（数据持续可信展示，无 --% 或清空风险），若产品希望“启动必刷”可在门控中排除启动场景；③ 门控阈值为启发式（stableInterval/staleAfterInterval 复用既有常量），无服务端语义背书。
+
+### Loop 11 — 刷新协调统一化收尾：全量验证、签名安装验收与发布提交
+
+- **日期**：2026-08-21
+- **问题**：Loop 10 的刷新协调改动尚有未闭环验证门（全量测试在波动环境下的稳定结论、`./script/build_and_run.sh --verify` 签名安装验收）且未入库。
+- **证据**：用户指令“运行一次 loop，然后本机签名安装运行 app，直接合并提交推送”。Loop 10 遗留项见其“剩余风险”与 `docs/superpowers/plans/refresh-coordination-unification.md` Next 段。
+- **修改**：无业务代码改动（纯验证 + 记录 + 版本控制操作）。本轮新增本条 Loop 记录；工作区包含 Loop 10 的全部待提交改动（2 个源文件、1 个测试文件、3 个文档、1 个实施计划）。
+- **验证**：
+  - `swift test` 全量：**577/0 全部通过**（安静环境下连预存在时序敏感的 SingleInstanceCoordinatorTests 也全绿，证实该族失败为环境负载相关的边际时序问题，非代码缺陷）。
+  - `./script/build_and_run.sh --verify`：通过。安装路径 `/Applications/CodexMonitorNative.app`，最终 owner PID 47621（安装版取得单实例所有权，dist 旧副本让位重定向），主应用与 Widget 代码签名及 App Group entitlements 验证通过，Widget 版本 0.1.0 (1) 绑定正确，运行版本 0.1.0 (1)。
+  - 安装后进程确认：PID 47621 运行中。
+- **剩余风险**：SingleInstanceCoordinatorTests 在高负载下仍可能间歇失败（预存在，建议后续独立 Loop 注入时钟改造）；其余无新增风险。
+
 

@@ -517,6 +517,364 @@ final class RefreshSchedulerTests: XCTestCase {
         scheduler.stop()
     }
 
+    // MARK: - Unified coordination: idempotent rescheduling (D1)
+
+    func testUnchangedSchedulingUpdateDoesNotPostponePendingDeadline() async {
+        let base = Date(timeIntervalSince1970: 7_000)
+        let clock = ManualRefreshSchedulerClock(now: base)
+        let recorder = RefreshActionRecorder()
+        let scheduler = RefreshScheduler(clock: clock) { trigger in
+            await recorder.record(trigger)
+        }
+        let snapshot = quotaSnapshot(refreshedAt: base)
+
+        scheduler.start()
+        scheduler.updateSchedule(with: schedulingState(snapshot: snapshot, at: base))
+        XCTAssertEqual(
+            scheduler.nextFireAt,
+            base.addingTimeInterval(AdaptiveRefreshCadencePolicy.stableInterval)
+        )
+
+        // A presentation-only republication (temporal reconciliation, network
+        // bookkeeping) carries identical scheduling inputs and must keep the
+        // already scheduled fire date instead of restarting the interval.
+        clock.advance(to: base.addingTimeInterval(10 * 60))
+        scheduler.updateSchedule(with: schedulingState(snapshot: snapshot, at: base))
+        XCTAssertEqual(
+            scheduler.nextFireAt,
+            base.addingTimeInterval(AdaptiveRefreshCadencePolicy.stableInterval)
+        )
+
+        clock.advance(to: base.addingTimeInterval(AdaptiveRefreshCadencePolicy.stableInterval) - 1)
+        let callCountBeforeDeadline = await recorder.callCount()
+        XCTAssertEqual(callCountBeforeDeadline, 0)
+
+        clock.advance(to: base.addingTimeInterval(AdaptiveRefreshCadencePolicy.stableInterval))
+        await recorder.waitForCall(1)
+        let triggers = await recorder.triggers()
+        XCTAssertEqual(triggers, [.scheduled])
+        scheduler.stop()
+    }
+
+    func testChangedSchedulingInputsRecomputePendingDeadline() async {
+        let base = Date(timeIntervalSince1970: 7_500)
+        let clock = ManualRefreshSchedulerClock(now: base)
+        let recorder = RefreshActionRecorder()
+        let scheduler = RefreshScheduler(clock: clock) { trigger in
+            await recorder.record(trigger)
+        }
+        let snapshot = quotaSnapshot(refreshedAt: base)
+
+        scheduler.start()
+        scheduler.updateSchedule(with: schedulingState(snapshot: snapshot, at: base))
+        XCTAssertEqual(scheduler.nextReason, .stable)
+
+        clock.advance(to: base.addingTimeInterval(10 * 60))
+        scheduler.updateSchedule(with: schedulingState(
+            snapshot: snapshot,
+            at: base,
+            status: .networkFailed,
+            lastSuccessAt: base,
+            lastAttemptAt: clock.now,
+            failureCount: 1,
+            backoffInterval: 5 * 60
+        ))
+        XCTAssertEqual(scheduler.nextReason, .failureBackoff)
+        XCTAssertEqual(scheduler.nextFireAt, clock.now.addingTimeInterval(5 * 60))
+        scheduler.stop()
+    }
+
+    // MARK: - Unified coordination: freshness-gated recovery triggers (D2)
+
+    func testFreshnessGateFoldsRecoveryTriggerIntoRunningCadenceWhenDataIsFresh() async {
+        let base = Date(timeIntervalSince1970: 8_000)
+        let clock = ManualRefreshSchedulerClock(now: base)
+        let recorder = RefreshActionRecorder()
+        let scheduler = RefreshScheduler(clock: clock) { trigger in
+            await recorder.record(trigger)
+        }
+        let snapshot = quotaSnapshot(refreshedAt: base)
+
+        scheduler.start()
+        scheduler.updateSchedule(with: schedulingState(snapshot: snapshot, at: base))
+
+        scheduler.requestRefresh(.networkRestored)
+        let immediateCallCount = await recorder.callCount()
+        XCTAssertEqual(immediateCallCount, 0)
+        XCTAssertEqual(scheduler.freshnessGatedTriggerCount, 1)
+        XCTAssertEqual(
+            scheduler.nextFireAt,
+            base.addingTimeInterval(AdaptiveRefreshCadencePolicy.stableInterval)
+        )
+        XCTAssertFalse(scheduler.hasDeferredAutomaticTrigger)
+
+        clock.advance(to: base.addingTimeInterval(AdaptiveRefreshCadencePolicy.stableInterval))
+        await recorder.waitForCall(1)
+        let triggers = await recorder.triggers()
+        XCTAssertEqual(triggers, [.scheduled])
+        scheduler.stop()
+    }
+
+    func testFreshnessGateTightensDeadlineToStableAnchorForAgedFreshData() async {
+        let base = Date(timeIntervalSince1970: 8_500)
+        let clock = ManualRefreshSchedulerClock(now: base)
+        let recorder = RefreshActionRecorder()
+        let scheduler = RefreshScheduler(clock: clock) { trigger in
+            await recorder.record(trigger)
+        }
+        // Data successfully refreshed ten minutes ago: still fresh, so a
+        // recovery trigger is redundant, but an unchanged cadence would let
+        // its age reach twenty-five minutes before the next refresh.
+        let lastSuccessAt = base.addingTimeInterval(-10 * 60)
+        let snapshot = quotaSnapshot(refreshedAt: lastSuccessAt)
+
+        scheduler.start()
+        scheduler.updateSchedule(with: schedulingState(
+            snapshot: snapshot,
+            at: base,
+            lastSuccessAt: lastSuccessAt
+        ))
+        XCTAssertEqual(scheduler.nextReason, .stable)
+        XCTAssertEqual(
+            scheduler.nextFireAt,
+            base.addingTimeInterval(AdaptiveRefreshCadencePolicy.stableInterval)
+        )
+
+        scheduler.requestRefresh(.networkRestored)
+        let immediateCallCount = await recorder.callCount()
+        XCTAssertEqual(immediateCallCount, 0)
+        XCTAssertEqual(scheduler.freshnessGatedTriggerCount, 1)
+        // The recreated deadline never lands after the stable anchor, so the
+        // gated data is re-anchored before it can go stale.
+        XCTAssertEqual(scheduler.nextFireAt, lastSuccessAt.addingTimeInterval(
+            AdaptiveRefreshCadencePolicy.stableInterval
+        ))
+
+        clock.advance(to: lastSuccessAt.addingTimeInterval(
+            AdaptiveRefreshCadencePolicy.stableInterval
+        ))
+        await recorder.waitForCall(1)
+        let triggers = await recorder.triggers()
+        XCTAssertEqual(triggers, [.scheduled])
+        scheduler.stop()
+    }
+
+    func testStaleOrAgedRealDataStillRefreshesImmediatelyOnRecoveryTriggers() async {
+        let base = Date(timeIntervalSince1970: 9_000)
+        let clock = ManualRefreshSchedulerClock(now: base)
+        let recorder = RefreshActionRecorder()
+        let scheduler = RefreshScheduler(clock: clock) { trigger in
+            await recorder.record(trigger)
+        }
+
+        scheduler.start()
+
+        // Stale data (past staleAfterInterval): recovery refresh runs now.
+        scheduler.updateSchedule(with: schedulingState(
+            snapshot: quotaSnapshot(refreshedAt: base.addingTimeInterval(-30 * 60)),
+            at: base,
+            lastSuccessAt: base.addingTimeInterval(-30 * 60)
+        ))
+        scheduler.requestRefresh(.networkRestored)
+        await recorder.waitForCall(1)
+
+        // Fresh-but-aged data (past the stable anchor, still before staleness):
+        // gating would risk a stale window, so the refresh also runs now.
+        let agedReference = base.addingTimeInterval(16 * 60)
+        clock.advance(to: agedReference)
+        scheduler.updateSchedule(with: schedulingState(
+            snapshot: quotaSnapshot(refreshedAt: base),
+            at: agedReference,
+            lastSuccessAt: base
+        ))
+        await waitForSchedulerToBecomeIdle(scheduler)
+        scheduler.requestRefresh(.wake)
+        await recorder.waitForCall(2)
+
+        let triggers = await recorder.triggers()
+        XCTAssertEqual(triggers, [.networkRestored, .wake])
+        XCTAssertEqual(scheduler.freshnessGatedTriggerCount, 0)
+        scheduler.stop()
+    }
+
+    func testFailureBackoffDisablesFreshnessGateForRecoveryTriggers() async {
+        let base = Date(timeIntervalSince1970: 9_500)
+        let clock = ManualRefreshSchedulerClock(now: base)
+        let gate = RefreshActionGate()
+        let scheduler = RefreshScheduler(clock: clock) { trigger in
+            await gate.perform(trigger)
+        }
+        let snapshot = quotaSnapshot(refreshedAt: base)
+
+        scheduler.start()
+        scheduler.updateSchedule(with: schedulingState(
+            snapshot: snapshot,
+            at: base,
+            status: .networkFailed,
+            lastSuccessAt: base,
+            lastAttemptAt: base,
+            failureCount: 1,
+            backoffInterval: 5 * 60
+        ))
+
+        // Inside a failure backoff window a fresh-looking cache must not gate
+        // the recovery attempt: the cached data may be the failed account's
+        // only lifeline and the recovery signal is what clears the backoff.
+        scheduler.requestRefresh(.networkRestored)
+        await gate.waitForCall(1)
+        let triggers = await gate.triggers()
+        XCTAssertEqual(triggers, [.networkRestored])
+        XCTAssertEqual(scheduler.freshnessGatedTriggerCount, 0)
+
+        await gate.releaseNext()
+        await gate.waitForCompletion(1)
+        await waitForSchedulerToBecomeIdle(scheduler)
+        scheduler.stop()
+    }
+
+    func testManualAndAccountBoundaryTriggersAreNeverFreshnessGated() async {
+        let base = Date(timeIntervalSince1970: 10_000)
+        let clock = ManualRefreshSchedulerClock(now: base)
+        let recorder = RefreshActionRecorder()
+        let scheduler = RefreshScheduler(clock: clock) { trigger in
+            await recorder.record(trigger)
+        }
+        let snapshot = quotaSnapshot(refreshedAt: base)
+
+        scheduler.start()
+        scheduler.updateSchedule(with: schedulingState(snapshot: snapshot, at: base))
+
+        scheduler.requestRefresh(.manual)
+        await recorder.waitForCall(1)
+        await waitForSchedulerToBecomeIdle(scheduler)
+
+        scheduler.requestRefresh(.accountBoundaryChanged)
+        await recorder.waitForCall(2)
+        await waitForSchedulerToBecomeIdle(scheduler)
+
+        let triggers = await recorder.triggers()
+        XCTAssertEqual(triggers, [.manual, .accountBoundaryChanged])
+        XCTAssertEqual(scheduler.freshnessGatedTriggerCount, 0)
+        scheduler.stop()
+    }
+
+    func testNetworkChangedIsFreshnessGatedWhenHealthyAndFresh() async {
+        let base = Date(timeIntervalSince1970: 10_500)
+        let clock = ManualRefreshSchedulerClock(now: base)
+        let recorder = RefreshActionRecorder()
+        let scheduler = RefreshScheduler(clock: clock) { trigger in
+            await recorder.record(trigger)
+        }
+        let snapshot = quotaSnapshot(refreshedAt: base)
+
+        scheduler.start()
+        scheduler.updateSchedule(with: schedulingState(snapshot: snapshot, at: base))
+
+        scheduler.requestRefresh(.networkChanged)
+        let immediateCallCount = await recorder.callCount()
+        XCTAssertEqual(immediateCallCount, 0)
+        XCTAssertEqual(scheduler.freshnessGatedTriggerCount, 1)
+        scheduler.stop()
+    }
+
+    func testMockAndUnknownDataAreNeverFreshnessGated() async {
+        let base = Date(timeIntervalSince1970: 11_000)
+        let clock = ManualRefreshSchedulerClock(now: base)
+        let recorder = RefreshActionRecorder()
+        let scheduler = RefreshScheduler(clock: clock) { trigger in
+            await recorder.record(trigger)
+        }
+
+        scheduler.start()
+        // No real snapshot has ever succeeded: recovery triggers must run.
+        scheduler.updateSchedule(with: RefreshSchedulingState(
+            snapshot: .notConnected,
+            status: .noSnapshot,
+            lastSuccessAt: nil,
+            lastAttemptAt: nil,
+            failureCount: 0,
+            backoffInterval: AdaptiveRefreshCadencePolicy.bootstrapInterval
+        ))
+        scheduler.requestRefresh(.networkRestored)
+        await recorder.waitForCall(1)
+        XCTAssertEqual(scheduler.freshnessGatedTriggerCount, 0)
+        scheduler.stop()
+    }
+
+    // MARK: - Unified coordination: lifecycle observability (D4)
+
+    func testSchedulerDiagnosticsRecordFiredTriggerTimeAndPauses() async {
+        let base = Date(timeIntervalSince1970: 11_500)
+        let clock = ManualRefreshSchedulerClock(now: base)
+        let gate = RefreshActionGate()
+        let scheduler = RefreshScheduler(clock: clock) { trigger in
+            await gate.perform(trigger)
+        }
+
+        scheduler.start()
+        XCTAssertNil(scheduler.lastFiredTrigger)
+        XCTAssertNil(scheduler.lastFiredAt)
+        XCTAssertTrue(scheduler.activePauseReasons.isEmpty)
+
+        scheduler.pause(for: .systemSleep)
+        XCTAssertEqual(scheduler.activePauseReasons, [.systemSleep])
+        scheduler.resume(for: .systemSleep)
+        XCTAssertTrue(scheduler.activePauseReasons.isEmpty)
+
+        scheduler.requestRefresh(.manual)
+        await gate.waitForCall(1)
+        XCTAssertEqual(scheduler.lastFiredTrigger, .manual)
+        XCTAssertEqual(scheduler.lastFiredAt, base)
+        XCTAssertTrue(scheduler.isRefreshing)
+
+        await gate.releaseNext()
+        await gate.waitForCompletion(1)
+        await waitForSchedulerToBecomeIdle(scheduler)
+        XCTAssertEqual(scheduler.lastFiredTrigger, .manual)
+        scheduler.stop()
+    }
+
+    func testAppStateExposesActiveAndLastRefreshTriggerThroughManagedPipeline() async {
+        let base = Date.now
+        let clock = ManualRefreshSchedulerClock(now: base)
+        let suiteName = "CodexMonitorNativeTests.refreshDiagnostics.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let refreshed = quotaSnapshot(refreshedAt: base.addingTimeInterval(1))
+        let service = SchedulerBlockingRefreshService(snapshot: refreshed)
+        let state = AppState(
+            snapshotStore: SnapshotStore(defaults: defaults, key: "snapshot"),
+            refreshService: service
+        )
+        let scheduler = RefreshScheduler(clock: clock) { [weak state] trigger in
+            guard let state else { return }
+            await state.refreshNow(trigger: trigger)
+        }
+        state.onRefreshSchedulingStateChanged = { [weak scheduler] schedulingState in
+            scheduler?.updateSchedule(with: schedulingState)
+        }
+        state.onRefreshRequested = { [weak scheduler] trigger in
+            scheduler?.requestRefresh(trigger)
+        }
+        scheduler.updateSchedule(with: state.refreshSchedulingState)
+        scheduler.start()
+
+        XCTAssertNil(state.activeRefreshTrigger)
+        XCTAssertNil(state.lastRefreshTrigger)
+
+        state.refresh(trigger: .manual)
+        await service.waitForCall(1)
+        XCTAssertEqual(state.activeRefreshTrigger, .manual)
+        XCTAssertEqual(state.lastRefreshTrigger, .manual)
+
+        await service.releaseNext()
+        await waitForSchedulerToBecomeIdle(scheduler)
+        XCTAssertNil(state.activeRefreshTrigger)
+        XCTAssertEqual(state.lastRefreshTrigger, .manual)
+        XCTAssertEqual(state.snapshot, refreshed)
+        scheduler.stop()
+    }
+
     private func quotaSnapshot(
         weekly: Int = 70,
         fiveHour: Int = 60,
