@@ -96,31 +96,12 @@ struct QuotaSummaryView: View {
                     .font(.headline.weight(.semibold))
                     .foregroundStyle(MetallicPalette.foreground)
                     .accessibilityLabel("重置次数 \(summary.countLine)")
-                Spacer()
-            }
-                    .padding(.vertical, 8)
-
-            Divider().overlay(MetallicPalette.separator)
-
-            HStack(spacing: MetallicControlMetrics.rowSpacing) {
-                Image(systemName: "clock")
-                    .font(.headline.weight(.semibold))
-                    .foregroundStyle(MetallicPalette.red)
-                    .frame(width: MetallicControlMetrics.iconColumnWidth)
-
-                if let featured = summary.featuredCreditItem {
-                    featuredResetCreditSummary(featured)
-                } else if let timingLine = summary.timingLine {
-                    Text(timingLine)
-                        .font(.subheadline)
-                        .foregroundStyle(MetallicPalette.muted)
-                    Spacer()
-                } else {
-                    Text("最早到期 --")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(MetallicPalette.foreground)
-                    Spacer()
-                }
+                Spacer(minLength: MetallicControlMetrics.rowSpacing)
+                Text(resetCreditsSecondaryText(for: summary))
+                    .font(.caption)
+                    .foregroundStyle(MetallicPalette.muted)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
             }
             .padding(.vertical, 8)
 
@@ -190,19 +171,17 @@ struct QuotaSummaryView: View {
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
-    @ViewBuilder
-    private func featuredResetCreditSummary(_ creditItem: StatusPopoverFormatting.ResetCreditDisplayItem) -> some View {
-        Text("最早到期")
-            .font(.subheadline.weight(.semibold))
-            .foregroundStyle(MetallicPalette.foreground)
-        Text(creditItem.expiryText)
-            .font(.subheadline)
-            .foregroundStyle(MetallicPalette.muted)
-        Spacer(minLength: 4)
-        Text(creditItem.remainingText)
-            .font(.caption.weight(.medium))
-            .foregroundStyle(MetallicPalette.muted)
-            .lineLimit(1)
+    /// Trailing secondary text of the compact reset-credits row. Countdown
+    /// and granted details stay inside the "全部 N" disclosure; the summary
+    /// row only answers "how many resets, when is the next one".
+    private func resetCreditsSecondaryText(for summary: StatusPopoverFormatting.ResetCreditsSummary) -> String {
+        if let featured = summary.featuredCreditItem {
+            return "最早到期 \(featured.expiryText)"
+        }
+        if let timingLine = summary.timingLine {
+            return timingLine
+        }
+        return "最早到期 --"
     }
 
     @ViewBuilder
@@ -247,10 +226,18 @@ struct QuotaGaugeView: View {
                     .lineLimit(1)
                     .help(item.label)
                 Spacer(minLength: 2)
-                Text(item.stateText)
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(MetallicPalette.muted)
-                    .lineLimit(1)
+                if QuotaCardDensityPolicy.showsStateBadge(
+                    fieldState: item.fieldState,
+                    trustedPercent: item.trustedPercent,
+                    resetAt: item.resetAt,
+                    now: .now
+                ) {
+                    Text(item.stateText)
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(MetallicPalette.muted)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                }
             }
             Text(item.percentText)
                 .font(.system(size: 22, weight: .semibold, design: .rounded))

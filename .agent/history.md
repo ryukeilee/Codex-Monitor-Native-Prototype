@@ -239,4 +239,20 @@
   - 安装后进程确认：PID 47621 运行中。
 - **剩余风险**：SingleInstanceCoordinatorTests 在高负载下仍可能间歇失败（预存在，建议后续独立 Loop 注入时钟改造）；其余无新增风险。
 
+### Loop 12 — Popover 额度区降密：状态徽标去重 + 重置额度卡单行化
+
+- **日期**：2026-08-21
+- **问题**：Popover 额度展示信息密度过高：① 每张额度卡片右上角状态徽标（"最新"/"历史缓存"/"刷新中"/"已过期"/"上次数据"）与顶部状态行或百分比旁"（历史缓存）"标注重复；② 重置额度卡固定占用两行（次数行 + 分隔线 + 最早到期行），倒计时/授予时间等低频细节常驻显示，推高面板默认高度、增加单屏文字元素数量。
+- **证据**：用户目标"优化现有额度展示体验，降低信息密度并提升日常使用效率"（loop.md §2 用户反馈类证据）。代码路径：`QuotaGaugeView` 无条件渲染 `item.stateText`（`QuotaSummaryView.swift`）；`resetCreditsSection` 固定两行 + Divider；`StatusPopoverFormatting.quotaWindowStateText` 的 live/cached 新鲜度取值与 header `titleSummary` 及 `historyCaption` 语义重复；辅助功能契约 `quotaCardState` 已独立携带 stateText，不依赖视觉徽标。
+- **修改**：（Loop 12 二次修订：徽标 Text 追加 `.minimumScaleFactor(0.75)`，消除窄卡内"已恢复，待刷新"截断）新增 `Sources/CodexMonitorNative/UI/QuotaCardDensityPolicy.swift`（`showsStateBadge(fieldState:trustedPercent:resetAt:now:)`：invalid/unavailable 与已过重置截止点（严格 `now < deadline` 边界，与 `makeQuotaWindowDisplayItem.isBeforeReset` 一致）的窗口保留徽标，live/cached 正常新鲜度徽标隐藏）；`Sources/CodexMonitorNative/UI/QuotaSummaryView.swift`（① `QuotaGaugeView` 按策略条件渲染状态徽标，辅助功能契约 `quotaCardState` 不变仍携带 stateText；② 重置额度卡两行 + Divider 合并为单行：次数居左主文本 + 行尾次要文本"最早到期 <时间>/timingLine/--"，倒计时与授予细节保留在既有"全部 N"披露行内；删除无引用的 `featuredResetCreditSummary`）；`Tests/CodexMonitorNativeTests/QuotaCardDensityPolicyTests.swift`（+6 确定性测试：live/cached 可信值隐藏冗余徽标、无重置时间隐藏、异常态保留、过截止点保留、边界语义锁定）；`QA_CHECKLIST.md` C.5 一条人工门禁描述同步为新单行布局。不改共享格式化层、Widget 投影与菜单栏；改动文件均不在 Widget pbxproj 双编译清单。
+- **验证**：
+  - `swift test --filter QuotaCardDensityPolicyTests`：6/0 通过（首轮抓出边界断言写反：生产语义 `now == deadline` 即视为已到重置点，已按 `QuotaTemporalSemantics.isPending` 严格边界修正测试）。
+  - `swift test` 全量：583 执行（577+6），失败 6 全部位于 `SingleInstanceCoordinatorTests` 预存在时序敏感族。基线对照：`git stash -u` 后干净树隔离复跑同套件仍失败 9/25，且本树全量 6 失败 → 本树隔离 16 失败 → 干净树隔离 9 失败，失败集合随运行变化——证实为环境负载相关的预存在波动（Loop 10 已记录同类现象），与本轮不相交模块改动无关。
+  - `swift build -c debug`：exit 0。
+  - **渲染视觉验证**（临时 XCTest + NSHostingView 离屏渲染 PNG，验证后已删除）：① 正常成功快照——改动前卡片带"最新"徽标、重置区两行含"剩余 45分"，改动后徽标消失、重置区单行"重置次数 3 · 最早到期 今天 12:30 · 全部 2"，面板高度 370pt→337pt（@2x 渲染 740→674px，净降 33pt），额度区文字元素 14→11；② 已过重置点场景——"--"与"已恢复，待刷新"徽标按设计保留，正常周额度卡无徽标；发现徽标在窄卡内截断为"已恢复，待…"，随即给徽标 Text 补 `.minimumScaleFactor(0.75)` 并复渲染，本地 Vision OCR 确认完整显示"已恢复，待刷新"。OCR/视觉读取分别经 modlens 桥与 macOS Vision 框架完成。
+  - 最终全量 `swift test`：**583/583 全部通过，0 失败**（安静环境；此前波动运行中的 SingleInstanceCoordinatorTests 失败亦全数消失，进一步证实其负载相关属性）。
+  - 未运行 `./script/build_and_run.sh --verify`：不涉及打包/签名/安装/Widget 集成改动，不满足运行门槛。
+  - QA 人工桌面检查未执行：本环境无 GUI。真实 Popover 的交互手感、展开"全部 N"后布局需发布前按 QA_CHECKLIST C.4/C.5 人工确认（离屏渲染已覆盖静态布局证据）。
+- **剩余风险**：① 徽标隐藏依赖"header 状态行已表达快照级新鲜度"这一前提，若未来 header 简化需同步复核策略；② 重置额度单行的行尾次要文本在极窄窗口依赖 `minimumScaleFactor(0.78)` 缩放，极端本地化文案可能触底；③ SingleInstanceCoordinatorTests 预存在时序波动仍未修复（独立子系统，建议单独 Loop 用注入时钟改造）。后续降密候选（未处理）：周额度趋势卡 sparkline 默认折叠、额度卡"恢复/还需"两行合并的排版方案。
+
 

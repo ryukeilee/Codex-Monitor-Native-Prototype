@@ -2,7 +2,7 @@
 
 本文件只保存稳定架构信息、已确认设计、已解决的重要问题与已验证区域。**不保存**单次修改细节、临时日志、猜测。详细信息以 \`AGENTS.md\` 为权威来源，本文件是面向维护 Loop 的长期摘要。内容有变化时（如模块迁移、新不变量），只在这里更新，不记录过程。
 
-最后更新：2026-08-21（刷新协调统一化：调度锚点幂等 + 恢复触发新鲜度门控；测试数量 566→577）
+最后更新：2026-08-21（Popover 额度区降密：状态徽标去重 + 重置额度卡单行化；测试数量 577→583）
 
 ---
 
@@ -21,7 +21,7 @@
 - \`UI/\` — SwiftUI popover、装饰组件、reactor 可视化、格式化、交互策略、self-check。
 - \`Shared/\` — \`AppState\`、\`WidgetDisplayState\`、数据源协议、额度决策/状态类型、健康诊断、\`AppLogger\`、widget 展示。
 - \`System/\` — 单实例仲裁、安装身份/权威、开机启动、睡眠唤醒、网络可达性、系统时钟监控、codex 认证边界观察。
-- 测试：\`Tests/CodexMonitorNativeTests\`（XCTest，577 个，0 失败）。
+- 测试：\`Tests/CodexMonitorNativeTests\`（XCTest，583 个，0 失败）。
 
 ### 已确认设计（不要重新质疑）
 - **单一展示投影**：\`AppState → AppStateEvent → QuotaPresentationSnapshot(=WidgetDisplayState) → StatusPopoverFormatting.quotaWindowDisplayItems → Popover/tooltip 直接消费，Widget 经 \`WidgetPresentation\` 按尺寸容量 1/3 确定性选择并显示 \`+N\` 溢出\`。菜单栏只显示可信周剩余百分比或 \`--%\`。
