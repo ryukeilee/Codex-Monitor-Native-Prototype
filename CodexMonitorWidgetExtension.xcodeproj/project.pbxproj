@@ -181,6 +181,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				APPLICATION_EXTENSION_API_ONLY = YES;
+				ENABLE_DEBUG_DYLIB = NO;
 				CODE_SIGN_ENTITLEMENTS = Assets/CodexMonitorWidgetExtension.entitlements;
 				CODE_SIGN_STYLE = Manual;
 				CURRENT_PROJECT_VERSION = 1;

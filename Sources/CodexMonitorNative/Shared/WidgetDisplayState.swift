@@ -82,7 +82,7 @@ struct PersistedAppState: Codable, Equatable {
 
 enum CodexMonitorWidgetConstants {
     static let kind = "CodexMonitorQuotaWidget"
-    static let appGroupIdentifier = "group.com.ryukeilee.CodexMonitorNativePrototype"
+    static let appGroupIdentifier = "JYL9G28DP3.com.ryukeilee.CodexMonitorNativePrototype"
     static let stateFileName = "WidgetDisplayState.json"
 }
 

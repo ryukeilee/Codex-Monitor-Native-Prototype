@@ -46,8 +46,10 @@ WIDGET_BUILD_DIR="$ROOT_DIR/.build/xcode-widget"
 WIDGET_PRODUCTS_DIR="$WIDGET_BUILD_DIR/$XCODE_CONFIGURATION"
 WIDGET_BUNDLE="$WIDGET_PRODUCTS_DIR/$WIDGET_NAME.appex"
 WIDGET_ENTITLEMENTS="$ROOT_DIR/Assets/CodexMonitorWidgetExtension.entitlements"
-CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
-WIDGET_CODESIGN_IDENTITY="${WIDGET_CODESIGN_IDENTITY:-Apple Development}"
+LSREGISTER_PATH="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+SIGNING_IDENTITY_DEFAULT="${CODESIGN_IDENTITY:-${WIDGET_CODESIGN_IDENTITY:-Apple Development}}"
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-$SIGNING_IDENTITY_DEFAULT}"
+WIDGET_CODESIGN_IDENTITY="${WIDGET_CODESIGN_IDENTITY:-$SIGNING_IDENTITY_DEFAULT}"
 INSTALL_APP_PATH_RAW="${INSTALL_APP_PATH:-/Applications/$APP_NAME.app}"
 INSTALL_APP_PATH=""
 INSTALL_WORK_DIR=""
@@ -56,10 +58,11 @@ INSTALL_BACKUP_PATH=""
 INSTALL_REPLACEMENT_ACTIVE=0
 INSTALL_HAD_PREVIOUS_APP=0
 INSTALL_OLD_APP_MOVED=0
+INSTALL_OLD_WIDGET_UNREGISTERED=0
 INSTALL_COMMITTED=0
 PREVIOUS_INSTALL_WAS_RUNNING=0
 INSTANCE_OWNER_PATH="${HOME}/Library/Application Support/CodexMonitorNative/InstanceArbitration/v1/owner.json"
-APP_GROUP_ID="group.com.ryukeilee.CodexMonitorNativePrototype"
+APP_GROUP_ID="JYL9G28DP3.com.ryukeilee.CodexMonitorNativePrototype"
 
 usage() {
   echo "用法：$0 [run|--verify|--debug|--logs|--telemetry]"
@@ -293,6 +296,38 @@ verify_bundle_signature_and_entitlements() {
   verify_expected_entitlements "$bundle" "$expected_entitlements" "$label"
 }
 
+read_team_identifier() {
+  local bundle="$1"
+  local signature_details team_identifier
+
+  signature_details="$(/usr/bin/codesign -dv --verbose=4 "$bundle" 2>&1)" || return 1
+  team_identifier="$(sed -n 's/^TeamIdentifier=//p' <<< "$signature_details" | head -n 1)"
+  [[ -n "$team_identifier" && "$team_identifier" != "not set" ]] || return 1
+  printf '%s\n' "$team_identifier"
+}
+
+verify_matching_team_identifiers() {
+  local parent_bundle="$1"
+  local widget_bundle="$2"
+  local label="$3"
+  local parent_team widget_team
+
+  parent_team="$(read_team_identifier "$parent_bundle")" || fail_step \
+    "校验 ${label} 签名身份" "宿主应用没有有效的 TeamIdentifier，不能与 Widget Extension 配套注册。" \
+    "/usr/bin/codesign -dv --verbose=4 \"$parent_bundle\""
+  widget_team="$(read_team_identifier "$widget_bundle")" || fail_step \
+    "校验 ${label} 签名身份" "Widget Extension 没有有效的 TeamIdentifier。" \
+    "/usr/bin/codesign -dv --verbose=4 \"$widget_bundle\""
+  [[ "$parent_team" == "$widget_team" ]] || fail_step \
+    "校验 ${label} 签名身份" \
+    "宿主 TeamIdentifier（${parent_team}）与 Widget TeamIdentifier（${widget_team}）不一致。" \
+    "使用同一开发团队的签名身份重新构建主应用和 Widget Extension"
+  [[ "$APP_GROUP_ID" == "${parent_team}."* ]] || fail_step \
+    "校验 ${label} App Group 授权" \
+    "App Group 标识符 ${APP_GROUP_ID} 未使用当前签名团队 ${parent_team} 前缀，无法在本机签名下授权共享容器。" \
+    "确认 App Group 标识符以 TeamIdentifier 开头，并与本机签名证书团队一致"
+}
+
 verify_install_candidate() {
   local candidate="$1"
   local info="$candidate/Contents/Info.plist"
@@ -334,6 +369,9 @@ verify_install_candidate() {
     verify_bundle_signature_and_entitlements "$widget" "$WIDGET_ENTITLEMENTS" "Widget"
   fi
   verify_bundle_signature_and_entitlements "$candidate" "$APP_ENTITLEMENTS" "主应用与嵌套代码" --deep
+  if [[ -d "$WIDGET_PROJECT" ]]; then
+    verify_matching_team_identifiers "$candidate" "$widget" "安装候选"
+  fi
 }
 
 read_instance_owner_record() {
@@ -672,18 +710,92 @@ stop_acceptance_processes_before_rollback() {
   return 1
 }
 
+registered_widget_paths() {
+  /usr/bin/pluginkit -mAvvv 2>/dev/null | awk \
+    '/com\.ryukeilee\.CodexMonitorNativePrototype\.widget\(/ { capture = 1; next } \
+    capture && /Path = / { sub(/^.*Path = /, ""); print; capture = 0 }'
+}
+
+widget_path_is_registered() {
+  local expected_path="$1"
+  local registered_paths
+
+  registered_paths="$(registered_widget_paths)" || return 2
+  grep -Fqx -- "$expected_path" <<< "$registered_paths"
+}
+
+ensure_widget_registration() {
+  local widget_path="$1"
+
+  if widget_path_is_registered "$widget_path"; then
+    return 0
+  fi
+  /usr/bin/pluginkit -a "$widget_path" >/dev/null 2>&1 || return 1
+  widget_path_is_registered "$widget_path"
+}
+
+launch_services_path_is_registered() {
+  local expected_path="$1"
+  local registered_paths
+
+  registered_paths="$("$LSREGISTER_PATH" -dump 2>/dev/null)" || return 2
+  awk -v expected_path="$expected_path" '
+    /^path:[[:space:]]/ {
+      path = $0
+      sub(/^path:[[:space:]]*/, "", path)
+      sub(/[[:space:]]+\(0x[[:xdigit:]]+\)$/, "", path)
+      if (path == expected_path) {
+        found = 1
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' <<< "$registered_paths"
+}
+
+unregister_launch_services_path() {
+  local bundle_path="$1"
+  local lookup_status
+
+  "$LSREGISTER_PATH" -u "$bundle_path" >/dev/null 2>&1 || true
+  if launch_services_path_is_registered "$bundle_path"; then
+    return 1
+  else
+    lookup_status=$?
+  fi
+  [[ "$lookup_status" -eq 1 ]]
+}
+
 rollback_install() {
   local restored_previous=0
   local restored_widget="$INSTALL_APP_PATH/Contents/PlugIns/$WIDGET_NAME.appex"
 
   [[ "$INSTALL_REPLACEMENT_ACTIVE" -eq 1 && "$INSTALL_COMMITTED" -eq 0 ]] || return 0
-  if [[ -d "$restored_widget" ]]; then
+  if ! unregister_launch_services_path "$APP_BUNDLE"; then
+    echo "安装回滚警告：无法注销 dist 开发副本的 Launch Services 记录。" >&2
+  fi
+  if [[ ("$INSTALL_HAD_PREVIOUS_APP" -eq 0 || "$INSTALL_OLD_APP_MOVED" -eq 1) \
+    && -d "$restored_widget" ]]; then
     /usr/bin/pluginkit -r "$restored_widget" >/dev/null 2>&1 || true
   fi
   if [[ "$INSTALL_HAD_PREVIOUS_APP" -eq 1 ]]; then
     if [[ ! -d "$INSTALL_BACKUP_PATH" ]]; then
       if [[ "$INSTALL_OLD_APP_MOVED" -eq 0 && -d "$INSTALL_APP_PATH" ]]; then
+        if [[ "$INSTALL_OLD_WIDGET_UNREGISTERED" -eq 1 && -d "$restored_widget" ]]; then
+          if ! ensure_widget_registration "$restored_widget"; then
+            echo "安装回滚失败：旧应用仍在原位，但无法恢复其 Widget 注册。" >&2
+            return 1
+          fi
+          INSTALL_OLD_WIDGET_UNREGISTERED=0
+        fi
+        if ! "$LSREGISTER_PATH" -f "$INSTALL_APP_PATH" >/dev/null 2>&1; then
+          echo "安装回滚失败：旧应用仍在原位，但无法恢复其 Launch Services 记录。" >&2
+          return 1
+        fi
         INSTALL_REPLACEMENT_ACTIVE=0
+        if [[ "$PREVIOUS_INSTALL_WAS_RUNNING" -eq 1 ]]; then
+          /usr/bin/open -n "$INSTALL_APP_PATH" >/dev/null 2>&1 \
+            || echo "安装回滚警告：旧应用仍在原位，但无法自动重新启动。" >&2
+        fi
         return 0
       fi
       echo "回滚失败：找不到原安装 backup；保留受控目录 ${INSTALL_WORK_DIR} 供人工检查。" >&2
@@ -698,6 +810,10 @@ rollback_install() {
         echo "人工恢复步骤 2：mv \"${INSTALL_BACKUP_PATH}\" \"${INSTALL_APP_PATH}\"" >&2
         return 1
       fi
+    fi
+    if ! unregister_launch_services_path "$INSTALL_BACKUP_PATH"; then
+      echo "安装回滚失败：无法注销 backup 路径的 Launch Services 记录。" >&2
+      return 1
     fi
     if mv "$INSTALL_BACKUP_PATH" "$INSTALL_APP_PATH"; then
       restored_previous=1
@@ -716,12 +832,24 @@ rollback_install() {
         return 1
       fi
     fi
+    if ! unregister_launch_services_path "$INSTALL_APP_PATH"; then
+      echo "安装回滚警告：无法注销失败安装路径的 Launch Services 记录。" >&2
+    fi
   fi
   INSTALL_REPLACEMENT_ACTIVE=0
 
+  if [[ "$restored_previous" -eq 1 ]] && ! "$LSREGISTER_PATH" -f "$INSTALL_APP_PATH" >/dev/null 2>&1; then
+    echo "安装回滚失败：无法刷新恢复后的 Launch Services 记录。" >&2
+    return 1
+  fi
+
   if [[ "$restored_previous" -eq 1 && -d "$restored_widget" ]]; then
-    /usr/bin/pluginkit -a "$restored_widget" >/dev/null 2>&1 \
-      || echo "回滚警告：原安装已恢复，但 Widget 未能自动重新注册。" >&2
+    if ! ensure_widget_registration "$restored_widget"; then
+      echo "安装回滚失败：原安装已恢复，但 Widget 未能重新注册。" >&2
+      echo "已恢复应用路径：${INSTALL_APP_PATH}" >&2
+      return 1
+    fi
+    INSTALL_OLD_WIDGET_UNREGISTERED=0
   fi
   if [[ "$restored_previous" -eq 1 && "$PREVIOUS_INSTALL_WAS_RUNNING" -eq 1 ]]; then
     if /usr/bin/open -n "$INSTALL_APP_PATH"; then
@@ -736,6 +864,7 @@ rollback_install() {
 commit_install() {
   INSTALL_COMMITTED=1
   INSTALL_REPLACEMENT_ACTIVE=0
+  INSTALL_OLD_WIDGET_UNREGISTERED=0
   if [[ -n "$INSTALL_WORK_DIR" && -d "$INSTALL_WORK_DIR" ]]; then
     if ! rm -rf "$INSTALL_WORK_DIR"; then
       echo "清理警告：安装已验收，但无法删除受控 backup 目录 ${INSTALL_WORK_DIR}。" >&2
@@ -897,6 +1026,13 @@ if [[ -d "$WIDGET_PROJECT" ]]; then
       "检查 xcodebuild 输出目录后重试 ./script/build_and_run.sh --verify"
   fi
 
+  if ! rm -f \
+    "$WIDGET_BUNDLE/Contents/MacOS/${WIDGET_NAME}.debug.dylib" \
+    "$WIDGET_BUNDLE/Contents/MacOS/__preview.dylib"; then
+    fail_step "清理 Widget 调试产物" "无法移除旧版 Xcode 调试动态库。" \
+      "检查构建目录权限后重试 ./script/build_and_run.sh --verify"
+  fi
+
   if ! (mkdir -p "$APP_PLUGINS" \
     && rm -rf "$APP_PLUGINS/$WIDGET_NAME.appex" \
     && ditto --norsrc --noextattr "$WIDGET_BUNDLE" "$APP_PLUGINS/$WIDGET_NAME.appex" \
@@ -914,6 +1050,7 @@ if [[ -d "$WIDGET_PROJECT" ]]; then
     fail_step "签名 Widget" "Widget 本地签名失败。" \
       "确认 WIDGET_CODESIGN_IDENTITY 可用（默认使用 Apple Development 证书）后重试 ./script/build_and_run.sh --verify"
   fi
+
 fi
 
 if ! /usr/bin/xattr -cr "$APP_BUNDLE"; then
@@ -928,7 +1065,7 @@ if ! /usr/bin/codesign \
   --entitlements "$APP_ENTITLEMENTS" \
   "$APP_BUNDLE"; then
   fail_step "签名应用" "主应用本地签名失败。" \
-    "确认 CODESIGN_IDENTITY 可用（默认使用本地 ad-hoc 签名）后重试 ./script/build_and_run.sh --verify"
+    "确认 CODESIGN_IDENTITY 可用（默认与 Widget 共用 Apple Development 签名身份）后重试 ./script/build_and_run.sh --verify"
 fi
 
 open_app() {
@@ -957,7 +1094,7 @@ open_app_without_development_override() {
 }
 
 install_app() {
-  local install_parent physical_parent
+  local install_parent physical_parent old_widget registered_paths
 
   install_parent="${INSTALL_APP_PATH%/*}"
   if ! mkdir -p "$install_parent"; then
@@ -990,6 +1127,32 @@ install_app() {
   fi
   INSTALL_REPLACEMENT_ACTIVE=1
   if [[ "$INSTALL_HAD_PREVIOUS_APP" -eq 1 ]]; then
+    old_widget="$INSTALL_APP_PATH/Contents/PlugIns/$WIDGET_NAME.appex"
+    if [[ -d "$old_widget" ]]; then
+      registered_paths="$(registered_widget_paths)" || fail_step \
+        "检查旧 Widget 注册" "无法读取 PlugInKit 注册状态。" \
+        "执行 /usr/bin/pluginkit -mAvvv 检查后重试"
+      if grep -Fqx -- "$old_widget" <<< "$registered_paths"; then
+        INSTALL_OLD_WIDGET_UNREGISTERED=1
+        if ! /usr/bin/pluginkit -r "$old_widget" >/dev/null 2>&1; then
+          fail_step "移除旧 Widget 注册" "无法在覆盖安装前注销原安装中的 Widget。" \
+            "检查 PlugInKit 状态后重试 ./script/build_and_run.sh --verify"
+        fi
+        for _ in {1..20}; do
+          registered_paths="$(registered_widget_paths)" || fail_step \
+            "校验旧 Widget 注销" "无法读取 PlugInKit 注册状态。" \
+            "执行 /usr/bin/pluginkit -mAvvv 检查后重试"
+          if ! grep -Fqx -- "$old_widget" <<< "$registered_paths"; then
+            break
+          fi
+          sleep 0.25
+        done
+        if grep -Fqx -- "$old_widget" <<< "$registered_paths"; then
+          fail_step "校验旧 Widget 注销" "旧安装的 Widget 仍留在 PlugInKit 注册表中。" \
+            "执行 /usr/bin/pluginkit -r \"$old_widget\" 后重试 ./script/build_and_run.sh --verify"
+        fi
+      fi
+    fi
     if ! mv "$INSTALL_APP_PATH" "$INSTALL_BACKUP_PATH"; then
       fail_step "覆盖安装" "无法把原安装移动到受控 backup：${INSTALL_BACKUP_PATH}。" \
         "确认安装父目录可写，或改用用户 Applications 目录"
@@ -1001,6 +1164,47 @@ install_app() {
       "确认目标目录可写，或设置 INSTALL_APP_PATH=\"${HOME}/Applications/${APP_NAME}.app\" 后重试 ./script/build_and_run.sh --verify"
   fi
   echo "  安装替换：新包已就位，原安装保留在受控 backup，等待验收提交"
+}
+
+restore_installed_widget_registration() {
+  local development_widget="$APP_BUNDLE/Contents/PlugIns/$WIDGET_NAME.appex"
+  local installed_widget="$INSTALL_APP_PATH/Contents/PlugIns/$WIDGET_NAME.appex"
+  local registered_paths registered_path
+
+  registered_paths="$(/usr/bin/pluginkit -mAvvv 2>/dev/null | awk \
+    '/com\.ryukeilee\.CodexMonitorNativePrototype\.widget\(/ { capture = 1; next } \
+    capture && /Path = / { sub(/^.*Path = /, ""); print; capture = 0 }')"
+  if grep -Fqx -- "$development_widget" <<< "$registered_paths" \
+    && ! /usr/bin/pluginkit -r "$development_widget" >/dev/null 2>&1; then
+    fail_step "清理开发版 Widget 注册" "无法注销验收用 dist Widget 副本。" \
+      "执行 /usr/bin/pluginkit -r \"$development_widget\" 后重试 ./script/build_and_run.sh --verify"
+  fi
+  if ! /usr/bin/pluginkit -a "$installed_widget" >/dev/null 2>&1; then
+    fail_step "恢复安装版 Widget 注册" "无法重新注册已安装包中的 Widget。" \
+      "执行 /usr/bin/pluginkit -a \"$installed_widget\" 后重试 ./script/build_and_run.sh --verify"
+  fi
+  if [[ -n "$INSTALL_BACKUP_PATH" ]] \
+    && ! unregister_launch_services_path "$INSTALL_BACKUP_PATH"; then
+    fail_step "清理旧应用记录" "无法注销临时 backup 路径的 Launch Services 记录。" \
+      "检查 Launch Services 状态后重试 ./script/build_and_run.sh --verify"
+  fi
+  if ! unregister_launch_services_path "$APP_BUNDLE"; then
+    fail_step "清理开发版应用记录" "无法注销验收用 dist 应用副本的 Launch Services 记录。" \
+      "检查 Launch Services 状态后重试 ./script/build_and_run.sh --verify"
+  fi
+  if ! "$LSREGISTER_PATH" -f "$INSTALL_APP_PATH" >/dev/null 2>&1; then
+    fail_step "刷新安装版应用记录" "无法刷新已安装应用的 Launch Services 记录。" \
+      "执行 $LSREGISTER_PATH -f \"$INSTALL_APP_PATH\" 后重试 ./script/build_and_run.sh --verify"
+  fi
+  registered_paths="$(/usr/bin/pluginkit -mAvvv 2>/dev/null | awk \
+    '/com\.ryukeilee\.CodexMonitorNativePrototype\.widget\(/ { capture = 1; next } \
+    capture && /Path = / { sub(/^.*Path = /, ""); print; capture = 0 }')"
+  if [[ -z "$registered_paths" ]] || ! while IFS= read -r registered_path; do
+    [[ "$registered_path" == "$installed_widget" ]] || exit 1
+  done <<< "$registered_paths"; then
+    fail_step "校验安装版 Widget 注册" "验收结束后 PlugInKit 仍指向非安装版扩展。" \
+      "执行 /usr/bin/pluginkit -mAvvv 检查 $WIDGET_BUNDLE_ID 注册路径"
+  fi
 }
 
 verify_installed_app() {
@@ -1036,6 +1240,9 @@ verify_installed_app() {
     verify_bundle_signature_and_entitlements "$installed_widget" "$WIDGET_ENTITLEMENTS" "已安装 Widget"
   fi
   verify_bundle_signature_and_entitlements "$INSTALL_APP_PATH" "$APP_ENTITLEMENTS" "已安装主应用与嵌套代码" --deep
+  if [[ -d "$WIDGET_PROJECT" ]]; then
+    verify_matching_team_identifiers "$INSTALL_APP_PATH" "$installed_widget" "已安装包"
+  fi
 
   open_app "$INSTALL_APP_PATH"
   local running_pid="" running_pids=""
@@ -1089,6 +1296,9 @@ verify_installed_app() {
   verify_cross_copy_instance_arbitration "$running_pid"
   verify_preferred_owner_takeover
   verify_stale_copy_redirect
+  if [[ -d "$WIDGET_PROJECT" && -d "$installed_widget" ]]; then
+    restore_installed_widget_registration
+  fi
 
   local final_owner_pid final_owner_instance_id final_running_pids
   read_instance_owner_record || fail_step "校验最终 owner" \

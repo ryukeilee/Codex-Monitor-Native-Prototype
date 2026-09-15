@@ -275,4 +275,12 @@
   - `./script/build_and_run.sh --verify`：通过（exit 0）。主应用与 Widget appex codesign 校验 valid on disk + satisfies Designated Requirement；安装至 `/Applications/CodexMonitorNative.app` 版本 0.1.0 (1)；运行进程 PID 50421（12:38:45 启动，路径为安装版），Widget 扩展进程同步运行。
   - 随后按用户指令 commit 并 push 本轮全部改动（源码 2 文件 + `.agent/` 记录 2 文件）。
 
+### Loop 15 — 修复 macOS 27 下 Widget Gallery 消失并完成本机安装（完成）
 
+- **日期**：2026-09-15
+- **问题**：macOS 27 升级后 Codex Monitor Widget 不在小组件图库中；目标是用本机签名安装运行，并在图库中实际看到小组件。
+- **证据**：原安装宿主使用 ad-hoc 签名、Widget appex 使用 Apple Development 签名；替换安装期间，Launch Services 曾保留指向临时 backup 与仓库 `dist` 的应用/扩展路径。手动注销这些旧路径并刷新 `/Applications/CodexMonitorNative.app` 后，图库立即出现 Codex Monitor 的小号和中号预览。另查明两个 bundle 无 provisioning profile，原 `group.` App Group entitlement 不适用于此本机签名配置。
+- **原因**：安装替换和 `--verify` challenger 会移动、启动多个相同 bundle ID 的副本；遗留 Launch Services/PlugInKit 路径会令系统继续引用临时或开发构建。宿主/扩展签名不一致，以及本机签名下未获 profile 授权的 `group.` 标识符，是独立的打包配置缺陷。
+- **修改**：宿主与 Widget 默认共用 Apple Development 身份，并校验 TeamIdentifier；改用 `JYL9G28DP3.com.ryukeilee.CodexMonitorNativePrototype` 作为两端一致的本机 App Group；Widget target 关闭 `ENABLE_DEBUG_DYLIB`，复制 appex 前清理残留调试 dylib。`--verify` 成功路径及回滚路径会清理 dist/backup 的 Launch Services 与 PlugInKit 项、刷新当前安装并检查最终 Widget 路径。Launch Services 在路径已不存在时可能以 `-10814` 返回失败码；脚本现在以 `lsregister -dump` 确认目标路径是否仍残留，避免把已清理状态误判为失败。保留 Loop 14 与工作区其他用户改动。
+- **验证**：`bash -n script/build_and_run.sh`、`git diff --check`、`swift build -c debug` 通过；`swift test --filter WidgetTimelineBridgeTests` 47/47 通过。全量 `swift test`（583 项）曾在 `StatusPopoverBehaviorTests` 的 popover monitor/layout-task 断言失败（151 项断言失败），当前未解决，需独立排查。最终 `./script/build_and_run.sh --verify` 通过：安装版路径 `/Applications/CodexMonitorNative.app`、版本 0.1.0 (1)、PID 52120；主应用与 Widget 签名、TeamIdentifier、App Group entitlement 验证通过。`pluginkit` 唯一扩展路径与 Launch Services 当前 app/appex 路径均指向 `/Applications`，没有 dist 或临时 backup 路径。桌面小组件图库搜索 `Codex Monitor` 后实际显示小号与中号 Widget，用户确认小组件正常。
+- **剩余风险**：全量测试中的 `StatusPopoverBehaviorTests` 失败尚未定位；原 App Group 容器中的缓存未迁移到本机签名的新组标识符，宿主刷新会重新发布 Widget 状态。
