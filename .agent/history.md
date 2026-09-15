@@ -308,3 +308,13 @@
 - **修改**：`Sources/CodexMonitorNative/App/PopoverController.swift`：`popover.show` 后检查 `popover.isShown`，失败时记录 warning、调用既有 `finishPresentation` 回滚全部生命周期资源并返回，避免留下监视器与 active state。`Tests/CodexMonitorNativeTests/StatusPopoverBehaviorTests.swift`：保留成功呈现时的完整生命周期断言，并增加呈现失败时资源归零的断言；两个测试都通过 `defer` 确保 teardown。未修改额度、Widget、持久化或产品展示逻辑。
 - **验证**：`swift test --filter StatusPopoverBehaviorTests`：15/15 通过，0 失败；`swift test`：583/583 通过，0 失败；`swift build -c debug`：通过；`git diff --check`：通过。
 - **剩余风险**：当前 XCTest 宿主仍不能验证 macOS 27 下真实菜单栏 Popover 的成功呈现路径；成功呈现分支保留原有行为，仍需在可交互菜单栏上下文或人工 QA 中确认。随后从真实大小写路径执行 `./script/build_and_run.sh --verify` 通过，安装版 `/Applications/CodexMonitorNative.app` 成为最终 owner；未执行人工 Popover QA。
+
+### Loop 17 — 修复 macOS 27 桌面小组件核心在系统着色模式下变白并完成本地安装
+
+- **日期**：2026-09-15
+- **问题**：macOS 27 桌面小组件的能量核心变成大块白色圆盘，无法辨认原有机械细节。
+- **证据**：用户截图呈现白色实心核心与灰白环；当前机器为 macOS 27.0。Widget 视图没有读取 `widgetRenderingMode`，核心采用高亮渐变、发光实心球和模糊蓝色背景。Apple WidgetKit 文档说明 Mac 在 tinted/clear 场景使用 accented rendering，会将主要/强调内容着色为白色。
+- **原因**：系统 accented 渲染把原本区分颜色的实心高亮与发光叠层统一转为白色；Widget 没有针对该渲染模式提供可读的核心构图。
+- **修改**：`Sources/CodexMonitorWidgetExtension/CodexMonitorWidget.swift`（新增 `widgetRenderingMode` 分支；full-color 保持原红蓝核心，accented/vibrant 改用透明中心、淡色刻度、轨道与亮度分层的进度环；着色模式移除蓝色模糊核心背景，额度数字和进度环标记为 accentable）。
+- **验证**：`swift test --filter WidgetPresentationTests`：14/14 通过；`swift build -c debug`：通过；`xcodebuild -project CodexMonitorWidgetExtension.xcodeproj -scheme CodexMonitorWidgetExtension -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build`：通过；`git diff --check`：通过。未运行全量 `swift test`，本轮未触及配额决策、账号边界、持久化、RPC、并发或生命周期。用户明确授权本地安装运行后，`./script/build_and_run.sh --verify` 通过：安装路径 `/Applications/CodexMonitorNative.app`、版本 0.1.0 (1)，主应用和 Widget 签名、TeamIdentifier、App Group entitlement 与单实例 owner 均通过验证；`ps` 确认进程从该安装路径运行，`pluginkit` 确认 Widget 仅注册于该安装版路径。Computer Use 的 Finder 桌面没有显示已放置的 Widget，因此未完成桌面上 accented/full-color 两种模式的人工外观确认。
+- **剩余风险**：`QA_CHECKLIST.md` 中 Widget 能量核心数字优先级与同心背景对齐仍待有小组件实际显示的桌面进行人工确认；小组件扩展已签名安装并由系统注册。

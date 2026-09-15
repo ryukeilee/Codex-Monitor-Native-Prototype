@@ -77,6 +77,7 @@ struct CodexMonitorWidgetView: View {
     }
 
     @Environment(\.widgetFamily) private var family
+    @Environment(\.widgetRenderingMode) private var widgetRenderingMode
     let entry: CodexMonitorWidgetEntry
     let familyOverride: WidgetFamily?
 
@@ -483,22 +484,82 @@ struct CodexMonitorWidgetView: View {
     }
 
     private func energyCore(diameter: CGFloat, valueFont: Font) -> some View {
-        MechanicalEnergyCore(diameter: diameter, progress: gaugeProgress) {
-            Text(centerQuotaNumberText)
-                .font(valueFont)
-                .foregroundStyle(.white)
-                .monospacedDigit()
-                .lineLimit(1)
-                .minimumScaleFactor(0.62)
-                .allowsTightening(true)
-                .shadow(color: Color(red: 0.52, green: 0.90, blue: 1.0).opacity(0.30), radius: 2)
-                .accessibilityLabel(presentation.primaryQuota.map { "\($0.label) \($0.percentText)" } ?? "额度不可用")
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .background {
-            concentricCoreBackdrop
+        Group {
+            if widgetRenderingMode == .fullColor {
+                MechanicalEnergyCore(diameter: diameter, progress: gaugeProgress) {
+                    energyCoreValue(valueFont: valueFont)
+                }
+                .background {
+                    concentricCoreBackdrop
+                }
+            } else {
+                accentedEnergyCore(diameter: diameter, valueFont: valueFont)
+                    .background {
+                        panelHaloOverlay
+                    }
+            }
         }
         .offset(y: isSmall ? -1 : -3)
+    }
+
+    private func energyCoreValue(valueFont: Font) -> some View {
+        Text(centerQuotaNumberText)
+            .font(valueFont)
+            .foregroundStyle(.white)
+            .monospacedDigit()
+            .lineLimit(1)
+            .minimumScaleFactor(0.62)
+            .allowsTightening(true)
+            .shadow(color: Color(red: 0.52, green: 0.90, blue: 1.0).opacity(0.30), radius: 2)
+            .accessibilityLabel(presentation.primaryQuota.map { "\($0.label) \($0.percentText)" } ?? "额度不可用")
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func accentedEnergyCore(diameter: CGFloat, valueFont: Font) -> some View {
+        ZStack {
+            Circle()
+                .stroke(.white.opacity(0.22), lineWidth: max(1, diameter * 0.018))
+                .padding(diameter * 0.025)
+
+            Circle()
+                .stroke(
+                    .white.opacity(0.18),
+                    style: StrokeStyle(lineWidth: max(0.8, diameter * 0.012), dash: [1.5, 2.5])
+                )
+                .padding(diameter * 0.16)
+
+            ZStack {
+                ForEach(0..<8, id: \.self) { index in
+                    Capsule(style: .continuous)
+                        .fill(.white.opacity(0.42))
+                        .frame(width: max(1, diameter * 0.022), height: diameter * 0.055)
+                        .offset(y: -diameter * 0.41)
+                        .rotationEffect(.degrees(Double(index) * 45))
+                }
+            }
+
+            Circle()
+                .stroke(.white.opacity(0.16), lineWidth: max(2, diameter * 0.055))
+                .padding(diameter * 0.13)
+
+            Circle()
+                .trim(from: 0, to: gaugeProgress)
+                .stroke(
+                    .white,
+                    style: StrokeStyle(
+                        lineWidth: max(2, diameter * 0.055),
+                        lineCap: .round,
+                        lineJoin: .round
+                    )
+                )
+                .rotationEffect(.degrees(-90))
+                .padding(diameter * 0.13)
+                .widgetAccentable()
+
+            energyCoreValue(valueFont: valueFont)
+                .widgetAccentable()
+        }
+        .frame(width: diameter, height: diameter)
     }
 
     private func metricCell(
