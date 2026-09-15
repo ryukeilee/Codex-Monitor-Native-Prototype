@@ -275,6 +275,21 @@
   - `./script/build_and_run.sh --verify`：通过（exit 0）。主应用与 Widget appex codesign 校验 valid on disk + satisfies Designated Requirement；安装至 `/Applications/CodexMonitorNative.app` 版本 0.1.0 (1)；运行进程 PID 50421（12:38:45 启动，路径为安装版），Widget 扩展进程同步运行。
   - 随后按用户指令 commit 并 push 本轮全部改动（源码 2 文件 + `.agent/` 记录 2 文件）。
 
+### Loop 14 — 无有效证据，本轮不修改
+
+- **日期**：2026-08-28
+- **问题**：未发现可处理的高价值问题，按 loop.md §2/§3 结束本轮，不修改代码。
+- **检查范围**（Observe 阶段）：
+  - pwd：/Users/ryukeili/GitHub/Codex Monitor Native Prototype；git status --short --branch：工作区干净，当前为 main...origin/main。
+  - git log --oneline -10：最新提交为 65cad71 feat: smooth quota card state transitions with scoped animations；git diff --stat 为空。
+  - TODO|FIXME|HACK：Sources、Tests、docs 均无匹配。
+  - 最近历史中的 SingleInstanceCoordinatorTests 时序波动未在本轮复现，且不应凭猜测修改；本轮未发现新的应用日志或用户场景证据。
+- **证据**：全量 swift test 通过，执行 583 个测试、0 失败；本次用户反馈仅为“执行一次项目里的 loop”，没有具体 Bug 场景。
+- **未发现高价值问题的原因**：无可复现 Bug、无测试失败、无相对产品不变量的明确行为异常、无带代码路径证据的稳定性/性能风险或测试缺口；文档中的人工 QA 未勾选项仍是发布前门禁，不构成代码修改依据。
+- **修改**：无业务代码、测试、脚本或配置修改；仅追加本维护记录。
+- **验证**：swift test：583/583 通过（exit 0）；swift build -c debug：通过（exit 0）；git diff --check：通过（exit 0）。
+- **剩余风险**：未运行 ./script/build_and_run.sh --verify 与 QA_CHECKLIST 人工桌面检查；本轮无打包/签名/安装/Widget 或可见行为改动，不满足这些门槛。未执行真实 Sleep/Wake、Popover 手感和 VoiceOver 人工检查，继续由发布前人工门禁覆盖。
+
 ### Loop 15 — 修复 macOS 27 下 Widget Gallery 消失并完成本机安装（完成）
 
 - **日期**：2026-09-15
@@ -284,3 +299,12 @@
 - **修改**：宿主与 Widget 默认共用 Apple Development 身份，并校验 TeamIdentifier；改用 `JYL9G28DP3.com.ryukeilee.CodexMonitorNativePrototype` 作为两端一致的本机 App Group；Widget target 关闭 `ENABLE_DEBUG_DYLIB`，复制 appex 前清理残留调试 dylib。`--verify` 成功路径及回滚路径会清理 dist/backup 的 Launch Services 与 PlugInKit 项、刷新当前安装并检查最终 Widget 路径。Launch Services 在路径已不存在时可能以 `-10814` 返回失败码；脚本现在以 `lsregister -dump` 确认目标路径是否仍残留，避免把已清理状态误判为失败。保留 Loop 14 与工作区其他用户改动。
 - **验证**：`bash -n script/build_and_run.sh`、`git diff --check`、`swift build -c debug` 通过；`swift test --filter WidgetTimelineBridgeTests` 47/47 通过。全量 `swift test`（583 项）曾在 `StatusPopoverBehaviorTests` 的 popover monitor/layout-task 断言失败（151 项断言失败），当前未解决，需独立排查。最终 `./script/build_and_run.sh --verify` 通过：安装版路径 `/Applications/CodexMonitorNative.app`、版本 0.1.0 (1)、PID 52120；主应用与 Widget 签名、TeamIdentifier、App Group entitlement 验证通过。`pluginkit` 唯一扩展路径与 Launch Services 当前 app/appex 路径均指向 `/Applications`，没有 dist 或临时 backup 路径。桌面小组件图库搜索 `Codex Monitor` 后实际显示小号与中号 Widget，用户确认小组件正常。
 - **剩余风险**：全量测试中的 `StatusPopoverBehaviorTests` 失败尚未定位；原 App Group 容器中的缓存未迁移到本机签名的新组标识符，宿主刷新会重新发布 Widget 状态。
+
+### Loop 16 — 修复 Popover 展示失败时的生命周期泄漏
+
+- **问题**：macOS 27 / Xcode 27 下，测试宿主创建的 `NSStatusBarButton` 无法展示 `NSPopover`；`PopoverController.show` 仍继续安装 3 个事件监视器并保留 active presentation，导致两个真实 Popover 生命周期测试产生 151 个连锁断言失败。
+- **证据**：原始 `swift test --filter StatusPopoverBehaviorTests` 执行 15 个测试、151 个断言失败；两个单测试重跑均复现。失败表现为 `NSPopover.show` 后 `isPopoverShown == false`，但监视器仍为 3 个。临时 AppKit 探针确认当前 XCTest status item 缺少可交互菜单栏上下文；普通窗口承载真实 `PopoverController` 的替代试验会超时。
+- **原因**：`PopoverController.show` 将 `NSPopover.show` 当作无条件成功，未处理 AppKit 拒绝呈现的路径；因此 presentation token、panel state、layout task 和 event monitors 未回滚。
+- **修改**：`Sources/CodexMonitorNative/App/PopoverController.swift`：`popover.show` 后检查 `popover.isShown`，失败时记录 warning、调用既有 `finishPresentation` 回滚全部生命周期资源并返回，避免留下监视器与 active state。`Tests/CodexMonitorNativeTests/StatusPopoverBehaviorTests.swift`：保留成功呈现时的完整生命周期断言，并增加呈现失败时资源归零的断言；两个测试都通过 `defer` 确保 teardown。未修改额度、Widget、持久化或产品展示逻辑。
+- **验证**：`swift test --filter StatusPopoverBehaviorTests`：15/15 通过，0 失败；`swift test`：583/583 通过，0 失败；`swift build -c debug`：通过；`git diff --check`：通过。
+- **剩余风险**：当前 XCTest 宿主仍不能验证 macOS 27 下真实菜单栏 Popover 的成功呈现路径；成功呈现分支保留原有行为，仍需在可交互菜单栏上下文或人工 QA 中确认。随后从真实大小写路径执行 `./script/build_and_run.sh --verify` 通过，安装版 `/Applications/CodexMonitorNative.app` 成为最终 owner；未执行人工 Popover QA。

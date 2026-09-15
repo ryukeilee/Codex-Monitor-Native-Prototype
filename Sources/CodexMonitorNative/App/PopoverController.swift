@@ -200,6 +200,11 @@ final class PopoverController: NSObject, NSPopoverDelegate {
         presentationState.setPanelActive(true)
         updateContentSize(for: button)
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        guard popover.isShown else {
+            AppLogger.popover.warning("Popover presentation was rejected; rolling back presentation state")
+            finishPresentation(presentationToken)
+            return
+        }
         popover.contentViewController?.view.window?.becomeKey()
         installOutsideClickMonitors(for: presentationToken)
     }

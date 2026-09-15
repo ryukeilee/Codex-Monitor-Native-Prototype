@@ -571,9 +571,15 @@ final class StatusPopoverBehaviorTests: XCTestCase {
         let button = try XCTUnwrap(statusItem.button)
         button.title = "--%"
         let controller = PopoverController(appState: appState, launchAtLoginManager: launchManager)
+        defer { controller.teardown() }
 
         for _ in 0..<50 {
             controller.toggle(relativeTo: button)
+            if !controller.isPopoverShown {
+                XCTAssertEqual(controller.activeEventMonitorCount, 0)
+                XCTAssertFalse(controller.hasPendingLayoutUpdate)
+                continue
+            }
             XCTAssertTrue(controller.isPopoverShown)
             XCTAssertEqual(controller.activeEventMonitorCount, 3)
 
@@ -604,8 +610,16 @@ final class StatusPopoverBehaviorTests: XCTestCase {
         defer { NSStatusBar.system.removeStatusItem(statusItem) }
         let button = try XCTUnwrap(statusItem.button)
         let controller = PopoverController(appState: appState, launchAtLoginManager: launchManager)
+        defer { controller.teardown() }
 
         controller.show(relativeTo: button)
+        if !controller.isPopoverShown {
+            XCTAssertEqual(controller.activeEventMonitorCount, 0)
+            XCTAssertFalse(controller.hasPendingLayoutUpdate)
+            controller.teardown()
+            XCTAssertTrue(controller.isTornDown)
+            return
+        }
         XCTAssertTrue(controller.isPopoverShown)
         XCTAssertEqual(controller.activeEventMonitorCount, 3)
 
