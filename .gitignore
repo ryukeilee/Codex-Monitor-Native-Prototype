@@ -28,6 +28,7 @@ service-account*.json
 .vscode/
 .claude/
 .opencode/
+.task-ledger/
 
 # Build artifacts
 .build/
