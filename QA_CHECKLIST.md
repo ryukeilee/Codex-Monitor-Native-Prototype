@@ -11,7 +11,7 @@
 ## A. 自动验证门槛
 
 - [x] `swift build -c debug` 通过（2026-07-18）
-- [x] `swift test` 取得完整 XCTest 汇总（2026-09-20 在 `4019fad` 实测：583 个测试，0 失败；命令：`swift test`）
+- [x] `swift test` 取得完整 XCTest 汇总（2026-09-20 在 `c22554c` 实测：584 个测试，0 失败；命令：`swift test`）
 - [x] 修改后的 `./script/build_and_run.sh --verify` 通过（2026-07-18：退出码 0；安装路径、签名、entitlements、Widget 注册、跨副本接管与最终 owner 绑定均通过）
 
 ## B. 核心行为核对

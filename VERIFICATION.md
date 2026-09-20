@@ -42,7 +42,7 @@ ps -p <owner-pid> -o pid=,user=,command=
 
 结果：
 
-- `swift test`（2026-09-20 在 `4019fad` 实测）完整执行 583 个 XCTest，0 失败；原始末行：`Executed 583 tests, with 0 failures (0 unexpected)`。包含真实 Popover 生命周期、安装身份、登录项、单实例 process-bound handoff、claimant 退出/身份变化、缓存边界及 Widget bridge 回归。
+- `swift test`（2026-09-20 在 `c22554c` 实测）完整执行 584 个 XCTest，0 失败；原始末行：`Executed 584 tests, with 0 failures (0 unexpected)`。包含真实 Popover 生命周期、安装身份、登录项、单实例 process-bound handoff、claimant 退出/身份变化、缓存边界及 Widget bridge 回归。
 - `swift build -c debug` 通过。
 - 修改后的统一验收以退出码 0 完成：安装版 owner 接收开发 challenger 后保持；dist 开发 owner 向安装版完成身份绑定移交并退出；不带开发绕过参数的 dist 旧副本用唯一 token 重定向到安装版 owner。最终 token owner 的 PID、instanceID、owner record 与运行路径一致。
 - 最终只有一个 `CodexMonitorNative` 进程，运行路径为 `/Applications/CodexMonitorNative.app/Contents/MacOS/CodexMonitorNative`，版本为 `0.1.0 (1)`；未残留 `.CodexMonitorNative.install.*` 受控目录。
@@ -304,7 +304,7 @@ redirect_check_token="$(/usr/bin/uuidgen)"
 - 待批准、失败或身份无法验证时不显示虚假启用；系统级拒绝不会被后台覆盖。
 - 登录时及旧副本挑战后都只有当前首选路径的唯一 owner。
 
-本轮结果：583 个自动化测试（命令：`swift test`，2026-09-20 在 `4019fad` 实测，0 失败）、隔离路径故障注入及修改后的最终 `/Applications` 验收已提供状态机、签名、entitlements、覆盖安装、首选 owner 移交、旧副本 token 重定向和唯一运行路径证据。真实注销/重新登录、实际移动旧路径不存在的 App，以及 System Settings 许可切换仍未人工确认。只读导出 macOS 后台任务数据库的 `sfltool dumpbtm` 在非交互授权环境中未取得有效授权，提升权限后也无进展，已终止，因此不把系统数据库中的实际登录项路径记录为已核对。
+本轮结果：584 个自动化测试（命令：`swift test`，2026-09-20 在 `c22554c` 实测，0 失败）、隔离路径故障注入及修改后的最终 `/Applications` 验收已提供状态机、签名、entitlements、覆盖安装、首选 owner 移交、旧副本 token 重定向和唯一运行路径证据。真实注销/重新登录、实际移动旧路径不存在的 App，以及 System Settings 许可切换仍未人工确认。只读导出 macOS 后台任务数据库的 `sfltool dumpbtm` 在非交互授权环境中未取得有效授权，提升权限后也无进展，已终止，因此不把系统数据库中的实际登录项路径记录为已核对。
 
 ## Release Gate
 
