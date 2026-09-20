@@ -318,3 +318,32 @@
 - **修改**：`Sources/CodexMonitorWidgetExtension/CodexMonitorWidget.swift`（新增 `widgetRenderingMode` 分支；full-color 保持原红蓝核心，accented/vibrant 改用透明中心、淡色刻度、轨道与亮度分层的进度环；着色模式移除蓝色模糊核心背景，额度数字和进度环标记为 accentable）。
 - **验证**：`swift test --filter WidgetPresentationTests`：14/14 通过；`swift build -c debug`：通过；`xcodebuild -project CodexMonitorWidgetExtension.xcodeproj -scheme CodexMonitorWidgetExtension -configuration Debug -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build`：通过；`git diff --check`：通过。未运行全量 `swift test`，本轮未触及配额决策、账号边界、持久化、RPC、并发或生命周期。用户明确授权本地安装运行后，`./script/build_and_run.sh --verify` 通过：安装路径 `/Applications/CodexMonitorNative.app`、版本 0.1.0 (1)，主应用和 Widget 签名、TeamIdentifier、App Group entitlement 与单实例 owner 均通过验证；`ps` 确认进程从该安装路径运行，`pluginkit` 确认 Widget 仅注册于该安装版路径。Computer Use 的 Finder 桌面没有显示已放置的 Widget，因此未完成桌面上 accented/full-color 两种模式的人工外观确认。
 - **剩余风险**：`QA_CHECKLIST.md` 中 Widget 能量核心数字优先级与同心背景对齐仍待有小组件实际显示的桌面进行人工确认；小组件扩展已签名安装并由系统注册。
+
+### Loop 18 — 无有效证据，本轮不修改
+
+- **日期**：2026-09-19
+- **问题**：未发现可处理的高价值问题，按 `.agent/loop.md` §2/§3 结束本轮，不修改业务代码。
+- **检查范围**（Observe 阶段）：
+  - `git status --short --branch` / `git diff --stat` / `git log --oneline -10`：当前为 `main...origin/main`；工作区已有用户改动 `.agent/rules.md`、`AGENTS.md` 与未跟踪 `.task-ledger/`，本轮未触碰；HEAD 为 `e3288e6 fix: 适配 macOS 27 小组件着色渲染`。
+  - `rg -n "TODO|FIXME|HACK" Sources Tests docs`：无匹配。
+  - `VERIFICATION.md` / `QA_CHECKLIST.md`：未勾选项仍为发布前人工桌面门禁，不构成可复现代码缺陷证据。
+  - 应用日志：安装版 `CodexMonitorNative` 正在运行；最近 24 小时出现若干 AppKit `General` `<private>` error 记录，但没有可见错误正文、应用自身失败日志或与刷新失败相关的代码路径；同时最新应用日志显示真实额度刷新成功（weekly=66%），Widget timeline reload 成功。
+  - 用户反馈：本次会话仅要求“运行一次 loop”，没有具体 Bug 场景。
+- **未发现高价值问题的原因**：全量测试通过，未发现可复现 Bug、稳定测试失败、违反产品不变量的行为异常、带代码路径的稳定性/性能风险或关键测试缺口。AppKit 私有错误日志无法定位触发路径，且没有对应用户影响或应用级失败证据；按禁止猜测式修改的规则不处理。
+- **修改**：无业务代码、测试、脚本或配置修改；仅追加本维护记录，并保留现有用户工作区改动。
+- **验证**：`swift test`：583/583 通过；`swift build -c debug`：通过；`git diff --check`：通过。未运行 `./script/build_and_run.sh --verify`：本轮无打包/签名/安装/Widget 集成修改，且该命令会停止现有 App 并替换安装 bundle；未执行 Widget accented/full-color 与 Popover 成功呈现的人工桌面检查，继续由发布前 QA 门禁覆盖。
+- **剩余风险**：AppKit `<private>` error 仍需在可获取完整系统日志或可复现 UI 操作时单独定位；Widget 能量核心在桌面实际 accented/full-color 模式下的外观，以及真实菜单栏 Popover 成功呈现路径仍未完成人工确认。
+
+### Loop 19 — 无有效证据，本轮不修改
+
+- **日期**：2026-09-19
+- **问题**：未发现可处理的高价值问题，按 `.agent/loop.md` §2/§3 结束本轮，不修改业务代码。
+- **检查范围**（Observe 阶段）：
+  - 按 §1 顺序读取 `.agent/rules.md`、`.agent/memory.md`、`.agent/history.md`；随后检查 `git status --short --branch`、`git log --oneline -10`、`git diff --stat`。工作区保留既有用户改动：`.agent/history.md`、`.agent/rules.md`、`AGENTS.md` 与未跟踪 `.task-ledger/`，本轮未回滚、未删除；无业务代码、测试、脚本或配置改动。HEAD 为 `e3288e6 fix: 适配 macOS 27 小组件着色渲染`。
+  - `rg -n "TODO|FIXME|HACK" Sources Tests docs`：无匹配。
+  - 已知问题文档 `AGENTS.md`、`VERIFICATION.md`、`QA_CHECKLIST.md`、`README.md`：未勾选项主要是 Popover、Widget accented/full-color、刷新失败/唤醒及辅助功能等发布前人工桌面门禁；未发现新的可复现代码缺陷描述。
+  - 应用日志检查：最近 24 小时筛选到的 error 主要来自本次 `xctest` 进程对持久化损坏、锁失败和不可写场景的预期故障注入；没有对应安装版 App 的应用级错误证据。用户本次仅要求执行一次 Loop，没有提供具体 Bug 场景。
+- **未发现高价值问题的原因**：`swift test` 全量执行 583 个测试、0 失败；无可复现 Bug、稳定测试失败、违反产品不变量的行为异常、带代码路径的稳定性/性能风险或关键测试缺口。人工 QA 未勾选项属于发布门禁，当前缺少新的用户影响或代码路径证据；按禁止猜测式修改规则不处理。
+- **修改**：无业务代码、测试、脚本或配置修改；仅追加本维护记录。
+- **验证状态**：`swift test`：583/583 通过（exit 0）；追加记录后运行 `git diff --check`：通过；`swift build -c debug` 未运行，因为本轮没有代码修改；`./script/build_and_run.sh --verify` 未运行，因为不涉及打包/签名/安装/Widget 集成改动，且会停止现有 App 并替换安装 bundle；未执行 Popover 成功呈现、Widget accented/full-color 外观等人工桌面检查，继续由发布前 QA 门禁覆盖。
+- **剩余风险**：Loop 18 记录的 AppKit `<private>` error、真实菜单栏 Popover 成功呈现路径及 Widget 桌面实际着色外观仍未形成可定位的新证据；测试日志中的持久化 error 为预期故障路径，不构成本轮产品缺陷证据。
