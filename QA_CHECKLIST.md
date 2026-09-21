@@ -105,6 +105,8 @@
 
 ### 1. Full-Screen Space
 
+XCTest 宿主没有可交互的真实菜单栏上下文，无法验证 macOS 真实菜单栏 Popover 的成功呈现路径；以下项目是发布前人工门禁。
+
 - [ ] 在全屏 Space 中可以打开 Popover
 - [ ] 点击外部或失焦后 Popover 会关闭
 - [ ] Popover 不会卡成持续悬浮层
@@ -154,6 +156,13 @@ ps -axo pid,%cpu,rss,etime,comm | rg 'CodexMonitorNative.app/Contents/MacOS/Code
 - [ ] 在真实桌面会话或可复现失败操作中确认失败路径的错误内容能够通过现场行为与可见状态定位
 
 AppKit / `os_log` 会将错误载荷脱敏为 `<private>`，因此失败路径无法仅靠日志定位，必须在真实桌面会话或可复现操作场景下观察。此项是已登记的限制，不是新增的通过/失败判据。
+
+### 7. Widget 着色渲染外观
+
+- [ ] 在真实桌面上实际放置 Widget，切换到 full-color 渲染模式，确认能量核心、进度环和额度数字均清晰可辨，不出现白色实心圆盘或不可读的白色叠层
+- [ ] 在同一真实桌面 Widget 上切换到 accented/tinted 渲染模式，确认能量核心、进度环和额度数字仍清晰可辨，不出现白色实心圆盘或不可读的白色叠层
+
+此项不是可机检项：`widgetRenderingMode` 分支只有在系统实际以 accented 渲染时才生效，XCTest 与 SwiftUI preview 无法复现桌面渲染模式。该人工门禁源于提交 `e3288e6` 修复的 macOS 27 accented 渲染问题。
 
 ## D. 记录区
 
