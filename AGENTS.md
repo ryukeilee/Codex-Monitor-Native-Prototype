@@ -50,7 +50,7 @@ Unless a task explicitly changes the product contract:
 - `swift test --filter <TestType-or-method>`: run the smallest relevant XCTest subset while iterating
 - `./script/build_and_run.sh`: build, package, sign locally, and launch the app bundle
 - `./script/build_and_run.sh --debug`: build and launch the packaged app under LLDB
-- `./script/build_and_run.sh --verify`: run the unified installation acceptance flow; it replaces the app at `INSTALL_APP_PATH`, launches it, and verifies app/Widget versions, the running path, and Widget binding
+- `./script/build_and_run.sh --verify`: run the unified installation acceptance flow; it replaces the app at `INSTALL_APP_PATH`, launches it, and verifies app/Widget versions, the running path, and Widget binding. 该命令会停止现有 App 并替换已安装的 bundle，属于改变外部状态的操作，执行前需要用户授权。
 - `./script/build_and_run.sh --logs`: stream app process logs for manual debugging
 - `./script/build_and_run.sh --telemetry`: stream app subsystem telemetry logs
 - `./script/build-and-install.sh`: legacy compatibility entry point that forwards to `./script/build_and_run.sh --verify`
@@ -130,11 +130,11 @@ Use XCTest in `Tests/CodexMonitorNativeTests`. Name test files after the product
 
 Add or update behavior-focused tests for changes in these areas. Account-bound cache changes must cover matching identity, missing or malformed identity, account/session changes, and identity changes during an in-flight refresh. Do not use source-string assertions or artifact existence alone as proof of UI behavior.
 
-Run the narrowest relevant test while iterating. Before handing off code changes, run `swift test` and `swift build -c debug`. Also run `./script/build_and_run.sh --verify` for packaging, signing, installed-app lifecycle, entitlement, or widget integration changes; note that this command stops the existing app and replaces the installed bundle. For visible menu bar, popover, or widget changes, follow the relevant checks in `QA_CHECKLIST.md` and report every manual check not performed. If a required gate cannot run, report the reason and the exact unverified gate.
+Run the narrowest relevant test while iterating. 交接代码改动前，运行受影响的最小测试集与 `swift build -c debug`；只有改动触及配额决策逻辑、账号/会话边界、持久化、app-server RPC、并发或生命周期时，才运行完整的 `swift test`（当前 583 项）。 Also run `./script/build_and_run.sh --verify` for packaging, signing, installed-app lifecycle, entitlement, or widget integration changes; note that this command stops the existing app and replaces the installed bundle. For visible menu bar, popover, or widget changes, follow the relevant checks in `QA_CHECKLIST.md` and 报告未执行的人工检查——只需列出会影响本次改动行为的那些，不必逐项罗列。 If a required gate cannot run, report the reason and the exact unverified gate.
 
 ## Maintenance Loop
 
-Existing-feature maintenance work follows the evidence-driven Maintenance Loop defined in `.agent/loop.md` (Observe → Evidence → Decide → Execute → Verify → Record). Read `.agent/rules.md` (agent working boundary), `.agent/memory.md` (long-term project knowledge), and `.agent/history.md` (recent loop records) before making any change. This file (`AGENTS.md`) remains the authoritative project specification; `.agent/loop.md` is the executable maintenance workflow layered on top of it.
+Existing-feature maintenance work follows the evidence-driven Maintenance Loop defined in `.agent/loop.md` (Observe → Evidence → Decide → Execute → Verify → Record). 在开始一轮 Maintenance Loop 之前，读取 `.agent/rules.md`（agent 工作边界）、`.agent/memory.md`（长期项目知识）与 `.agent/history.md`（最近的循环记录）；不属于 Loop 的常规改动不需要预读这三份文档。 This file (`AGENTS.md`) remains the authoritative project specification; `.agent/loop.md` is the executable maintenance workflow layered on top of it.
 
 ## Review Guidelines
 

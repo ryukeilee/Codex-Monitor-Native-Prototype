@@ -1,6 +1,6 @@
 # Agent Rules（项目级边界）
 
-本文件定义智能体在本项目中工作的强制边界。适用于所有维护与开发任务。权威项目规范为根目录 `AGENTS.md`；本文件是其可执行摘要与约束，冲突时以 `AGENTS.md` 为准。
+本文件定义智能体在本项目中工作的强制边界。适用于所有维护与开发任务。权威项目规范为根目录 `AGENTS.md`；本文件是其可执行摘要与约束。冲突时按全局 `~/.dsh/AGENTS.md` 的指令优先级裁决：用户当前指令 > 更具体的项目文件（子目录 > 仓库根 > 全局）> skill 文档。
 
 ---
 
@@ -34,7 +34,7 @@
 - **账号边界 fail-closed**：真实快照仅在已验证的账号/会话边界与当前身份匹配时展示；身份缺失、变更或不可验证时清空并显示 `--%`；持久化不可用时同样必须发布失效。
 - **单一展示投影**：菜单栏、Popover、Widget 的额度窗口/恢复时间/可信度必须走共享展示路径，语义对齐；改动需同时覆盖三处测试。
 - **时间语义**：墙钟语义唯一来源是 `QuotaTemporalSemantics`；测试使用注入时钟，不依赖真实 run loop。
-- **验证门槛**：交付前 `swift test` + `swift build -c debug`；打包/签名/安装/Widget 集成改动跑 `./script/build_and_run.sh --verify`；UI 可见行为对照 `QA_CHECKLIST.md`。
+- **验证门槛**：交付前跑受影响的最小测试集 + `swift build -c debug`；仅当改动触及配额决策逻辑、账号/会话边界、持久化、app-server RPC、并发或生命周期时，才跑完整 `swift test`；打包/签名/安装/Widget 集成改动跑 `./script/build_and_run.sh --verify`（需授权，它会替换已安装的 bundle）；UI 可见行为对照 `QA_CHECKLIST.md`。
 
 ---
 
