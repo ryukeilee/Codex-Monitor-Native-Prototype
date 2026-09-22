@@ -8,7 +8,7 @@
 - Popover 与 Widget 通过同一展示投影呈现动态额度窗口、恢复时间和数据可信度信息。
 - 真实数据刷新失败时保留上次成功快照，不把菜单栏直接清空。
 
-每条不变量对应的可复现验证（在 `e14f227` 上实测通过；该提交的 `Sources/`、`Tests/` 与实测时一致，`origin/main` 亦为该提交）：
+每条不变量对应的可复现验证（在不可变提交 `e14f227` 上实测通过；该提交的 `Sources/`、`Tests/` 与实测时一致）：
 - 菜单栏仅周额度百分比：`swift test --filter StatusPopoverFormattingTests/testWeeklyMenuTitleNeverSubstitutesMonthlyOrUnknownWindow`
 - Popover/Widget 同一展示投影：`swift test --filter CrossSurfacePresentationEquivalenceTests/testPopoverAndWidgetQuotaItemsAreEquivalentAcrossRepresentativeStates`
 - 刷新失败保留上次成功快照：`swift test --filter AppStateTests/testFailedRefreshKeepsLastSuccessfulSnapshot`
