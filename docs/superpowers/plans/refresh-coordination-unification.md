@@ -35,7 +35,7 @@
 1. 实施 D1+D2+D4 于 RefreshScheduler.swift / AppState.swift（非 Widget 双编译文件，无需 pbxproj 同步）
 2. RefreshSchedulerTests 新增 ~8 个确定性测试（ManualRefreshSchedulerClock）
 3. swift test --filter RefreshSchedulerTests → AppState 相关套件 → 全量 ×2（安静）→ swift build -c debug
-4. 更新 .agent/history.md Loop 记录 + memory.md（若架构事实变化）
+4. 原 `.agent/history.md` / `memory.md` 记录步骤已随仓库内 `.agent/` 文件按用户要求移除，不再适用。
 
 ## 约束提醒
 - 不改 QuotaSnapshot 解码、Widget payload、菜单栏展示、持久化格式；不动 .wake 枚举；不 commit。

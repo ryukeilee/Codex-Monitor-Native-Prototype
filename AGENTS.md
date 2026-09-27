@@ -14,7 +14,7 @@ Primary app code lives in `Sources/CodexMonitorNative` and is split by responsib
 
 Widget extension source lives in `Sources/CodexMonitorWidgetExtension/CodexMonitorWidget.swift`.
 
-Tests live in `Tests/CodexMonitorNativeTests` (currently 583 tests, 0 failures). Runtime assets and entitlements are in `Assets/`. Local packaging and run helpers are in `script/`. Manual verification guidance lives in `VERIFICATION.md` and `QA_CHECKLIST.md`. Implementation plans live in `docs/superpowers/plans/`. Pi agent worktree sessions are tracked in `.claude/worktrees/`. Built app bundles are emitted to `dist/`; treat `dist/`, `.build/`, and `build/` as generated output, not source.
+Tests live in `Tests/CodexMonitorNativeTests` (currently 584 tests, 0 failures). Runtime assets and entitlements are in `Assets/`. Local packaging and run helpers are in `script/`. Manual verification guidance lives in `VERIFICATION.md` and `QA_CHECKLIST.md`. Implementation plans live in `docs/superpowers/plans/`. Pi agent worktree sessions are tracked in `.claude/worktrees/`. Built app bundles are emitted to `dist/`; treat `dist/`, `.build/`, and `build/` as generated output, not source.
 
 The Xcode widget target directly compiles selected app sources; the authoritative list is the widget target's Sources build phase in `CodexMonitorWidgetExtension.xcodeproj/project.pbxproj`, not the SwiftPM target declaration. Currently it includes files from:
 
@@ -46,7 +46,7 @@ Unless a task explicitly changes the product contract:
 
 - `swift build -c debug`: build the app for local development
 - `swift build -c release`: build the release binary
-- `swift test`: run the full XCTest suite (currently 583 tests)
+- `swift test`: run the full XCTest suite (currently 584 tests)
 - `swift test --filter <TestType-or-method>`: run the smallest relevant XCTest subset while iterating
 - `./script/build_and_run.sh`: build, package, sign locally, and launch the app bundle
 - `./script/build_and_run.sh --debug`: build and launch the packaged app under LLDB
@@ -109,7 +109,7 @@ No formatter or linter is currently checked in, so keep diffs small and style-co
 
 ## Testing and Definition of Done
 
-Use XCTest in `Tests/CodexMonitorNativeTests`. Name test files after the production type, and use method names like `testFailedRefreshKeepsLastSuccessfulSnapshot`. The current test suite (583 tests) covers the following areas:
+Use XCTest in `Tests/CodexMonitorNativeTests`. Name test files after the production type, and use method names like `testFailedRefreshKeepsLastSuccessfulSnapshot`. The current test suite (584 tests) covers the following areas:
 
 | Test area | Representative test files |
 |---|---|
@@ -130,11 +130,11 @@ Use XCTest in `Tests/CodexMonitorNativeTests`. Name test files after the product
 
 Add or update behavior-focused tests for changes in these areas. Account-bound cache changes must cover matching identity, missing or malformed identity, account/session changes, and identity changes during an in-flight refresh. Do not use source-string assertions or artifact existence alone as proof of UI behavior.
 
-Run the narrowest relevant test while iterating. 交接代码改动前，运行受影响的最小测试集与 `swift build -c debug`；只有改动触及配额决策逻辑、账号/会话边界、持久化、app-server RPC、并发或生命周期时，才运行完整的 `swift test`（当前 583 项）。 Also run `./script/build_and_run.sh --verify` for packaging, signing, installed-app lifecycle, entitlement, or widget integration changes; note that this command stops the existing app and replaces the installed bundle. For visible menu bar, popover, or widget changes, follow the relevant checks in `QA_CHECKLIST.md` and 报告未执行的人工检查——只需列出会影响本次改动行为的那些，不必逐项罗列。 If a required gate cannot run, report the reason and the exact unverified gate.
+Run the narrowest relevant test while iterating. 交接代码改动前，运行受影响的最小测试集与 `swift build -c debug`；只有改动触及配额决策逻辑、账号/会话边界、持久化、app-server RPC、并发或生命周期时，才运行完整的 `swift test`（当前 584 项）。 Also run `./script/build_and_run.sh --verify` for packaging, signing, installed-app lifecycle, entitlement, or widget integration changes; note that this command stops the existing app and replaces the installed bundle. For visible menu bar, popover, or widget changes, follow the relevant checks in `QA_CHECKLIST.md` and 报告未执行的人工检查——只需列出会影响本次改动行为的那些，不必逐项罗列。 If a required gate cannot run, report the reason and the exact unverified gate.
 
 ## Maintenance Loop
 
-Existing-feature maintenance work follows the evidence-driven Maintenance Loop defined in `.agent/loop.md` (Observe → Evidence → Decide → Execute → Verify → Record). 在开始一轮 Maintenance Loop 之前，读取 `.agent/rules.md`（agent 工作边界）、`.agent/memory.md`（长期项目知识）与 `.agent/history.md`（最近的循环记录）；不属于 Loop 的常规改动不需要预读这三份文档。 This file (`AGENTS.md`) remains the authoritative project specification; `.agent/loop.md` is the executable maintenance workflow layered on top of it.
+For existing-feature maintenance, use an evidence-driven Observe → Evidence → Decide → Execute → Verify → Record sequence. This file (`AGENTS.md`) remains the authoritative project specification.
 
 ## Review Guidelines
 
