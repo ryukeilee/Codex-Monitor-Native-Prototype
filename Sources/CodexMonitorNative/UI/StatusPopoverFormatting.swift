@@ -97,6 +97,25 @@ enum StatusPopoverFormatting {
         let detailLines: [String]
     }
 
+    /// Shared `DateFormatter` cache keyed by the exact formatting
+    /// configuration. Creating a formatter costs orders of magnitude more than
+    /// formatting with one, and every popover render, tooltip update, and
+    /// Widget timeline entry re-formats the same instants. These statics are
+    /// reached from the app and from the Widget extension, so formatting is
+    /// serialized instead of assuming `DateFormatter` is thread-safe. The key
+    /// includes the locale preferences and time zone, so a user settings change
+    /// yields a fresh formatter instead of a stale one.
+    private static let formatterStore = DateFormatterStore()
+
+    static func dateString(
+        from date: Date,
+        format: String,
+        locale: Locale,
+        timeZone: TimeZone
+    ) -> String {
+        formatterStore.string(from: date, format: format, locale: locale, timeZone: timeZone)
+    }
+
     static func shortTimestamp(
         for date: Date,
         now: Date = .now,
@@ -109,14 +128,15 @@ enum StatusPopoverFormatting {
         displayCalendar.timeZone = timeZone
 
         if displayCalendar.isDate(date, inSameDayAs: now) {
-            return "\(todayLabel(for: locale)) \(timeText)"
+            return "\(todayLabel) \(timeText)"
         }
 
-        let dateFormatter = DateFormatter()
-        dateFormatter.locale = locale
-        dateFormatter.timeZone = timeZone
-        dateFormatter.dateFormat = "M月d日 HH:mm"
-        return dateFormatter.string(from: date)
+        return dateString(
+            from: date,
+            format: "M月d日 HH:mm",
+            locale: locale,
+            timeZone: timeZone
+        )
     }
 
     static func updatedLine(
@@ -1043,17 +1063,10 @@ enum StatusPopoverFormatting {
         locale: Locale,
         timeZone: TimeZone
     ) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = locale
-        formatter.timeZone = timeZone
-        formatter.dateFormat = "HH:mm"
-        return formatter.string(from: date)
+        dateString(from: date, format: "HH:mm", locale: locale, timeZone: timeZone)
     }
 
-    private static func todayLabel(for locale: Locale) -> String {
-        _ = locale
-        return "今天"
-    }
+    private static let todayLabel = "今天"
 
     private static func fallbackSuffix(isUsingCachedSnapshot: Bool) -> String {
         isUsingCachedSnapshot ? "，显示上次成功数据" : "，当前无可用快照"
@@ -1237,5 +1250,43 @@ enum StatusPopoverFormatting {
         }
 
         return lhs.ordinal < rhs.ordinal
+    }
+}
+
+/// Process-wide formatter cache. The reference is immutable (a `static let`),
+/// so strict concurrency is satisfied while both cache lookup and formatting
+/// stay serialized behind the lock. Instances are keyed by the exact
+/// formatting inputs, which keeps locale and time-zone changes from reusing a
+/// stale formatter.
+private final class DateFormatterStore: @unchecked Sendable {
+    private let lock = NSLock()
+    private struct Key: Hashable {
+        let format: String
+        let locale: Locale
+        let timeZone: TimeZone
+    }
+
+    private var formatters: [Key: DateFormatter] = [:]
+
+    func string(from date: Date, format: String, locale: Locale, timeZone: TimeZone) -> String {
+        // Capture live settings, including locale preferences that can change
+        // without changing the identifier (for example the user's calendar).
+        let locale = locale == .autoupdatingCurrent ? Locale.current : locale
+        let timeZone = timeZone == .autoupdatingCurrent ? TimeZone.current : timeZone
+        let key = Key(format: format, locale: locale, timeZone: timeZone)
+        lock.lock()
+        defer { lock.unlock() }
+        let formatter: DateFormatter
+        if let cached = formatters[key] {
+            formatter = cached
+        } else {
+            let created = DateFormatter()
+            created.locale = locale
+            created.timeZone = timeZone
+            created.dateFormat = format
+            formatters[key] = created
+            formatter = created
+        }
+        return formatter.string(from: date)
     }
 }

@@ -202,20 +202,6 @@ enum UsageTrendAnalyzer {
         // Low variation: require meaningful total drop to predict exhaustion.
         // Evidence不足时宁可不预测
         if consumed < lowVariationThreshold {
-            // If span is at least 30 min and drop is only 1%, it's noise
-            if workingSpan >= 30 * 60 {
-                return UsageTrendAnalysis(
-                    state: .insufficientData,
-                    samples: samples,
-                    ratePercentPerHour: nil,
-                    exhaustionAt: nil,
-                    resetAt: resetAt,
-                    latestNotice: history.latestNotice
-                )
-            }
-            // For shorter spans, 1% drop is also weak — treat as insufficient
-            // but keep compatibility for edge where 1% over 10-20 min could be noise
-            // Require at least 2% total to be confident.
             return UsageTrendAnalysis(
                 state: .insufficientData,
                 samples: samples,
@@ -239,11 +225,12 @@ enum UsageTrendAnalyzer {
             )
         }
 
+        let recent = recentWindowRate(working)
+
         // Very low rate is indistinguishable from stable given sample noise.
         if baseRate < lowRateThreshold {
             // Check if recent segment shows stronger evidence
-            let recentRateForLow = recentWindowRate(working)
-            if let rr = recentRateForLow.rate, rr >= 1.5, recentRateForLow.consumed >= 2 {
+            if let rr = recent.rate, rr >= 1.5, recent.consumed >= 2 {
                 // Recent stronger signal overrides low average — continue to burst logic
             } else {
                 return UsageTrendAnalysis(
@@ -259,7 +246,6 @@ enum UsageTrendAnalyzer {
 
         // 2. Recent burst handling — avoid long-term average diluting recent spike.
         var finalRate = baseRate
-        let recent = recentWindowRate(working)
         if let rRate = recent.rate, let rSpan = recent.span, rSpan >= minimumObservationInterval,
            recent.consumed >= 2, rRate.isFinite, rRate > 0 {
             // Only blend if recent is meaningfully faster than base
@@ -361,10 +347,10 @@ enum UsageTrendAnalyzer {
             // If we reach the beginning without hitting target, include all
             if i == 0 { startIndex = 0 }
         }
-        let window = Array(samples[startIndex...])
-        guard window.count >= 2, let first = window.first else {
+        guard samples.count - startIndex >= 2 else {
             return RecentInfo(rate: nil, span: nil, consumed: 0)
         }
+        let first = samples[startIndex]
         let span = last.recordedAt.timeIntervalSince(first.recordedAt)
         let consumed = first.remainingPercent - last.remainingPercent
         guard span > 0 else { return RecentInfo(rate: nil, span: span, consumed: consumed) }

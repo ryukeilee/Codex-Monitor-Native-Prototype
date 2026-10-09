@@ -68,26 +68,15 @@ final class StatusBarController {
         let status = presentationSnapshot.effectiveStatus(at: .now)
         let title: String
 
+        // Only states with no trusted weekly value fall back to the
+        // placeholder. Success, stale, refreshing, and every typed failure keep
+        // showing the last real weekly percentage rather than flashing empty.
         switch status {
-        case .success:
-            fallthrough
-        case .stale:
-            // status bar title displays weekly quota, while 5h quota remains in dropdown.
-            title = weeklyQuotaTitle(for: snapshot, status: status)
-
-        case .refreshing:
-            // Keep last value, never flash empty
-            title = weeklyQuotaTitle(for: snapshot, status: status)
-
-        case .networkFailed, .authRequired, .parseFailed:
-            // Error state: show last real weekly % if available, otherwise placeholder.
-            title = weeklyQuotaTitle(for: snapshot, status: status)
-
-        case .noSnapshot, .idle:
+        case .noSnapshot, .idle, .demoMode:
             title = "--%"
 
-        case .demoMode:
-            title = "--%"
+        case .success, .stale, .refreshing, .networkFailed, .authRequired, .parseFailed:
+            title = weeklyQuotaTitle(for: snapshot, status: status)
         }
 
         applyTitle(title)

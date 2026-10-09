@@ -76,6 +76,21 @@ final class AppState: ObservableObject {
             case .networkChanged, .scheduled: return 1
             }
         }
+
+        /// Stable log/diagnostic name shared by `AppState` and
+        /// `RefreshScheduler`, which previously each carried the same switch.
+        var diagnosticName: String {
+            switch self {
+            case .manual: return "manual"
+            case .scheduled: return "scheduled"
+            case .wake: return "wake"
+            case .networkRestored: return "network-restored"
+            case .networkChanged: return "network-changed"
+            case .temporalBoundary: return "temporal-boundary"
+            case .systemClockChange: return "system-clock-change"
+            case .accountBoundaryChanged: return "account-boundary-changed"
+            }
+        }
     }
 
     // MARK: - Published state
@@ -85,11 +100,16 @@ final class AppState: ObservableObject {
     private(set) var status: QuotaRefreshStatus = .noSnapshot
     var presentationSnapshot: QuotaPresentationSnapshot { stateEvent.presentationSnapshot }
 
+    /// Consecutive failed refreshes. The scheduler cadence, the published
+    /// presentation, and the persisted checkpoint all read this single
+    /// counter; a second stored copy used to be mirrored onto it on every
+    /// transition, which invited drift between the two.
+    var failureCount: Int { consecutiveFailures }
+
     // MARK: - Diagnostics
 
     private(set) var lastAttemptAt: Date?
     private(set) var lastSuccessAt: Date?
-    private(set) var failureCount: Int = 0
     private(set) var lastErrorSummary: String?
     private(set) var realQuotaHealth = RealQuotaHealthDiagnostic(
         kind: .waitingForFirstRequest,
@@ -221,8 +241,7 @@ final class AppState: ObservableObject {
                     latestRealSnapshot = stored
                     lastSuccessAt = persistedState.lastSuccessAt ?? stored.refreshedAt
                     lastAttemptAt = persistedState.lastAttemptAt
-                    failureCount = persistedState.failureCount
-                    consecutiveFailures = failureCount
+                    consecutiveFailures = persistedState.failureCount
                     status = normalizedRestoredStatus(
                         persistedStatus: persistedState.status,
                         snapshot: stored,
@@ -239,7 +258,6 @@ final class AppState: ObservableObject {
                     status = .noSnapshot
                     lastSuccessAt = nil
                     lastAttemptAt = nil
-                    failureCount = 0
                     consecutiveFailures = 0
                     realQuotaHealth = RealQuotaHealthDiagnostic(
                         kind: .waitingForFirstRequest,
@@ -251,8 +269,7 @@ final class AppState: ObservableObject {
                 snapshot = stored
                 lastSuccessAt = persistedState.lastSuccessAt
                 lastAttemptAt = persistedState.lastAttemptAt
-                failureCount = persistedState.failureCount
-                consecutiveFailures = failureCount
+                consecutiveFailures = persistedState.failureCount
                 status = normalizedRestoredStatus(
                     persistedStatus: persistedState.status,
                     snapshot: stored,
@@ -448,7 +465,7 @@ final class AppState: ObservableObject {
 
         guard networkIsReachable == true else {
             waiter?.resume()
-            AppLogger.refresh.info("Skipped \(self.triggerName(for: trigger), privacy: .public) refresh while network is unavailable or unresolved")
+            AppLogger.refresh.info("Skipped \(trigger.diagnosticName, privacy: .public) refresh while network is unavailable or unresolved")
             return
         }
 
@@ -466,7 +483,7 @@ final class AppState: ObservableObject {
             if status != .refreshing {
                 markQueuedRefresh()
             }
-            AppLogger.refresh.info("Coalesced \(self.triggerName(for: trigger), privacy: .public) refresh behind the active request")
+            AppLogger.refresh.info("Coalesced \(trigger.diagnosticName, privacy: .public) refresh behind the active request")
             return
         }
 
@@ -561,7 +578,7 @@ final class AppState: ObservableObject {
     }
 
     private func beginRefresh(trigger: RefreshTrigger) -> QuotaSnapshot {
-        let triggerName = triggerName(for: trigger)
+        let triggerName = trigger.diagnosticName
         lastRefreshTrigger = trigger
         let currentBoundary = accountBoundaryProvider()
         lastObservedAccountBoundary = currentBoundary
@@ -659,7 +676,6 @@ final class AppState: ObservableObject {
         snapshot = stagedSuccessfulSnapshot
         lastSuccessAt = stagedSuccessfulSnapshot.refreshedAt
         consecutiveFailures = 0
-        failureCount = 0
         lastErrorSummary = nil
         self.stagedSuccessfulSnapshot = nil
     }
@@ -774,7 +790,6 @@ final class AppState: ObservableObject {
                 latestRealSnapshot = refreshed
                 stagedSuccessfulSnapshot = nil
                 consecutiveFailures = 0
-                failureCount = 0
                 lastSuccessAt = refreshed.refreshedAt
                 lastErrorSummary = nil
                 snapshot = refreshed
@@ -812,7 +827,6 @@ final class AppState: ObservableObject {
     private func applyRefreshFailure(_ error: Error, referenceDate: Date) {
         promoteStagedSuccessfulSnapshotIfNeeded()
         consecutiveFailures += 1
-        failureCount = consecutiveFailures
         let classifiedStatus = classifyError(error)
         var forceInvalidation = classifiedStatus == .authRequired
         if let realError = error as? RealQuotaError {
@@ -1254,7 +1268,6 @@ final class AppState: ObservableObject {
             status: resolvedStatus,
             lastSuccessAt: lastSuccessAt,
             lastAttemptAt: lastAttemptAt,
-            failureCount: failureCount,
             lastErrorSummary: lastErrorSummary,
             realQuotaHealth: realQuotaHealth,
             consecutiveFailures: consecutiveFailures,
@@ -1285,7 +1298,6 @@ final class AppState: ObservableObject {
             status = committedRuntimeState.status
             lastSuccessAt = committedRuntimeState.lastSuccessAt
             lastAttemptAt = committedRuntimeState.lastAttemptAt
-            failureCount = committedRuntimeState.failureCount
             lastErrorSummary = committedRuntimeState.lastErrorSummary
             realQuotaHealth = committedRuntimeState.realQuotaHealth
             consecutiveFailures = committedRuntimeState.consecutiveFailures
@@ -1307,7 +1319,6 @@ final class AppState: ObservableObject {
         status = persisted.status
         lastSuccessAt = persisted.lastSuccessAt
         lastAttemptAt = persisted.lastAttemptAt
-        failureCount = persisted.failureCount
         consecutiveFailures = persisted.failureCount
         lastErrorSummary = nil
         realQuotaHealth = RealQuotaHealthDiagnostic(
@@ -1380,19 +1391,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func triggerName(for trigger: RefreshTrigger) -> String {
-        switch trigger {
-        case .manual: return "manual"
-        case .scheduled: return "scheduled"
-        case .wake: return "wake"
-        case .networkRestored: return "network-restored"
-        case .networkChanged: return "network-changed"
-        case .temporalBoundary: return "temporal-boundary"
-        case .systemClockChange: return "system-clock-change"
-        case .accountBoundaryChanged: return "account-boundary-changed"
-        }
-    }
-
     private func isDataStale(at referenceDate: Date) -> Bool {
         guard snapshot.dataSource == .real, let lastSuccessAt else {
             return false
@@ -1412,7 +1410,6 @@ private struct RuntimeStateCheckpoint {
     let status: QuotaRefreshStatus
     let lastSuccessAt: Date?
     let lastAttemptAt: Date?
-    let failureCount: Int
     let lastErrorSummary: String?
     let realQuotaHealth: RealQuotaHealthDiagnostic
     let consecutiveFailures: Int

@@ -70,12 +70,12 @@ struct CodexMonitorWidgetProvider: TimelineProvider {
     }
 }
 
+/// Reads the widget environment, then builds exactly one presentation payload
+/// per render. Before this split, every access to `presentation` (each metric
+/// cell, badge, footer, and gauge) rebuilt the whole pipeline — window
+/// selection, sorting, and timestamp formatting — several dozen times per
+/// render. The dashboard now owns that single payload as a stored value.
 struct CodexMonitorWidgetView: View {
-    private enum MetricValueTone {
-        case normal
-        case subdued
-    }
-
     @Environment(\.widgetFamily) private var family
     @Environment(\.widgetRenderingMode) private var widgetRenderingMode
     let entry: CodexMonitorWidgetEntry
@@ -94,17 +94,32 @@ struct CodexMonitorWidgetView: View {
         activeFamily == .systemSmall
     }
 
-    private var presentation: WidgetPresentation {
-        WidgetPresentation(
-            state: entry.state,
-            family: isSmall ? .small : .medium,
-            now: entry.date
+    var body: some View {
+        CodexMonitorWidgetDashboard(
+            entry: entry,
+            presentation: WidgetPresentation(
+                state: entry.state,
+                family: isSmall ? .small : .medium,
+                now: entry.date
+            ),
+            effectiveStatus: entry.state.effectiveStatus(at: entry.date),
+            isSmall: isSmall,
+            widgetRenderingMode: widgetRenderingMode
         )
     }
+}
 
-    private var effectiveStatus: QuotaRefreshStatus {
-        entry.state.effectiveStatus(at: entry.date)
+private struct CodexMonitorWidgetDashboard: View {
+    private enum MetricValueTone {
+        case normal
+        case subdued
     }
+
+    let entry: CodexMonitorWidgetEntry
+    let presentation: WidgetPresentation
+    let effectiveStatus: QuotaRefreshStatus
+    let isSmall: Bool
+    let widgetRenderingMode: WidgetRenderingMode
 
     var body: some View {
         dashboardLayout
@@ -159,12 +174,18 @@ struct CodexMonitorWidgetView: View {
         }
     }
 
-    private var shouldShowUnavailableOverlay: Bool {
-        guard entry.state.snapshot.dataSource == .real else { return true }
-        let hasDisplayable = entry.state.snapshot.quotaWindows.contains(where: { $0.state.isDisplayable })
+    /// Single source for "the snapshot has a quota window worth drawing".
+    /// The overlay, center value, and gauge previously each repeated the same
+    /// three-way displayable check.
+    private var hasDisplayableQuotas: Bool {
+        guard entry.state.snapshot.dataSource == .real else { return false }
+        return entry.state.snapshot.quotaWindows.contains(where: { $0.state.isDisplayable })
             || entry.state.snapshot.weeklyQuotaState.isDisplayable
             || entry.state.snapshot.fiveHourQuotaState.isDisplayable
-        return !hasDisplayable
+    }
+
+    private var shouldShowUnavailableOverlay: Bool {
+        !hasDisplayableQuotas
     }
 
     private var unavailableOverlay: some View {
@@ -309,7 +330,7 @@ struct CodexMonitorWidgetView: View {
                     ],
                     center: UnitPoint(x: 0.34, y: 0.32),
                     startRadius: 6,
-                    endRadius: activeFamily == .systemSmall ? 130 : 190
+                    endRadius: isSmall ? 130 : 190
                 )
             )
     }
@@ -386,22 +407,22 @@ struct CodexMonitorWidgetView: View {
         Circle()
             .stroke(Color.white.opacity(0.04), lineWidth: 1)
             .frame(
-                width: activeFamily == .systemSmall ? 118 : 142,
-                height: activeFamily == .systemSmall ? 118 : 142
+                width: isSmall ? 118 : 142,
+                height: isSmall ? 118 : 142
             )
     }
 
     private var reactorBackdrop: some View {
         ZStack {
-            let outerDiameter = activeFamily == .systemSmall ? 106.0 : 136.0
-            let chamberDiameter = activeFamily == .systemSmall ? 82.0 : 104.0
+            let outerDiameter = isSmall ? 106.0 : 136.0
+            let chamberDiameter = isSmall ? 82.0 : 104.0
 
             Circle()
                 .stroke(Color.white.opacity(0.05), lineWidth: 1)
                 .frame(width: outerDiameter, height: outerDiameter)
 
             Circle()
-                .stroke(Color(red: 0.70, green: 0.20, blue: 0.18).opacity(0.22), lineWidth: activeFamily == .systemSmall ? 9 : 12)
+                .stroke(Color(red: 0.70, green: 0.20, blue: 0.18).opacity(0.22), lineWidth: isSmall ? 9 : 12)
                 .frame(width: chamberDiameter, height: chamberDiameter)
 
             Circle()
@@ -415,20 +436,20 @@ struct CodexMonitorWidgetView: View {
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
-                    lineWidth: activeFamily == .systemSmall ? 1.2 : 1.4
+                    lineWidth: isSmall ? 1.2 : 1.4
                 )
                 .frame(width: chamberDiameter + 12, height: chamberDiameter + 12)
 
             Circle()
-                .fill(Color(red: 0.44, green: 0.84, blue: 1.0).opacity(activeFamily == .systemSmall ? 0.18 : 0.22))
-                .blur(radius: activeFamily == .systemSmall ? 18 : 24)
-                .frame(width: activeFamily == .systemSmall ? 54 : 70, height: activeFamily == .systemSmall ? 54 : 70)
+                .fill(Color(red: 0.44, green: 0.84, blue: 1.0).opacity(isSmall ? 0.18 : 0.22))
+                .blur(radius: isSmall ? 18 : 24)
+                .frame(width: isSmall ? 54 : 70, height: isSmall ? 54 : 70)
 
             ForEach(0..<6, id: \.self) { index in
                 Capsule(style: .continuous)
                     .fill(index.isMultiple(of: 2) ? Color.white.opacity(0.06) : Color(red: 0.73, green: 0.22, blue: 0.17).opacity(0.14))
-                    .frame(width: activeFamily == .systemSmall ? 6 : 7, height: activeFamily == .systemSmall ? 16 : 20)
-                    .offset(y: activeFamily == .systemSmall ? -42 : -52)
+                    .frame(width: isSmall ? 6 : 7, height: isSmall ? 16 : 20)
+                    .offset(y: isSmall ? -42 : -52)
                     .rotationEffect(.degrees(Double(index) * 60))
             }
         }
@@ -621,23 +642,23 @@ struct CodexMonitorWidgetView: View {
             Capsule(style: .continuous)
                 .fill(Color.white.opacity(0.04))
                 .frame(
-                    width: activeFamily == .systemSmall ? 126 : 182,
-                    height: activeFamily == .systemSmall ? 40 : 48
+                    width: isSmall ? 126 : 182,
+                    height: isSmall ? 40 : 48
                 )
-                .offset(x: activeFamily == .systemSmall ? -18 : -54, y: activeFamily == .systemSmall ? 57 : 60)
+                .offset(x: isSmall ? -18 : -54, y: isSmall ? 57 : 60)
 
             Capsule(style: .continuous)
                 .fill(Color(red: 0.82, green: 0.24, blue: 0.18).opacity(0.10))
                 .frame(
-                    width: activeFamily == .systemSmall ? 136 : 190,
-                    height: activeFamily == .systemSmall ? 42 : 50
+                    width: isSmall ? 136 : 190,
+                    height: isSmall ? 42 : 50
                 )
-                .offset(x: activeFamily == .systemSmall ? 24 : 58, y: activeFamily == .systemSmall ? 59 : 62)
+                .offset(x: isSmall ? 24 : 58, y: isSmall ? 59 : 62)
 
             Rectangle()
                 .fill(Color.white.opacity(0.02))
-                .frame(width: activeFamily == .systemSmall ? 0.8 : 1, height: activeFamily == .systemSmall ? 22 : 30)
-                .offset(x: activeFamily == .systemSmall ? 0 : 8, y: activeFamily == .systemSmall ? 56 : 59)
+                .frame(width: isSmall ? 0.8 : 1, height: isSmall ? 22 : 30)
+                .offset(x: isSmall ? 0 : 8, y: isSmall ? 56 : 59)
         }
         .blendMode(.screen)
     }
@@ -693,20 +714,14 @@ struct CodexMonitorWidgetView: View {
     }
 
     private var centerQuotaNumberText: String {
-        guard entry.state.snapshot.dataSource == .real,
-              entry.state.snapshot.quotaWindows.contains(where: { $0.state.isDisplayable })
-               || entry.state.snapshot.weeklyQuotaState.isDisplayable
-               || entry.state.snapshot.fiveHourQuotaState.isDisplayable else {
+        guard hasDisplayableQuotas else {
             return "--"
         }
         return presentation.centerQuotaNumberText
     }
 
     private var gaugeProgress: CGFloat {
-        guard entry.state.snapshot.dataSource == .real,
-              entry.state.snapshot.quotaWindows.contains(where: { $0.state.isDisplayable })
-               || entry.state.snapshot.weeklyQuotaState.isDisplayable
-               || entry.state.snapshot.fiveHourQuotaState.isDisplayable else {
+        guard hasDisplayableQuotas else {
             return 0.0
         }
         return CGFloat(presentation.gaugeProgress)

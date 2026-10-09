@@ -2,6 +2,28 @@ import XCTest
 @testable import CodexMonitorNative
 
 final class StatusPopoverFormattingTests: XCTestCase {
+    func testCachedDateFormattingMatchesFreshFormattersAcrossConfigurationsAndThreads() {
+        let date = Date(timeIntervalSince1970: 1_800_000_000)
+        let locales = [Locale(identifier: "en_US"), Locale(identifier: "zh_CN"),
+                       Locale(identifier: "th_TH@calendar=buddhist"), .autoupdatingCurrent]
+        let zones = [TimeZone(secondsFromGMT: 0)!, TimeZone(secondsFromGMT: 8 * 3600)!,
+                     .autoupdatingCurrent]
+        let formats = ["HH:mm", "M月d日 HH:mm", "M/d HH:mm", "yyyy-MM-dd"]
+        DispatchQueue.concurrentPerform(iterations: 120) { index in
+            let locale = locales[index % locales.count]
+            let zone = zones[index % zones.count]
+            let format = formats[index % formats.count]
+            let formatter = DateFormatter()
+            formatter.locale = locale
+            formatter.timeZone = zone
+            formatter.dateFormat = format
+            XCTAssertEqual(
+                StatusPopoverFormatting.dateString(from: date, format: format, locale: locale, timeZone: zone),
+                formatter.string(from: date)
+            )
+        }
+    }
+
     func testShortTimestampUsesTodayPrefixForSameDay() {
         let calendar = Calendar(identifier: .gregorian)
         let timeZone = TimeZone(secondsFromGMT: 0)!

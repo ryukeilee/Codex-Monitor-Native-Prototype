@@ -375,75 +375,68 @@ struct WidgetDisplayState: Codable, Equatable {
         locale: Locale = .autoupdatingCurrent,
         timeZone: TimeZone = .autoupdatingCurrent
     ) -> String? {
-        let earliestExpiry = snapshot.resetCreditDetails
-            .filter { QuotaTemporalSemantics.isAvailableResetCredit($0, at: now) }
-            .compactMap(\.expiresAt)
-            .min()
-
-        guard let earliestExpiry else {
-            return nil
-        }
-
-        return resetCreditLine(
-            expiresAt: earliestExpiry,
+        Self.resetCreditLine(
+            snapshot: snapshot,
+            at: now,
             locale: locale,
             timeZone: timeZone
         )
     }
 
+    /// Alias kept for the diagnostics/persistence callers that ask for the
+    /// earliest reset-credit line directly. Both spellings resolve through the
+    /// same formatter, so they can never disagree.
     func earliestResetCreditLine(
         now: Date = .now,
         locale: Locale = .autoupdatingCurrent,
         timeZone: TimeZone = .autoupdatingCurrent
     ) -> String? {
-        let earliestExpiry = snapshot.resetCreditDetails
+        resetCreditFooterText(now: now, locale: locale, timeZone: timeZone)
+    }
+
+    /// The single source for "which available reset credit expires first".
+    /// The persisted footer line, the live footer, and the diagnostics line
+    /// ask the same question and must never drift apart.
+    private static func earliestAvailableResetCreditExpiry(
+        in snapshot: QuotaSnapshot,
+        at now: Date
+    ) -> Date? {
+        snapshot.resetCreditDetails
             .filter { QuotaTemporalSemantics.isAvailableResetCredit($0, at: now) }
             .compactMap(\.expiresAt)
             .min()
+    }
 
-        guard let earliestExpiry else {
+    private static func resetCreditLine(
+        snapshot: QuotaSnapshot,
+        at now: Date,
+        locale: Locale,
+        timeZone: TimeZone
+    ) -> String? {
+        guard let earliestExpiry = earliestAvailableResetCreditExpiry(in: snapshot, at: now) else {
             return nil
         }
 
-        return resetCreditLine(
-            expiresAt: earliestExpiry,
+        let timeText = StatusPopoverFormatting.dateString(
+            from: earliestExpiry,
+            format: "M/d HH:mm",
             locale: locale,
             timeZone: timeZone
         )
-    }
-
-    private func resetCreditLine(
-        expiresAt: Date,
-        locale: Locale,
-        timeZone: TimeZone
-    ) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = locale
-        formatter.timeZone = timeZone
-        formatter.dateFormat = "M/d HH:mm"
         let prefix = snapshot.resetCreditDetailsState == .unavailable ? "上次重置" : "最早重置"
-        return "\(prefix) \(formatter.string(from: expiresAt))"
+        return "\(prefix) \(timeText)"
     }
 
     private static func makeResetCreditFooterLine(
         for snapshot: QuotaSnapshot,
         now: Date
     ) -> String? {
-        let earliestExpiry = snapshot.resetCreditDetails
-            .filter { QuotaTemporalSemantics.isAvailableResetCredit($0, at: now) }
-            .compactMap(\.expiresAt)
-            .min()
-
-        guard let earliestExpiry else {
-            return nil
-        }
-
-        let formatter = DateFormatter()
-        formatter.locale = .autoupdatingCurrent
-        formatter.timeZone = .autoupdatingCurrent
-        formatter.dateFormat = "M/d HH:mm"
-        let prefix = snapshot.resetCreditDetailsState == .unavailable ? "上次重置" : "最早重置"
-        return "\(prefix) \(formatter.string(from: earliestExpiry))"
+        resetCreditLine(
+            snapshot: snapshot,
+            at: now,
+            locale: .autoupdatingCurrent,
+            timeZone: .autoupdatingCurrent
+        )
     }
 
     private func hasActiveRefreshingLease(at now: Date) -> Bool {

@@ -278,7 +278,7 @@ final class RefreshScheduler {
                 coalescedTrigger,
                 over: trigger
             )
-            AppLogger.refresh.info("Coalesced \(self.triggerName(for: trigger), privacy: .public) refresh with active adaptive request")
+            AppLogger.refresh.info("Coalesced \(trigger.diagnosticName, privacy: .public) refresh with active adaptive request")
             return
         }
 
@@ -303,7 +303,7 @@ final class RefreshScheduler {
             if clock.now < stableAnchor, isDataFresh {
                 freshnessGatedTriggerCount += 1
                 let dataAge = clock.now.timeIntervalSince(lastSuccessAt)
-                AppLogger.refresh.info("Freshness-gated \(self.triggerName(for: trigger), privacy: .public) refresh; data age \(dataAge, format: .fixed(precision: 0))s; keeping the scheduled cadence")
+                AppLogger.refresh.info("Freshness-gated \(trigger.diagnosticName, privacy: .public) refresh; data age \(dataAge, format: .fixed(precision: 0))s; keeping the scheduled cadence")
                 scheduleNextRefreshIfPossible(recoveryAnchor: stableAnchor)
                 return
             }
@@ -317,7 +317,7 @@ final class RefreshScheduler {
                 over: trigger
             )
             scheduleNextRefreshIfPossible()
-            AppLogger.refresh.info("Deferred \(self.triggerName(for: trigger), privacy: .public) refresh until failure backoff ends")
+            AppLogger.refresh.info("Deferred \(trigger.diagnosticName, privacy: .public) refresh until failure backoff ends")
             return
         }
 
@@ -397,7 +397,7 @@ final class RefreshScheduler {
         let refreshAction = onRefresh
         lastFiredTrigger = trigger
         lastFiredAt = clock.now
-        AppLogger.refresh.info("Starting adaptive \(self.triggerName(for: trigger), privacy: .public) refresh")
+        AppLogger.refresh.info("Starting adaptive \(trigger.diagnosticName, privacy: .public) refresh")
 
         refreshTask = Task { @MainActor [weak self] in
             guard !Task.isCancelled,
@@ -462,24 +462,7 @@ final class RefreshScheduler {
         over candidate: AppState.RefreshTrigger
     ) -> AppState.RefreshTrigger {
         guard let current else { return candidate }
-        return triggerPriority(candidate) > triggerPriority(current) ? candidate : current
-    }
-
-    private func triggerPriority(_ trigger: AppState.RefreshTrigger) -> Int {
-        trigger.coalescingPriority
-    }
-
-    private func triggerName(for trigger: AppState.RefreshTrigger) -> String {
-        switch trigger {
-        case .manual: return "manual"
-        case .scheduled: return "scheduled"
-        case .wake: return "wake"
-        case .networkRestored: return "network-restored"
-        case .networkChanged: return "network-changed"
-        case .temporalBoundary: return "temporal-boundary"
-        case .systemClockChange: return "system-clock-change"
-        case .accountBoundaryChanged: return "account-boundary-changed"
-        }
+        return candidate.coalescingPriority > current.coalescingPriority ? candidate : current
     }
 }
 

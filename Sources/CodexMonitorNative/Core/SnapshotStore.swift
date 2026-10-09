@@ -38,8 +38,6 @@ struct SnapshotStore {
         lock.lock()
         defer { lock.unlock() }
         let primaryData = defaults.data(forKey: key)
-        let primaryWasWrittenByNewerVersion = primaryData.map(containsNewerPersistenceVersion) ?? false
-
         if let state = decodeState(from: primaryData) {
             return migratePersistedStateIfNeeded(state)
         }
@@ -50,6 +48,7 @@ struct SnapshotStore {
             return state
         }
 
+        let primaryWasWrittenByNewerVersion = primaryData.map(containsNewerPersistenceVersion) ?? false
         if let state = recoverStateFromBackup(preservingPrimary: primaryWasWrittenByNewerVersion) {
             return state
         }
@@ -121,14 +120,15 @@ struct SnapshotStore {
         do {
             let envelope = try PersistenceEnvelope(value: state, revision: nextRevision)
             let data = try encoder.encode(envelope)
-            let trustedData = currentData.flatMap { isTrustedPersistenceData($0) ? $0 : nil }
+            let currentIsTrusted = currentData.map(isTrustedPersistenceData) == true
+            let trustedData = (currentIsTrusted ? currentData : nil)
                 ?? defaults.data(forKey: backupKey).flatMap { isTrustedPersistenceData($0) ? $0 : nil }
             if explicitlyInvalidatesRealSnapshot || crossesAccountBoundary {
                 defaults.removeObject(forKey: backupKey)
-            } else if let currentData, isTrustedPersistenceData(currentData) {
+            } else if let currentData, currentIsTrusted {
                 defaults.set(currentData, forKey: backupKey)
-                guard defaults.data(forKey: backupKey) == currentData,
-                      defaults.data(forKey: backupKey).map(isTrustedPersistenceData) == true else {
+                // Exact readback equality preserves the validation of currentData.
+                guard defaults.data(forKey: backupKey) == currentData else {
                     AppLogger.snapshot.error("Backup verification failed; primary app state was not replaced")
                     return false
                 }
@@ -298,12 +298,13 @@ struct SnapshotStore {
         let nextRevision = currentRevision + 1
         do {
             let data = try encoder.encode(PersistenceEnvelope(value: state, revision: nextRevision))
-            let trustedData = currentData.flatMap { isTrustedPersistenceData($0) ? $0 : nil }
+            let currentIsTrusted = currentData.map(isTrustedPersistenceData) == true
+            let trustedData = (currentIsTrusted ? currentData : nil)
                 ?? defaults.data(forKey: backupKey).flatMap { isTrustedPersistenceData($0) ? $0 : nil }
-            if let currentData, isTrustedPersistenceData(currentData) {
+            if let currentData, currentIsTrusted {
                 defaults.set(currentData, forKey: backupKey)
-                guard defaults.data(forKey: backupKey) == currentData,
-                      defaults.data(forKey: backupKey).map(isTrustedPersistenceData) == true else {
+                // Exact readback equality preserves the validation of currentData.
+                guard defaults.data(forKey: backupKey) == currentData else {
                     AppLogger.snapshot.error("Backup verification failed; migrated primary app state was not replaced")
                     return
                 }

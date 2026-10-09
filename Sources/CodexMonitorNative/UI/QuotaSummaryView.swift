@@ -21,8 +21,19 @@ struct QuotaSummaryView: View {
     }
 
     var body: some View {
+        // One presentation pass per body evaluation: the item grid, the
+        // empty-state check, the animation value, the accessibility priorities,
+        // and the reset-credits summary all derive from the same effective
+        // status instead of re-resolving it (and re-formatting every window)
+        // for each use.
+        let effective = presentationSnapshot.effectiveStatus(at: .now)
+        let items = StatusPopoverFormatting.quotaWindowDisplayItems(
+            snapshot: presentationSnapshot.snapshot,
+            status: effective
+        )
+
         VStack(spacing: 10) {
-            if quotaItems.isEmpty {
+            if items.isEmpty {
                 Text("暂无可显示的额度窗口")
                     .font(.subheadline)
                     .foregroundStyle(MetallicPalette.muted)
@@ -32,18 +43,21 @@ struct QuotaSummaryView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             } else {
                 LazyVGrid(columns: quotaColumns, alignment: .leading, spacing: 8) {
-                    ForEach(Array(quotaItems.enumerated()), id: \.element.id) { indexedItem in
+                    ForEach(Array(items.enumerated()), id: \.element.id) { indexedItem in
                         QuotaGaugeView(
                             item: indexedItem.element,
-                            status: presentationSnapshot.effectiveStatus(at: .now),
-                            accessibilitySortPriority: Double(quotaItems.count - indexedItem.offset)
+                            status: effective,
+                            accessibilitySortPriority: Double(items.count - indexedItem.offset)
                         )
                     }
                 }
                 .frame(maxWidth: .infinity)
             }
 
-            if let resetCreditsSummary {
+            if let resetCreditsSummary = StatusPopoverFormatting.resetCreditsSummary(
+                snapshot: presentationSnapshot.snapshot,
+                status: effective
+            ) {
                 resetCreditsSection(resetCreditsSummary)
             }
         }
@@ -53,7 +67,7 @@ struct QuotaSummaryView: View {
         // disclosure toggles and countdown ticks never trigger it.
         .animation(
             reduceMotion ? nil : .easeInOut(duration: 0.28),
-            value: quotaItems.map(\.id)
+            value: items.map(\.id)
         )
         .onChange(of: showsAllResetCredits) { _, _ in
             onLayoutChange(
@@ -73,25 +87,11 @@ struct QuotaSummaryView: View {
         }
     }
 
-    private var quotaItems: [StatusPopoverFormatting.QuotaWindowDisplayItem] {
-        StatusPopoverFormatting.quotaWindowDisplayItems(
-            snapshot: presentationSnapshot.snapshot,
-            status: presentationSnapshot.effectiveStatus(at: .now)
-        )
-    }
-
     private var quotaColumns: [GridItem] {
         [
             GridItem(.flexible(minimum: 140), spacing: 8, alignment: .top),
             GridItem(.flexible(minimum: 140), spacing: 8, alignment: .top)
         ]
-    }
-
-    private var resetCreditsSummary: StatusPopoverFormatting.ResetCreditsSummary? {
-        StatusPopoverFormatting.resetCreditsSummary(
-            snapshot: presentationSnapshot.snapshot,
-            status: presentationSnapshot.effectiveStatus(at: .now)
-        )
     }
 
     @ViewBuilder
