@@ -14,7 +14,7 @@ Primary app code lives in `Sources/CodexMonitorNative` and is split by responsib
 
 Widget extension source lives in `Sources/CodexMonitorWidgetExtension/CodexMonitorWidget.swift`.
 
-Tests live in `Tests/CodexMonitorNativeTests` (currently 584 tests, 0 failures). Runtime assets and entitlements are in `Assets/`. Local packaging and run helpers are in `script/`. Manual verification guidance lives in `VERIFICATION.md` and `QA_CHECKLIST.md`. Implementation plans live in `docs/superpowers/plans/`. Pi agent worktree sessions are tracked in `.claude/worktrees/`. Built app bundles are emitted to `dist/`; treat `dist/`, `.build/`, and `build/` as generated output, not source.
+测试位于 `Tests/CodexMonitorNativeTests`；测试数量与通过状态以本次实际运行结果为准，不把历史结果当作当前验证。 Runtime assets and entitlements are in `Assets/`. Local packaging and run helpers are in `script/`. Manual verification guidance lives in `VERIFICATION.md` and `QA_CHECKLIST.md`. Implementation plans live in `docs/superpowers/plans/`. Pi agent worktree sessions are tracked in `.claude/worktrees/`. Built app bundles are emitted to `dist/`; treat `dist/`, `.build/`, and `build/` as generated output, not source.
 
 The Xcode widget target directly compiles selected app sources; the authoritative list is the widget target's Sources build phase in `CodexMonitorWidgetExtension.xcodeproj/project.pbxproj`, not the SwiftPM target declaration. Currently it includes files from:
 
@@ -46,7 +46,7 @@ Unless a task explicitly changes the product contract:
 
 - `swift build -c debug`: build the app for local development
 - `swift build -c release`: build the release binary
-- `swift test`: run the full XCTest suite (currently 584 tests)
+- `swift test`：运行完整 XCTest 套件
 - `swift test --filter <TestType-or-method>`: run the smallest relevant XCTest subset while iterating
 - `./script/build_and_run.sh`: build, package, sign locally, and launch the app bundle
 - `./script/build_and_run.sh --debug`: build and launch the packaged app under LLDB
@@ -64,9 +64,11 @@ Optional environment variables for the build script:
 For real quota data, the machine must have a `codex` executable that supports `codex app-server`, or `CODEX_BIN` / `CODEX_EXECUTABLE` must point to it. The app uses the command's default stdio transport and must not assume a `--stdio` flag exists.
 
 Mock/QA overrides:
-- `CODEX_MONITOR_FORCE_MOCK=1` — deterministic mock data
-- `CODEX_MONITOR_FORCE_REFRESH_SUCCESS=1` — force refresh success path
-- `CODEX_MONITOR_FORCE_REFRESH_FAILURE=1` — force refresh failure path
+- `CODEX_MONITOR_FORCE_MOCK=1` — 使用 mock provider；额度含随机扰动，并非确定性数据
+- `CODEX_MONITOR_FORCE_MOCK=1 CODEX_MONITOR_FORCE_REFRESH_SUCCESS=1` — 强制 mock 刷新成功
+- `CODEX_MONITOR_FORCE_MOCK=1 CODEX_MONITOR_FORCE_REFRESH_FAILURE=1` — 强制 mock 刷新失败（优先于成功开关）
+
+成功/失败开关仅由 `MockQuotaProvider` 读取，单独设置不会改变真实 RPC 路径。
 
 
 
@@ -92,10 +94,7 @@ If the widget is missing from the widget gallery after `--verify`:
    ```bash
    codesign -d --entitlements :- /Applications/CodexMonitorNative.app/Contents/PlugIns/CodexMonitorWidgetExtension.appex
    ```
-3. If the app fails to launch with "App installation validation failed closed", clear the stored installation identity and retry:
-   ```bash
-   defaults delete com.ryukeilee.CodexMonitorNativePrototype "codex.monitor.native.preferredInstallation.v1"
-   ```
+3. 若出现 `App installation validation failed closed`，先核对当前安装路径、签名与版本，不要直接删除首选安装身份来绕过校验。修改持久化身份属于用户状态变更，必须取得明确授权；修复安装后使用已授权的 `--verify` 流程验收。
 4. Confirm chronod recognizes the widget:
    ```bash
    log show --predicate 'message contains "CodexMonitorQuotaWidget" AND message contains "reload: succeeded"' --last 10m --style compact
@@ -109,17 +108,17 @@ No formatter or linter is currently checked in, so keep diffs small and style-co
 
 ## Testing and Definition of Done
 
-Use XCTest in `Tests/CodexMonitorNativeTests`. Name test files after the production type, and use method names like `testFailedRefreshKeepsLastSuccessfulSnapshot`. The current test suite (584 tests) covers the following areas:
+Use XCTest in `Tests/CodexMonitorNativeTests`. Name test files after the production type, and use method names like `testFailedRefreshKeepsLastSuccessfulSnapshot`. 当前测试源码覆盖以下领域：
 
 | Test area | Representative test files |
 |---|---|
 | Refresh & RPC | `QuotaRefreshServiceTests`, `RealQuotaProviderTests`, `CodexAppServerProtocolTests`, `CodexExecutableResolverTests` |
 | Account/session boundary | `CodexAuthBoundaryObserverTests`, `CodexAuthIdentityReaderTests`, `QuotaAccountBoundaryTestSupport` |
-| Persistence & state | `AppStateTests`, `QuotaSnapshotTests` (via provider tests), `AppInstallationAuthorityTests` |
+| Persistence & state | `AppStateTests`, `RealQuotaProviderTests`, `AppInstallationAuthorityTests` |
 | Scheduling & lifecycle | `RefreshSchedulerTests`, `SleepWakeObserverTests`, `SystemClockObserverTests`, `NetworkReachabilityObserverTests` |
 | Single-instance arbitration | `SingleInstanceCoordinatorTests`, `AppDelegateLifecycleTests` |
 | Launch-at-login | `LaunchAtLoginManagerTests` |
-| UI presentation | `StatusPopoverFormattingTests`, `StatusPopoverBehaviorTests`, `StatusSelfCheckSnapshotTests`, `MechanicalEnergyCoreLayoutTests` |
+| UI presentation | `StatusPopoverFormattingTests`, `StatusPopoverBehaviorTests`, `StatusSelfCheckSnapshotTests`, `MechanicalEnergyCoreLayoutTests`, `QuotaCardDensityPolicyTests`, `CrossSurfacePresentationEquivalenceTests` |
 | Widget state & timeline | `WidgetPresentationTests`, `WidgetTimelineBridgeTests` |
 | Reset credits | `ResetCreditsDetailProviderTests` |
 | Usage trend & anomaly alerts | `UsageTrendTests` |
@@ -130,7 +129,7 @@ Use XCTest in `Tests/CodexMonitorNativeTests`. Name test files after the product
 
 Add or update behavior-focused tests for changes in these areas. Account-bound cache changes must cover matching identity, missing or malformed identity, account/session changes, and identity changes during an in-flight refresh. Do not use source-string assertions or artifact existence alone as proof of UI behavior.
 
-Run the narrowest relevant test while iterating. 交接代码改动前，运行受影响的最小测试集与 `swift build -c debug`；只有改动触及配额决策逻辑、账号/会话边界、持久化、app-server RPC、并发或生命周期时，才运行完整的 `swift test`（当前 584 项）。 Also run `./script/build_and_run.sh --verify` for packaging, signing, installed-app lifecycle, entitlement, or widget integration changes; note that this command stops the existing app and replaces the installed bundle. For visible menu bar, popover, or widget changes, follow the relevant checks in `QA_CHECKLIST.md` and 报告未执行的人工检查——只需列出会影响本次改动行为的那些，不必逐项罗列。 If a required gate cannot run, report the reason and the exact unverified gate.
+Run the narrowest relevant test while iterating. 交接代码改动前，运行受影响的最小测试集与 `swift build -c debug`；只有改动触及配额决策逻辑、账号/会话边界、持久化、app-server RPC、并发或生命周期时，才运行完整的 `swift test`（数量以运行结果为准）。 Also run `./script/build_and_run.sh --verify` for packaging, signing, installed-app lifecycle, entitlement, or widget integration changes; note that this command stops the existing app and replaces the installed bundle. For visible menu bar, popover, or widget changes, follow the relevant checks in `QA_CHECKLIST.md` and 报告未执行的人工检查——只需列出会影响本次改动行为的那些，不必逐项罗列。 If a required gate cannot run, report the reason and the exact unverified gate.
 
 ## Maintenance Loop
 
@@ -149,8 +148,8 @@ Recent history mixes concise imperative subjects with conventional prefixes such
 
 ## Security & Configuration Tips
 
-Never commit credentials, tokens, raw account/session identifiers, auth-file contents, or local account data. Persist or log only the minimum non-reversible identity material required for account-bound cache safety. Keep Codex executable overrides in environment variables, and validate failure paths with `CODEX_MONITOR_FORCE_REFRESH_SUCCESS=1` or `CODEX_MONITOR_FORCE_REFRESH_FAILURE=1` during manual QA. Do not commit generated app bundles, Widget products, or local signing artifacts.
+Never commit credentials, tokens, raw account/session identifiers, auth-file contents, or local account data. Persist or log only the minimum non-reversible identity material required for account-bound cache safety. Codex 可执行文件覆盖值保留在环境变量中；人工 QA 的强制成功/失败开关需与 `CODEX_MONITOR_FORCE_MOCK=1` 配合，不能作为真实 RPC 成败的证明。 Do not commit generated app bundles, Widget products, or local signing artifacts.
 
 ## Pi & Worktree Context
 
-This project uses Pi coding agent with `.claude/worktrees/` for isolated worktree sessions (currently: `icon-fix`, `real-quota-migration`, `stability-hardening`). Each worktree corresponds to a separate Pi agent session with its own branch and scratch state. Treat `.claude/` as a generated/working directory — do not track in version control (included in `.gitignore`). Implementation plans for larger feature work live under `docs/superpowers/plans/` in markdown format with task-level checklists.
+`.claude/worktrees/` 是本地工作目录，不应据其目录名推断当前代理、会话或有效分支，也不要将其提交。实际 worktree 以 `git worktree list` 为准。较大功能的实现计划位于 `docs/superpowers/plans/`。
