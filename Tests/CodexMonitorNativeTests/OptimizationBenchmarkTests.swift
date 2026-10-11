@@ -476,6 +476,125 @@ final class OptimizationBenchmarkTests: XCTestCase {
             }
         }
     }
+
+    /// A rate-limit response used to be parsed twice: `JSONSerialization` validated the top-level
+    /// shape and `JSONDecoder` then decoded the same line into `CodexAppServerMessage`, whose value
+    /// tree `handleRateLimitsResponse` immediately converted back to a Foundation object.
+    /// `decodeLine` now reads the message straight from the parsed object, so this measures the
+    /// whole line-to-snapshot path that both trees expose: the shared codec entry point plus the
+    /// quota parser. The stage columns isolate where the work goes: `json` is one
+    /// `JSONSerialization` pass, `decode` adds `decodeLine`, `convert` adds `foundationObject()`,
+    /// `parse` is the quota parser alone on an already-converted object, and `full` is the
+    /// complete `decodeLine` → `foundationObject()` → `parseRateLimits` path.
+    func testRPCLineDecodeBaseline() throws {
+        guard ProcessInfo.processInfo.environment["CODEX_MONITOR_BENCHMARK"] == "1" else {
+            throw XCTSkip("Opt-in performance comparison")
+        }
+
+        let payloads = [
+            (label: "realistic", line: Self.realisticRateLimitLine, windowCount: 2),
+            (label: "scaled", line: Self.scaledRateLimitLine, windowCount: 3)
+        ]
+        let iterations = 200
+        for payload in payloads {
+            let expected = try Self.snapshot(fromRateLimitLine: payload.line)
+            XCTAssertEqual(expected.quotaWindows.count, payload.windowCount)
+
+            for round in 0..<5 {
+                var start = Date()
+                var jsonCount = 0
+                for _ in 0..<iterations {
+                    let object = try JSONSerialization.jsonObject(
+                        with: payload.line,
+                        options: [.fragmentsAllowed]
+                    ) as? [String: Any]
+                    jsonCount += object?.count ?? 0
+                }
+                let json = Date().timeIntervalSince(start)
+
+                start = Date()
+                var decodedCount = 0
+                for _ in 0..<iterations {
+                    let message = try CodexAppServerCodec.decodeLine(payload.line)
+                    if case .response = message { decodedCount += 1 }
+                }
+                let decode = Date().timeIntervalSince(start)
+
+                let message = try CodexAppServerCodec.decodeLine(payload.line)
+                guard case .response(_, let result) = message else {
+                    throw BenchmarkFailure.unexpectedMessage
+                }
+                let converted = try XCTUnwrap(result.foundationObject())
+
+                start = Date()
+                var convertedCount = 0
+                for _ in 0..<iterations {
+                    convertedCount += result.foundationObject()?.count ?? 0
+                }
+                let convert = Date().timeIntervalSince(start)
+
+                start = Date()
+                var parsedWindows = 0
+                for _ in 0..<iterations {
+                    parsedWindows += RealQuotaProvider.parseRateLimits(response: converted)?
+                        .quotaWindows.count ?? 0
+                }
+                let parse = Date().timeIntervalSince(start)
+
+                start = Date()
+                var windows = 0
+                var weeklySum = 0
+                var fiveHourSum = 0
+                for _ in 0..<iterations {
+                    let message = try CodexAppServerCodec.decodeLine(payload.line)
+                    guard case .response(_, let result) = message,
+                          let object = result.foundationObject(),
+                          let snapshot = RealQuotaProvider.parseRateLimits(response: object) else {
+                        continue
+                    }
+                    windows += snapshot.quotaWindows.count
+                    weeklySum += snapshot.weeklyQuotaPercent
+                    fiveHourSum += snapshot.fiveHourQuotaPercent
+                }
+                let full = Date().timeIntervalSince(start)
+
+                XCTAssertEqual(decodedCount, iterations)
+                XCTAssertEqual(windows, parsedWindows)
+                XCTAssertEqual(parsedWindows, payload.windowCount * iterations)
+                XCTAssertEqual(weeklySum, expected.weeklyQuotaPercent * iterations)
+                XCTAssertEqual(fiveHourSum, expected.fiveHourQuotaPercent * iterations)
+                XCTAssertGreaterThan(jsonCount + convertedCount, 0)
+                print(
+                    "BENCH rpc-line[\(payload.label)] bytes=\(payload.line.count) round=\(round) "
+                        + "iterations=\(iterations) json=\(json) decode=\(decode) convert=\(convert) "
+                        + "parse=\(parse) full=\(full)"
+                )
+            }
+        }
+    }
+
+    private static func snapshot(fromRateLimitLine line: Data) throws -> QuotaSnapshot {
+        let message = try CodexAppServerCodec.decodeLine(line)
+        guard case .response(_, let result) = message,
+              let object = result.foundationObject() else {
+            throw BenchmarkFailure.unexpectedMessage
+        }
+        return try XCTUnwrap(RealQuotaProvider.parseRateLimits(response: object))
+    }
+
+    private static let realisticRateLimitLine = Data(
+        #"{"id":2,"result":{"rateLimitsByLimitId":{"codex":{"primary":{"windowDurationMins":300,"usedPercent":50},"secondary":{"windowDurationMins":10080,"usedPercent":25}}}}}"#.utf8
+    )
+
+    private static let scaledRateLimitLine = Data(
+        """
+        {"id":2,"result":{"rateLimits":{"primary":{"windowDurationMins":300,"usedPercent":12.5,"resetAt":1800000000.123},"secondary":{"windowDurationMins":10080,"usedPercent":43.75,"resetAt":1800500000.5},"credits":{"hasCredits":true,"unlimited":false,"balance":"12.50"},"planType":"plus"},"rateLimitsByLimitId":{"codex":{"primary":{"windowDurationMins":300,"usedPercent":12.5,"resetAt":1800000000.123},"secondary":{"windowDurationMins":10080,"usedPercent":43.75,"resetAt":1800500000.5},"limitId":"codex","limitName":"Codex"},"codex_other":{"primary":{"windowDurationMins":10080,"usedPercent":7.25,"resetAt":1800900000.25},"limitId":"codex_other","limitName":"Codex Other"}},"rateLimitResetCredits":{"availableCount":3,"credits":[{"status":"available","granted_at":"2026-01-01T03:04:05.000Z","expires_at":"2026-02-01T03:04:05.000Z","id":"credit-0"},{"status":"redeemed","granted_at":"2026-01-02T03:04:05.000Z","expires_at":"2026-02-02T03:04:05.000Z","id":"credit-1"},{"status":"available","granted_at":"2026-01-03T03:04:05.000Z","expires_at":"2026-02-03T03:04:05.000Z","id":"credit-2"},{"status":"redeemed","granted_at":"2026-01-04T03:04:05.000Z","expires_at":"2026-02-04T03:04:05.000Z","id":"credit-3"},{"status":"available","granted_at":"2026-01-05T03:04:05.000Z","expires_at":"2026-02-05T03:04:05.000Z","id":"credit-4"},{"status":"redeemed","granted_at":"2026-01-06T03:04:05.000Z","expires_at":"2026-02-06T03:04:05.000Z","id":"credit-5"}]},"rateLimitResetCreditsSummary":{"availableCredits":3,"totalCredits":6}}}
+        """.utf8
+    )
+
+    private enum BenchmarkFailure: Error {
+        case unexpectedMessage
+    }
 }
 
 /// Routes the widget state store at an isolated directory, like the other

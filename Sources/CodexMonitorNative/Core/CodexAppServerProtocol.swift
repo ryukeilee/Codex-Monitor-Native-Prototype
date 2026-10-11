@@ -1,19 +1,8 @@
 import Foundation
 
-enum CodexAppServerRequestID: Sendable, Equatable, Codable {
+enum CodexAppServerRequestID: Sendable, Equatable, Encodable {
     case integer(Int64)
     case string(String)
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        if let integer = try? container.decode(Int64.self) {
-            self = .integer(integer)
-        } else if let string = try? container.decode(String.self) {
-            self = .string(string)
-        } else {
-            throw CodexAppServerProtocolViolation.invalidID
-        }
-    }
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.singleValueContainer()
@@ -26,7 +15,7 @@ enum CodexAppServerRequestID: Sendable, Equatable, Codable {
     }
 }
 
-indirect enum CodexAppServerJSONValue: Sendable, Equatable, Codable {
+indirect enum CodexAppServerJSONValue: Sendable, Equatable, Encodable {
     case object([String: CodexAppServerJSONValue])
     case array([CodexAppServerJSONValue])
     case string(String)
@@ -34,38 +23,6 @@ indirect enum CodexAppServerJSONValue: Sendable, Equatable, Codable {
     case number(Double)
     case bool(Bool)
     case null
-
-    init(from decoder: Decoder) throws {
-        let singleValue = try decoder.singleValueContainer()
-        if singleValue.decodeNil() {
-            self = .null
-        } else if let bool = try? singleValue.decode(Bool.self) {
-            self = .bool(bool)
-        } else if let integer = try? singleValue.decode(Int64.self) {
-            self = .integer(integer)
-        } else if let number = try? singleValue.decode(Double.self) {
-            self = .number(number)
-        } else if let string = try? singleValue.decode(String.self) {
-            self = .string(string)
-        } else if let object = try? decoder.container(keyedBy: DynamicCodingKey.self) {
-            var values: [String: CodexAppServerJSONValue] = [:]
-            for key in object.allKeys {
-                values[key.stringValue] = try object.decode(CodexAppServerJSONValue.self, forKey: key)
-            }
-            self = .object(values)
-        } else if var array = try? decoder.unkeyedContainer() {
-            var values: [CodexAppServerJSONValue] = []
-            while !array.isAtEnd {
-                values.append(try array.decode(CodexAppServerJSONValue.self))
-            }
-            self = .array(values)
-        } else {
-            throw DecodingError.typeMismatch(
-                CodexAppServerJSONValue.self,
-                DecodingError.Context(codingPath: decoder.codingPath, debugDescription: "Unsupported JSON value")
-            )
-        }
-    }
 
     func encode(to encoder: Encoder) throws {
         switch self {
@@ -122,7 +79,7 @@ indirect enum CodexAppServerJSONValue: Sendable, Equatable, Codable {
     }
 }
 
-struct CodexAppServerRemoteError: Sendable, Equatable, Codable {
+struct CodexAppServerRemoteError: Sendable, Equatable, Encodable {
     let code: Int64
     let message: String
     let data: CodexAppServerJSONValue?
@@ -133,23 +90,6 @@ struct CodexAppServerRemoteError: Sendable, Equatable, Codable {
         self.data = data
     }
 
-    init(from decoder: Decoder) throws {
-        let container: KeyedDecodingContainer<DynamicCodingKey>
-        do {
-            container = try decoder.container(keyedBy: DynamicCodingKey.self)
-        } catch {
-            throw CodexAppServerProtocolViolation.malformedError
-        }
-        guard let code = try? container.decode(Int64.self, forKey: DynamicCodingKey("code")),
-              let message = try? container.decode(String.self, forKey: DynamicCodingKey("message")) else {
-            throw CodexAppServerProtocolViolation.malformedError
-        }
-
-        self.code = code
-        self.message = message
-        self.data = try container.decodeIfPresent(CodexAppServerJSONValue.self, forKey: DynamicCodingKey("data"))
-    }
-
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: DynamicCodingKey.self)
         try container.encode(code, forKey: DynamicCodingKey("code"))
@@ -158,65 +98,11 @@ struct CodexAppServerRemoteError: Sendable, Equatable, Codable {
     }
 }
 
-enum CodexAppServerMessage: Sendable, Equatable, Codable {
+enum CodexAppServerMessage: Sendable, Equatable, Encodable {
     case response(id: CodexAppServerRequestID, result: CodexAppServerJSONValue)
     case error(id: CodexAppServerRequestID, error: CodexAppServerRemoteError)
     case request(id: CodexAppServerRequestID, method: String, params: CodexAppServerJSONValue?)
     case notification(method: String, params: CodexAppServerJSONValue?)
-
-    init(from decoder: Decoder) throws {
-        let object = try decoder.container(keyedBy: DynamicCodingKey.self)
-        let resultKey = DynamicCodingKey("result")
-        let errorKey = DynamicCodingKey("error")
-        let methodKey = DynamicCodingKey("method")
-        let idKey = DynamicCodingKey("id")
-        let paramsKey = DynamicCodingKey("params")
-
-        let hasResult = object.contains(resultKey)
-        let hasError = object.contains(errorKey)
-        let hasMethod = object.contains(methodKey)
-
-        if (hasResult && hasError) || (hasMethod && (hasResult || hasError)) {
-            throw CodexAppServerProtocolViolation.mixedMessageRoles
-        }
-
-        if hasResult {
-            guard object.contains(idKey) else {
-                throw CodexAppServerProtocolViolation.missingID
-            }
-            self = .response(
-                id: try object.decode(CodexAppServerRequestID.self, forKey: idKey),
-                result: try object.decode(CodexAppServerJSONValue.self, forKey: resultKey)
-            )
-        } else if hasError {
-            guard object.contains(idKey) else {
-                throw CodexAppServerProtocolViolation.missingID
-            }
-            self = .error(
-                id: try object.decode(CodexAppServerRequestID.self, forKey: idKey),
-                error: try object.decode(CodexAppServerRemoteError.self, forKey: errorKey)
-            )
-        } else if hasMethod {
-            let method: String
-            do {
-                method = try object.decode(String.self, forKey: methodKey)
-            } catch {
-                throw CodexAppServerProtocolViolation.invalidMessage
-            }
-            let params = try object.decodeIfPresent(CodexAppServerJSONValue.self, forKey: paramsKey)
-            if object.contains(idKey) {
-                self = .request(
-                    id: try object.decode(CodexAppServerRequestID.self, forKey: idKey),
-                    method: method,
-                    params: params
-                )
-            } else {
-                self = .notification(method: method, params: params)
-            }
-        } else {
-            throw CodexAppServerProtocolViolation.missingMessageRole
-        }
-    }
 
     func encode(to encoder: Encoder) throws {
         var object = encoder.container(keyedBy: DynamicCodingKey.self)
@@ -250,6 +136,19 @@ enum CodexAppServerProtocolViolation: Error, Sendable, Equatable {
 }
 
 enum CodexAppServerCodec {
+    /// Decodes one newline-delimited protocol frame.
+    ///
+    /// The line is parsed once: `JSONSerialization` produces the Foundation object that the
+    /// message is read from. The previous implementation parsed every line twice (a
+    /// `JSONSerialization` probe for the top-level shape followed by `JSONDecoder`) and paid the
+    /// decoder's per-node `try?` cascade for values it immediately discarded.
+    ///
+    /// `JSONSerialization` carries numbers as `NSNumber`. Decimal storage is read back through the
+    /// exact decimal text, so those values keep the written digits; an integer written with more
+    /// digits than a double can carry is already rounded when it is stored as a plain double, and
+    /// the previous `JSONDecoder` pass read the written digits instead. See
+    /// `docs/optimization-2026-10-11-rpc-parse.md` and `CodexAppServerProtocolTests` for the pinned
+    /// cases.
     static func decodeLine(_ data: Data) throws -> CodexAppServerMessage {
         let json: Any
         do {
@@ -258,17 +157,11 @@ enum CodexAppServerCodec {
             throw CodexAppServerProtocolViolation.invalidJSON
         }
 
-        guard json is [String: Any] else {
+        guard let object = json as? [String: Any] else {
             throw CodexAppServerProtocolViolation.topLevelNotObject
         }
 
-        do {
-            return try JSONDecoder().decode(CodexAppServerMessage.self, from: data)
-        } catch let violation as CodexAppServerProtocolViolation {
-            throw violation
-        } catch {
-            throw CodexAppServerProtocolViolation.invalidMessage
-        }
+        return try CodexAppServerMessageDecoder.message(from: object)
     }
 
     static func encodeRequest(
@@ -291,6 +184,213 @@ enum CodexAppServerCodec {
         error: CodexAppServerRemoteError
     ) throws -> Data {
         try JSONEncoder().encode(CodexAppServerMessage.error(id: id, error: error))
+    }
+}
+
+/// Builds protocol messages from the object `JSONSerialization` produced for one frame.
+///
+/// The numeric typing below is the wire contract inherited from the previous `JSONDecoder`-based
+/// decode and has to stay in place:
+///
+/// - `JSONSerialization` returns every number as an `NSNumber` whose `objCType` names the storage
+///   its parser chose. Integer storage keeps its exact `Int64` when it fits and otherwise becomes
+///   `.number`; floating-point storage becomes `.integer` only when its double is exactly the
+///   `Int64` it denotes, and `Int64.min` is excepted because that double image is shared with
+///   out-of-range neighbours; every other finite value becomes `.number`. A non-finite value is
+///   rejected because `JSONDecoder` refused such numbers while `JSONSerialization` accepts
+///   `-1e400` as `-infinity`.
+/// - An identifier or remote-error code follows the same rule, so a JSON string stays `.string`
+///   and any other number is not an identifier.
+/// - A key that is absent, or present with JSON `null`, is not a value (`data`, `params`), while a
+///   `null` `result` is the response payload because the response role makes it one.
+/// - Decimal-stored numbers are read through their exact decimal text (`double(from:)`), so they
+///   keep the written value. An integer whose digits exceed what a double carries and that
+///   `JSONSerialization` stored as a plain double keeps only the double image of those digits; the
+///   pre-change `JSONDecoder` pass read the written digits instead. Those inputs are pinned by
+///   `CodexAppServerProtocolTests` and listed in `docs/optimization-2026-10-11-rpc-parse.md`.
+private enum CodexAppServerMessageDecoder {
+    static func message(from object: [String: Any]) throws -> CodexAppServerMessage {
+        let hasResult = object["result"] != nil
+        let hasError = object["error"] != nil
+        let hasMethod = object["method"] != nil
+
+        if (hasResult && hasError) || (hasMethod && (hasResult || hasError)) {
+            throw CodexAppServerProtocolViolation.mixedMessageRoles
+        }
+
+        if hasResult {
+            guard let id = object["id"] else {
+                throw CodexAppServerProtocolViolation.missingID
+            }
+            return .response(
+                id: try requestID(from: id),
+                result: try value(from: object["result"]!)
+            )
+        }
+
+        if hasError {
+            guard let id = object["id"] else {
+                throw CodexAppServerProtocolViolation.missingID
+            }
+            return .error(
+                id: try requestID(from: id),
+                error: try remoteError(from: object["error"]!)
+            )
+        }
+
+        if hasMethod {
+            guard let method = object["method"] as? String else {
+                throw CodexAppServerProtocolViolation.invalidMessage
+            }
+            let params = try optionalValue(from: object["params"])
+            guard let id = object["id"] else {
+                return .notification(method: method, params: params)
+            }
+            return .request(id: try requestID(from: id), method: method, params: params)
+        }
+
+        throw CodexAppServerProtocolViolation.missingMessageRole
+    }
+
+    static func requestID(from value: Any) throws -> CodexAppServerRequestID {
+        if let string = value as? String {
+            return .string(string)
+        }
+        guard let number = value as? NSNumber,
+              !isBoolean(number),
+              let integer = integer(from: number) else {
+            throw CodexAppServerProtocolViolation.invalidID
+        }
+        return .integer(integer)
+    }
+
+    static func remoteError(from value: Any) throws -> CodexAppServerRemoteError {
+        guard let object = value as? [String: Any],
+              let codeNumber = object["code"] as? NSNumber,
+              !isBoolean(codeNumber),
+              let code = integer(from: codeNumber),
+              let message = object["message"] as? String else {
+            throw CodexAppServerProtocolViolation.malformedError
+        }
+        return CodexAppServerRemoteError(
+            code: code,
+            message: message,
+            data: try optionalValue(from: object["data"])
+        )
+    }
+
+    /// Reads an optional value the way `decodeIfPresent` does: a key that is absent, or present
+    /// with JSON `null`, has no value.
+    static func optionalValue(from value: Any?) throws -> CodexAppServerJSONValue? {
+        guard let value, !(value is NSNull) else {
+            return nil
+        }
+        return try self.value(from: value)
+    }
+
+    static func value(from value: Any) throws -> CodexAppServerJSONValue {
+        if let number = value as? NSNumber {
+            if isBoolean(number) {
+                return .bool(number.boolValue)
+            }
+            if let integer = integer(from: number) {
+                return .integer(integer)
+            }
+            let double = double(from: number)
+            guard double.isFinite else {
+                throw CodexAppServerProtocolViolation.invalidMessage
+            }
+            return .number(double)
+        }
+
+        if let string = value as? String {
+            return .string(string)
+        }
+
+        if value is NSNull {
+            return .null
+        }
+
+        if let object = value as? [String: Any] {
+            var values: [String: CodexAppServerJSONValue] = [:]
+            values.reserveCapacity(object.count)
+            for (key, nested) in object {
+                values[key] = try self.value(from: nested)
+            }
+            return .object(values)
+        }
+
+        if let array = value as? [Any] {
+            var values: [CodexAppServerJSONValue] = []
+            values.reserveCapacity(array.count)
+            for element in array {
+                values.append(try self.value(from: element))
+            }
+            return .array(values)
+        }
+
+        throw CodexAppServerProtocolViolation.invalidMessage
+    }
+
+    /// Reads the double a JSON number denotes.
+    ///
+    /// `JSONSerialization` stores some decimal texts as `NSDecimalNumber`, whose `doubleValue` is
+    /// not correctly rounded for them; re-reading that number's exact decimal text keeps the double
+    /// the written digits denote (`Double(text)` is correctly rounded).
+    private static func double(from number: NSNumber) -> Double {
+        if let decimal = number as? NSDecimalNumber, let exact = Double(decimal.stringValue) {
+            return exact
+        }
+        return number.doubleValue
+    }
+
+    private static func isBoolean(_ number: NSNumber) -> Bool {
+        CFGetTypeID(number) == CFBooleanGetTypeID()
+    }
+
+    /// The `Int64` a JSON number denotes when it is integral and fits `Int64`, and `nil` for
+    /// fractional, non-finite, or out-of-range numbers.
+    private static func integer(from number: NSNumber) -> Int64? {
+        switch numberType(of: number) {
+        case .signedInteger:
+            return number.int64Value
+        case .unsignedInteger:
+            return Int64(exactly: number.uint64Value)
+        case .floatingPoint:
+            let double = double(from: number)
+            guard double.isFinite, double.rounded() == double else {
+                return nil
+            }
+            // Every written value in (-9223372036854776832, -9223372036854775809] shares
+            // `Int64.min`'s double image, so a floating-point number is never read as
+            // `Int64.min`; that exact value still arrives through integer storage.
+            guard let integer = Int64(exactly: double), integer != .min else {
+                return nil
+            }
+            return integer
+        }
+    }
+
+    private enum JSONNumberType {
+        case signedInteger
+        case unsignedInteger
+        case floatingPoint
+    }
+
+    /// `JSONSerialization` returns an integral number through the narrowest `NSNumber` storage its
+    /// parser selected; every other kind (including the decimal it uses for out-of-range integers)
+    /// reports a floating-point `objCType`.
+    private static func numberType(of number: NSNumber) -> JSONNumberType {
+        switch number.objCType.pointee {
+        case CChar(UInt8(ascii: "c")), CChar(UInt8(ascii: "s")), CChar(UInt8(ascii: "i")),
+             CChar(UInt8(ascii: "l")), CChar(UInt8(ascii: "q")):
+            return .signedInteger
+        case CChar(UInt8(ascii: "C")), CChar(UInt8(ascii: "S")), CChar(UInt8(ascii: "I")),
+             CChar(UInt8(ascii: "L")), CChar(UInt8(ascii: "Q")):
+            return .unsignedInteger
+        default:
+            return .floatingPoint
+        }
     }
 }
 
