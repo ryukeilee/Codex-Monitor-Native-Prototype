@@ -30,6 +30,51 @@ final class OptimizationBenchmarkTests: XCTestCase {
         }
     }
 
+    func testVersionDirectorySortBaseline() throws {
+        guard ProcessInfo.processInfo.environment["CODEX_MONITOR_BENCHMARK"] == "1" else {
+            throw XCTSkip("Opt-in performance comparison")
+        }
+        // Version-manager listings are small in practice; scale the entry count to make the
+        // per-comparison parse cost measurable rather than to model a real refresh.
+        let paths = (0..<256).map { "/root/node-versions/v\(20 + $0 % 6).\($0 % 60).\($0 % 10)" }
+
+        func reparsePerComparisonSort(_ paths: [String]) -> [String] {
+            paths.sorted { lhs, rhs in
+                let lhsComponents = CodexExecutableResolver.versionComponents(of: lhs)
+                let rhsComponents = CodexExecutableResolver.versionComponents(of: rhs)
+                for (left, right) in zip(lhsComponents, rhsComponents) where left != right {
+                    return left > right
+                }
+                if lhsComponents.count != rhsComponents.count {
+                    return lhsComponents.count > rhsComponents.count
+                }
+                return lhs > rhs
+            }
+        }
+
+        let reference = reparsePerComparisonSort(paths)
+        XCTAssertEqual(reference.count, paths.count)
+
+        for round in 0..<5 {
+            var start = Date()
+            for _ in 0..<200 {
+                XCTAssertEqual(reparsePerComparisonSort(paths), reference)
+            }
+            let baseline = Date().timeIntervalSince(start)
+            start = Date()
+            for _ in 0..<200 {
+                XCTAssertEqual(
+                    CodexExecutableResolver.sortedNewestVersionFirst(
+                        paths,
+                        versionComponents: CodexExecutableResolver.versionComponents(of:)
+                    ),
+                    reference
+                )
+            }
+            print("BENCH version-sort×200 round=\(round) baseline=\(baseline) optimized=\(Date().timeIntervalSince(start))")
+        }
+    }
+
     func testPersistenceAndTrendBaseline() throws {
         guard ProcessInfo.processInfo.environment["CODEX_MONITOR_BENCHMARK"] == "1" else {
             throw XCTSkip("Opt-in performance comparison")

@@ -112,6 +112,100 @@ final class CodexExecutableResolverTests: XCTestCase {
         ])
     }
 
+    func testFnmHomeTakesPriorityAndUsesInstallationSubpath() throws {
+        let configuredHome = "/Users/test/custom-fnm"
+        let defaultHome = "/Users/test/.local/share/fnm"
+        let fileSystem = StubFileSystem(
+            items: [
+                "\(configuredHome)/node-versions/v18.20.0/installation/bin/codex": .regularFile(executable: true),
+                "\(configuredHome)/node-versions/v20.9.0/installation/bin/codex": .regularFile(executable: true),
+                "\(defaultHome)/node-versions/v21.0.0/installation/bin/codex": .regularFile(executable: true),
+                "\(defaultHome)/aliases/default/bin/codex": .regularFile(executable: true)
+            ],
+            directories: [
+                "\(configuredHome)/node-versions": ["v18.20.0", "v20.9.0"],
+                "\(defaultHome)/node-versions": ["v21.0.0"]
+            ]
+        )
+        let resolver = makeResolver(
+            environment: ["FNM_DIR": configuredHome],
+            fileSystem: fileSystem
+        )
+
+        XCTAssertEqual(try resolver.resolve().map(\.path), [
+            "\(configuredHome)/node-versions/v20.9.0/installation/bin/codex",
+            "\(configuredHome)/node-versions/v18.20.0/installation/bin/codex",
+            "\(defaultHome)/aliases/default/bin/codex",
+            "\(defaultHome)/node-versions/v21.0.0/installation/bin/codex"
+        ])
+        XCTAssertEqual(try resolver.resolve().map(\.source), [.fnm, .fnm, .fnm, .fnm])
+    }
+
+    func testVersionDirectorySortParsesEachPathOnce() {
+        let paths = (0..<32).map { "/root/node/v\(20 + $0 % 4).\($0).\($0 % 10)" }
+
+        var optimizedParses = 0
+        let optimized = CodexExecutableResolver.sortedNewestVersionFirst(paths) { path in
+            optimizedParses += 1
+            return CodexExecutableResolver.versionComponents(of: path)
+        }
+
+        var baselineParses = 0
+        let baseline = paths.sorted { lhs, rhs in
+            baselineParses += 2
+            return referenceIsNewer(lhs, rhs)
+        }
+
+        XCTAssertEqual(optimized, baseline)
+        XCTAssertEqual(optimizedParses, paths.count)
+        XCTAssertGreaterThan(baselineParses, optimizedParses)
+    }
+
+    func testVersionSortMatchesReferenceOrderingForMixedNames() {
+        let paths = [
+            "/root/v18.20.0", "/root/v18.2.0", "/root/v9.0.0", "/root/v1", "/root/latest",
+            "/root/v1.2", "/root/v1.2.0", "/root/v20.11.0-rc.1", "/root/node-v17.3", "/root/",
+            "/root/v0.0.0", "/root/v0.0.1", "/root/10", "/root/9", "/root/v10.0.0-nightly.9"
+        ]
+
+        let reference = paths.sorted(by: referenceIsNewer)
+        let optimized = CodexExecutableResolver.sortedNewestVersionFirst(paths) {
+            CodexExecutableResolver.versionComponents(of: $0)
+        }
+
+        XCTAssertEqual(optimized, reference)
+        XCTAssertEqual(optimized.first, "/root/v20.11.0-rc.1")
+        XCTAssertLessThan(
+            reference.firstIndex(of: "/root/v1.2.0")!,
+            reference.firstIndex(of: "/root/v1.2")!
+        )
+    }
+
+    func testVersionComponentsParsingSkipsNonNumericAndOverflowingSegments() {
+        XCTAssertEqual(CodexExecutableResolver.versionComponents(of: "/root/v20.11.0"), [20, 11, 0])
+        XCTAssertEqual(CodexExecutableResolver.versionComponents(of: "/root/node-v18.2"), [18, 2])
+        XCTAssertEqual(CodexExecutableResolver.versionComponents(of: "/root/v1.2.3-rc.4"), [1, 2, 3, 4])
+        XCTAssertEqual(CodexExecutableResolver.versionComponents(of: "latest"), [])
+        XCTAssertEqual(CodexExecutableResolver.versionComponents(of: ""), [])
+        XCTAssertEqual(CodexExecutableResolver.versionComponents(of: "/root/v99999999999999999999"), [])
+        XCTAssertEqual(
+            CodexExecutableResolver.sortedNewestVersionFirst([], versionComponents: { _ in [] }),
+            []
+        )
+    }
+
+    private func referenceIsNewer(_ lhs: String, _ rhs: String) -> Bool {
+        let lhsComponents = CodexExecutableResolver.versionComponents(of: lhs)
+        let rhsComponents = CodexExecutableResolver.versionComponents(of: rhs)
+        for (left, right) in zip(lhsComponents, rhsComponents) where left != right {
+            return left > right
+        }
+        if lhsComponents.count != rhsComponents.count {
+            return lhsComponents.count > rhsComponents.count
+        }
+        return lhs > rhs
+    }
+
     func testMissingCandidatesAndNonRunnableConfiguredCandidatesHaveDifferentFailures() {
         let missingResolver = makeResolver(
             environment: ["CODEX_BIN": "/missing/codex"],

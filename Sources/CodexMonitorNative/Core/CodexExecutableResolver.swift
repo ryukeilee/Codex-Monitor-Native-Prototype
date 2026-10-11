@@ -236,14 +236,14 @@ struct CodexExecutableResolver: Sendable {
         executableSubpath: String,
         into candidates: inout [ProposedCandidate]
     ) {
-        let versions = fileSystem.directoryContents(root)
-            .map { directoryPath($0, relativeTo: root) }
-            .sorted(by: isNewerVersionDirectory)
+        let versions = Self.sortedNewestVersionFirst(
+            fileSystem.directoryContents(root).map { directoryPath($0, relativeTo: root) },
+            versionComponents: Self.versionComponents(of:)
+        )
+        let executableSubpathComponents = executableSubpath.split(separator: "/").map(String.init)
 
         for version in versions {
-            let executableDirectory = executableSubpath
-                .split(separator: "/")
-                .reduce(version) { pathJoining($0, String($1)) }
+            let executableDirectory = executableSubpathComponents.reduce(version, pathJoining)
             candidates.append(
                 ProposedCandidate(
                     path: executablePath(in: executableDirectory),
@@ -252,6 +252,26 @@ struct CodexExecutableResolver: Sendable {
                 )
             )
         }
+    }
+
+    /// Sorts version-manager directory paths newest-first.
+    ///
+    /// `versionComponents` is evaluated once per path, so a sort with O(n log n)
+    /// comparisons still parses exactly `n` paths. The injected parse function keeps that
+    /// cost observable without any shared state.
+    static func sortedNewestVersionFirst(
+        _ paths: [String],
+        versionComponents: (String) -> [Int]
+    ) -> [String] {
+        paths
+            .map { (path: $0, components: versionComponents($0)) }
+            .sorted { lhs, rhs in
+                guard lhs.components == rhs.components else {
+                    return isNewerVersion(lhs.components, than: rhs.components)
+                }
+                return lhs.path > rhs.path
+            }
+            .map(\.path)
     }
 
     private func executablePath(in directory: String) -> String {
@@ -274,19 +294,14 @@ struct CodexExecutableResolver: Sendable {
         path.hasPrefix("/")
     }
 
-    private func isNewerVersionDirectory(_ lhs: String, _ rhs: String) -> Bool {
-        let lhsComponents = versionComponents(of: lhs)
-        let rhsComponents = versionComponents(of: rhs)
-        for (left, right) in zip(lhsComponents, rhsComponents) where left != right {
+    private static func isNewerVersion(_ lhs: [Int], than rhs: [Int]) -> Bool {
+        for (left, right) in zip(lhs, rhs) where left != right {
             return left > right
         }
-        if lhsComponents.count != rhsComponents.count {
-            return lhsComponents.count > rhsComponents.count
-        }
-        return lhs > rhs
+        return lhs.count > rhs.count
     }
 
-    private func versionComponents(of path: String) -> [Int] {
+    static func versionComponents(of path: String) -> [Int] {
         path
             .split(whereSeparator: { !$0.isNumber })
             .compactMap { Int($0) }
