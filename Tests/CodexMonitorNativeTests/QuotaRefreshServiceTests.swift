@@ -104,6 +104,107 @@ final class QuotaRefreshServiceTests: XCTestCase {
         XCTAssertTrue(refreshed.resetCreditStatusSummary.isEmpty)
     }
 
+    func testResetCreditOutcomesShareQuotaProjectionAndClearRawAppServerFields() async throws {
+        // The three outcomes must differ only in their reset-credit fields; the
+        // rest of the refreshed snapshot is projected unchanged.
+        let refreshedAt = makeDate("2026-06-19T12:40:00Z")
+        let fiveHourResetAt = makeDate("2026-06-19T14:10:00Z")
+        let weeklyWindow = QuotaWindow(
+            limitId: "codex",
+            windowId: "weekly",
+            kind: .weekly,
+            durationMinutes: 10080,
+            remainingPercent: 70,
+            resetAt: makeDate("2026-06-26T12:00:00Z")
+        )
+        let weeklyBank = ResetBankSnapshot(
+            limitId: "codex",
+            windowId: "weekly",
+            displayName: "周额度",
+            remainingPercent: 70,
+            resetAt: makeDate("2026-06-26T12:00:00Z")
+        )
+        let appServerSnapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 70,
+            fiveHourQuotaPercent: 64,
+            resetAvailableCount: 1,
+            resetCreditDetailsState: .appServerCountOnly,
+            resetCreditTimeEntries: [
+                ResetCreditTimeSnapshot(
+                    label: "reset",
+                    date: makeDate("2026-06-19T18:00:00Z"),
+                    sourcePath: "rateLimits.primaryResetAt"
+                )
+            ],
+            resetCreditRawFields: [
+                ResetCreditRawField(path: "credits.available", value: "1")
+            ],
+            fiveHourResetAt: fiveHourResetAt,
+            resetBanks: [weeklyBank],
+            refreshedAt: refreshedAt,
+            dataSource: .real,
+            errorMessage: "app-server note",
+            quotaWindows: [weeklyWindow],
+            accountBoundary: .testDefault
+        )
+        let details = ResetCreditsDetailPayload(
+            availableCount: 1,
+            availableCredits: [
+                ResetCreditDetailSnapshot(
+                    ordinal: 1,
+                    status: "available",
+                    grantedAt: nil,
+                    expiresAt: makeDate("2026-06-19T18:00:00Z")
+                )
+            ],
+            statusSummary: [ResetCreditStatusSummary(status: "available", count: 1)]
+        )
+
+        func makeService(
+            detailProvider: any ResetCreditsDetailRefreshing
+        ) -> QuotaRefreshService {
+            QuotaRefreshService(
+                realProvider: StubRealQuotaProvider(snapshot: appServerSnapshot),
+                resetCreditsDetailProvider: detailProvider,
+                mockProvider: MockQuotaProvider()
+            )
+        }
+
+        let succeeded = try await makeService(
+            detailProvider: SucceedingResetCreditsProvider(payload: details)
+        ).refresh(basedOn: .notConnected)
+        let emptyFromServer = try await makeService(
+            detailProvider: NoAvailableCreditsProvider()
+        ).refresh(basedOn: .notConnected)
+        let failed = try await makeService(
+            detailProvider: FailingResetCreditsProvider()
+        ).refresh(basedOn: .notConnected)
+
+        XCTAssertEqual(succeeded.resetCreditDetailsState, .detailed)
+        XCTAssertEqual(emptyFromServer.resetCreditDetailsState, .appServerCountOnly)
+        XCTAssertEqual(failed.resetCreditDetailsState, .unavailable)
+
+        for refreshed in [succeeded, emptyFromServer, failed] {
+            XCTAssertEqual(refreshed.weeklyQuotaPercent, 70)
+            XCTAssertEqual(refreshed.fiveHourQuotaPercent, 64)
+            XCTAssertEqual(refreshed.weeklyQuotaState, .live)
+            XCTAssertEqual(refreshed.fiveHourQuotaState, .live)
+            XCTAssertEqual(refreshed.resetAvailableCount, 1)
+            XCTAssertEqual(refreshed.fiveHourResetAt, fiveHourResetAt)
+            XCTAssertEqual(refreshed.resetBanks, [weeklyBank])
+            XCTAssertEqual(refreshed.quotaWindows, [weeklyWindow])
+            XCTAssertEqual(refreshed.refreshedAt, refreshedAt)
+            XCTAssertEqual(refreshed.dataSource, .real)
+            XCTAssertEqual(refreshed.errorMessage, "app-server note")
+            XCTAssertEqual(refreshed.schemaVersion, QuotaSnapshot.currentSchemaVersion)
+            XCTAssertEqual(refreshed.accountBoundary, .testDefault)
+            // The detail provider owns the reset-credit presentation on this
+            // path, so the raw app-server rendering never survives it.
+            XCTAssertTrue(refreshed.resetCreditTimeEntries.isEmpty)
+            XCTAssertTrue(refreshed.resetCreditRawFields.isEmpty)
+        }
+    }
+
     func testRefreshKeepsUnavailableFallbackWhenNoAvailableCreditsButReusableDetailsExist() async throws {
         let earlyExpiry = makeDate("2026-06-19T18:00:00Z")
         let previous = QuotaSnapshot(

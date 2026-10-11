@@ -63,26 +63,12 @@ struct QuotaRefreshService: QuotaRefreshing {
                 for: accountBoundary
             )
             try Task.checkCancellation()
-            return QuotaSnapshot(
-                weeklyQuotaPercent: snapshot.weeklyQuotaPercent,
-                fiveHourQuotaPercent: snapshot.fiveHourQuotaPercent,
-                weeklyQuotaState: snapshot.weeklyQuotaState,
-                fiveHourQuotaState: snapshot.fiveHourQuotaState,
-                resetAvailableCount: details.availableCount ?? snapshot.resetAvailableCount,
-                resetCreditDetailsState: .detailed,
-                resetCreditDiagnostic: nil,
-                resetCreditDetails: details.availableCredits,
-                resetCreditStatusSummary: details.statusSummary,
-                resetCreditTimeEntries: [],
-                resetCreditRawFields: [],
-                fiveHourResetAt: snapshot.fiveHourResetAt,
-                resetBanks: snapshot.resetBanks,
-                refreshedAt: snapshot.refreshedAt,
-                dataSource: snapshot.dataSource,
-                errorMessage: snapshot.errorMessage,
-                schemaVersion: snapshot.schemaVersion,
-                quotaWindows: snapshot.quotaWindows,
-                accountBoundary: snapshot.accountBoundary
+            return projectingResetCredits(
+                onto: snapshot,
+                state: .detailed,
+                availableCount: details.availableCount ?? snapshot.resetAvailableCount,
+                details: details.availableCredits,
+                statusSummary: details.statusSummary
             )
         } catch is CancellationError {
             throw CancellationError()
@@ -97,56 +83,72 @@ struct QuotaRefreshService: QuotaRefreshing {
                 // The server explicitly reported no available reset credits:
                 // that is a normal account state, not a detail fetch failure.
                 // Keep the neutral app-server count presentation.
-                return QuotaSnapshot(
-                    weeklyQuotaPercent: snapshot.weeklyQuotaPercent,
-                    fiveHourQuotaPercent: snapshot.fiveHourQuotaPercent,
-                    weeklyQuotaState: snapshot.weeklyQuotaState,
-                    fiveHourQuotaState: snapshot.fiveHourQuotaState,
-                    resetAvailableCount: snapshot.resetAvailableCount,
-                    resetCreditDetailsState: .appServerCountOnly,
-                    resetCreditDiagnostic: nil,
-                    resetCreditDetails: [],
-                    resetCreditStatusSummary: [],
-                    resetCreditTimeEntries: [],
-                    resetCreditRawFields: [],
-                    fiveHourResetAt: snapshot.fiveHourResetAt,
-                    resetBanks: snapshot.resetBanks,
-                    refreshedAt: snapshot.refreshedAt,
-                    dataSource: snapshot.dataSource,
-                    errorMessage: snapshot.errorMessage,
-                    schemaVersion: snapshot.schemaVersion,
-                    quotaWindows: snapshot.quotaWindows,
-                    accountBoundary: snapshot.accountBoundary
+                return projectingResetCredits(
+                    onto: snapshot,
+                    state: .appServerCountOnly,
+                    availableCount: snapshot.resetAvailableCount
                 )
             }
+
+            // The same sanitized reason is logged and persisted, so it is
+            // formatted once instead of twice.
+            let diagnosticSummary = sanitizedResetCreditsError(error)
             let fallbackDescription = reusableDetails.isEmpty
                 ? "app-server count only"
                 : "app-server count with previous unexpired detail times"
-            AppLogger.refresh.warning("Reset credits detail fetch unavailable (\(sanitizedResetCreditsError(error), privacy: .public)); using \(fallbackDescription, privacy: .public)")
-            return QuotaSnapshot(
-                weeklyQuotaPercent: snapshot.weeklyQuotaPercent,
-                fiveHourQuotaPercent: snapshot.fiveHourQuotaPercent,
-                weeklyQuotaState: snapshot.weeklyQuotaState,
-                fiveHourQuotaState: snapshot.fiveHourQuotaState,
-                resetAvailableCount: snapshot.resetAvailableCount,
-                resetCreditDetailsState: .unavailable,
-                resetCreditDiagnostic: ResetCreditDiagnosticSnapshot(summary: sanitizedResetCreditsError(error)),
-                resetCreditDetails: reusableDetails,
-                resetCreditStatusSummary: reusableDetails.isEmpty
+            AppLogger.refresh.warning("Reset credits detail fetch unavailable (\(diagnosticSummary, privacy: .public)); using \(fallbackDescription, privacy: .public)")
+            return projectingResetCredits(
+                onto: snapshot,
+                state: .unavailable,
+                availableCount: snapshot.resetAvailableCount,
+                diagnostic: ResetCreditDiagnosticSnapshot(summary: diagnosticSummary),
+                details: reusableDetails,
+                statusSummary: reusableDetails.isEmpty
                     ? []
-                    : [ResetCreditStatusSummary(status: "available", count: reusableDetails.count)],
-                resetCreditTimeEntries: [],
-                resetCreditRawFields: [],
-                fiveHourResetAt: snapshot.fiveHourResetAt,
-                resetBanks: snapshot.resetBanks,
-                refreshedAt: snapshot.refreshedAt,
-                dataSource: snapshot.dataSource,
-                errorMessage: snapshot.errorMessage,
-                schemaVersion: snapshot.schemaVersion,
-                quotaWindows: snapshot.quotaWindows,
-                accountBoundary: snapshot.accountBoundary
+                    : [ResetCreditStatusSummary(status: "available", count: reusableDetails.count)]
             )
         }
+    }
+
+    /// Shared projection for every reset-credit detail outcome.
+    ///
+    /// "Details available", "server reported no available credits", and
+    /// "detail fetch failed" all describe the same refreshed quota snapshot;
+    /// only the reset-credit fields differ. Keeping the projection in one place
+    /// means a new quota field is carried through here once, instead of in each
+    /// outcome, and cannot be forgotten in one of them.
+    ///
+    /// The detail provider is authoritative for this path, so the raw
+    /// app-server reset-credit fields and time entries are always cleared.
+    private func projectingResetCredits(
+        onto snapshot: QuotaSnapshot,
+        state: ResetCreditDetailsState,
+        availableCount: Int?,
+        diagnostic: ResetCreditDiagnosticSnapshot? = nil,
+        details: [ResetCreditDetailSnapshot] = [],
+        statusSummary: [ResetCreditStatusSummary] = []
+    ) -> QuotaSnapshot {
+        QuotaSnapshot(
+            weeklyQuotaPercent: snapshot.weeklyQuotaPercent,
+            fiveHourQuotaPercent: snapshot.fiveHourQuotaPercent,
+            weeklyQuotaState: snapshot.weeklyQuotaState,
+            fiveHourQuotaState: snapshot.fiveHourQuotaState,
+            resetAvailableCount: availableCount,
+            resetCreditDetailsState: state,
+            resetCreditDiagnostic: diagnostic,
+            resetCreditDetails: details,
+            resetCreditStatusSummary: statusSummary,
+            resetCreditTimeEntries: [],
+            resetCreditRawFields: [],
+            fiveHourResetAt: snapshot.fiveHourResetAt,
+            resetBanks: snapshot.resetBanks,
+            refreshedAt: snapshot.refreshedAt,
+            dataSource: snapshot.dataSource,
+            errorMessage: snapshot.errorMessage,
+            schemaVersion: snapshot.schemaVersion,
+            quotaWindows: snapshot.quotaWindows,
+            accountBoundary: snapshot.accountBoundary
+        )
     }
 
     private func reusableResetCreditDetails(
