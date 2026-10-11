@@ -157,6 +157,13 @@ final class AppState: ObservableObject {
     /// Commits that reproduce this exact history skip the encode/write/readback
     /// cycle; a failed save leaves it unchanged so the next commit retries.
     private var persistedUsageTrendHistory: UsageTrendHistory?
+    /// Inputs of the most recent trend analysis. `UsageTrendAnalyzer.analyze`
+    /// is a pure function of the history snapshot and the current reset
+    /// deadline, so a commit that reproduces both inputs — a repeated quota
+    /// snapshot that `UsageTrendHistory.append` ignores, or a failed refresh
+    /// that re-commits the last successful snapshot — reuses the previous
+    /// result instead of re-running the multi-pass analyzer.
+    private var analyzedUsageTrendInput: UsageTrendAnalysisInput?
     private var latestRealSnapshot: QuotaSnapshot?
     private var stagedSuccessfulSnapshot: QuotaSnapshot?
     private var clockRollbackObserved = false
@@ -1218,10 +1225,17 @@ final class AppState: ObservableObject {
         }
 
         let anomaly = usageTrendHistory.append(sample)
-        usageTrendAnalysis = UsageTrendAnalyzer.analyze(
+        let analysisInput = UsageTrendAnalysisInput(
             history: usageTrendHistory,
             currentResetAt: sample.resetAt
         )
+        if analysisInput != analyzedUsageTrendInput {
+            usageTrendAnalysis = UsageTrendAnalyzer.analyze(
+                history: usageTrendHistory,
+                currentResetAt: sample.resetAt
+            )
+            analyzedUsageTrendInput = analysisInput
+        }
         persistUsageTrendIfNeeded()
         if let anomaly {
             onQuotaAnomalyDetected?(anomaly)
@@ -1246,6 +1260,9 @@ final class AppState: ObservableObject {
     private func clearUsageTrend() {
         usageTrendHistory = UsageTrendHistory(accountBoundary: nil)
         usageTrendAnalysis = .unavailable
+        // The analysis is discarded here, so the memoized inputs must not let a
+        // later commit reuse a result that is no longer published.
+        analyzedUsageTrendInput = nil
     }
 
     private func shouldPublishFailClosedStateAfterPersistenceFailure(
@@ -1423,6 +1440,17 @@ final class AppState: ObservableObject {
         ).isFresh
     }
 
+}
+
+/// Memoized inputs of one `UsageTrendAnalyzer.analyze` call. The key is the
+/// analyzer's input pair rather than a derived fingerprint so that any change
+/// the analyzer can observe invalidates the memo. The effective reset deadline
+/// used by the analyzer (`currentResetAt ?? last sample resetAt`) is
+/// deliberately not reproduced here: keying on the raw value recomputes in a
+/// few harmless extra cases instead of risking a stale prediction.
+private struct UsageTrendAnalysisInput: Equatable {
+    let history: UsageTrendHistory
+    let currentResetAt: Date?
 }
 
 private struct RuntimeStateCheckpoint {

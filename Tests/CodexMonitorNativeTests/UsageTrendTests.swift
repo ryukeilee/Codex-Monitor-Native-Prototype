@@ -717,3 +717,317 @@ final class UsageTrendPersistenceRedundancyTests: XCTestCase {
         )
     }
 }
+
+/// The trend analyzer is a pure, multi-pass computation over the retained
+/// history. These tests pin the memoization contract in `AppState`: an
+/// unchanged analysis input must not re-enter the analyzer, while any change
+/// the analyzer can observe (new sample, reset deadline, account boundary,
+/// cleared history) must.
+@MainActor
+final class UsageTrendAnalysisRedundancyTests: XCTestCase {
+    private static let trendKey = "trend"
+
+    func testRepeatedIdenticalSnapshotAnalyzesTrendOnce() async {
+        let (defaults, suiteName) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let base = Date(timeIntervalSince1970: 300_000)
+        let snapshot = makeSnapshot(at: base, remaining: 80, resetAt: base.addingTimeInterval(24 * 3600))
+        let appState = makeAppState(
+            defaults: defaults,
+            service: UsageTrendRepeatingRefreshService(snapshot: snapshot),
+            now: { base }
+        )
+        defer { appState.shutdown() }
+
+        let baseline = UsageTrendAnalyzer.debugAnalysisInvocationCount
+        for _ in 0..<5 {
+            await appState.refreshNow(trigger: .manual)
+        }
+
+        // Ten commits reproduce the same sample and reset deadline, so only the
+        // first one may reach the analyzer.
+        XCTAssertEqual(UsageTrendAnalyzer.debugAnalysisInvocationCount - baseline, 1)
+        XCTAssertEqual(appState.usageTrendAnalysis.state, .insufficientData)
+        XCTAssertEqual(appState.usageTrendAnalysis.samples.map(\.remainingPercent), [80])
+        XCTAssertEqual(trendSamples(in: defaults), 1)
+    }
+
+    func testEachNewSampleAnalyzesTrendOnce() async {
+        let (defaults, suiteName) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let base = Date(timeIntervalSince1970: 310_000)
+        let resetAt = base.addingTimeInterval(24 * 3600)
+        let appState = makeAppState(
+            defaults: defaults,
+            service: UsageTrendSequenceRefreshService(snapshots: [
+                makeSnapshot(at: base, remaining: 80, resetAt: resetAt),
+                makeSnapshot(at: base.addingTimeInterval(10 * 60), remaining: 79, resetAt: resetAt),
+                makeSnapshot(at: base.addingTimeInterval(20 * 60), remaining: 78, resetAt: resetAt)
+            ]),
+            now: { base.addingTimeInterval(20 * 60) }
+        )
+        defer { appState.shutdown() }
+
+        let baseline = UsageTrendAnalyzer.debugAnalysisInvocationCount
+        for _ in 0..<3 {
+            await appState.refreshNow(trigger: .manual)
+        }
+
+        XCTAssertEqual(UsageTrendAnalyzer.debugAnalysisInvocationCount - baseline, 3)
+        XCTAssertEqual(appState.usageTrendAnalysis.state, .consuming)
+        XCTAssertEqual(appState.usageTrendAnalysis.ratePercentPerHour ?? 0, 6, accuracy: 0.001)
+    }
+
+    func testResetDeadlineChangeAloneReanalyzesTrend() async {
+        let (defaults, suiteName) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let base = Date(timeIntervalSince1970: 320_000)
+        let earlierReset = base.addingTimeInterval(24 * 3600)
+        let correctedReset = earlierReset.addingTimeInterval(7 * 24 * 3600)
+        let appState = makeAppState(
+            defaults: defaults,
+            service: UsageTrendSequenceRefreshService(snapshots: [
+                makeSnapshot(at: base, remaining: 80, resetAt: earlierReset),
+                // The server corrects only the reset deadline for the same
+                // refresh timestamp: the retained history cannot change, but
+                // the published reset deadline must.
+                makeSnapshot(at: base, remaining: 80, resetAt: correctedReset)
+            ]),
+            now: { base }
+        )
+        defer { appState.shutdown() }
+
+        let baseline = UsageTrendAnalyzer.debugAnalysisInvocationCount
+        await appState.refreshNow(trigger: .manual)
+        XCTAssertEqual(appState.usageTrendAnalysis.resetAt, earlierReset)
+
+        await appState.refreshNow(trigger: .manual)
+
+        XCTAssertEqual(UsageTrendAnalyzer.debugAnalysisInvocationCount - baseline, 2)
+        XCTAssertEqual(appState.usageTrendAnalysis.resetAt, correctedReset)
+        XCTAssertEqual(appState.usageTrendAnalysis.samples.map(\.remainingPercent), [80])
+        XCTAssertEqual(trendSamples(in: defaults), 1)
+    }
+
+    func testClearedTrendAnalysisIsNotReusedForTheRebuiltHistory() async {
+        let (defaults, suiteName) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let base = Date(timeIntervalSince1970: 330_000)
+        let resetAt = base.addingTimeInterval(24 * 3600)
+        let withWeeklyWindow = makeSnapshot(at: base, remaining: 80, resetAt: resetAt)
+        let appState = makeAppState(
+            defaults: defaults,
+            service: UsageTrendSequenceRefreshService(snapshots: [
+                withWeeklyWindow,
+                // A real refresh that reports no current weekly window clears
+                // the trend while the memoized inputs stay recognisable.
+                makeSnapshotWithoutWeeklyWindow(at: base),
+                withWeeklyWindow
+            ]),
+            now: { base }
+        )
+        defer { appState.shutdown() }
+
+        let baseline = UsageTrendAnalyzer.debugAnalysisInvocationCount
+        await appState.refreshNow(trigger: .manual)
+        XCTAssertEqual(appState.usageTrendAnalysis.state, .insufficientData)
+
+        await appState.refreshNow(trigger: .manual)
+        XCTAssertEqual(appState.usageTrendAnalysis, .unavailable)
+
+        // The rebuilt history is value-equal to the memoized one, so a memo that
+        // survived `clearUsageTrend` would wrongly keep publishing .unavailable.
+        await appState.refreshNow(trigger: .manual)
+
+        XCTAssertEqual(UsageTrendAnalyzer.debugAnalysisInvocationCount - baseline, 2)
+        XCTAssertEqual(appState.usageTrendAnalysis.state, .insufficientData)
+        XCTAssertEqual(appState.usageTrendAnalysis.samples.map(\.remainingPercent), [80])
+    }
+
+    func testAnomalousSampleIsAnnouncedOnceWhileRepeatsStayMemoized() async {
+        let (defaults, suiteName) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let base = Date(timeIntervalSince1970: 340_000)
+        let resetAt = base.addingTimeInterval(24 * 3600)
+        let dropped = makeSnapshot(at: base.addingTimeInterval(5 * 60), remaining: 40, resetAt: resetAt)
+        let appState = makeAppState(
+            defaults: defaults,
+            service: UsageTrendSequenceRefreshService(snapshots: [
+                makeSnapshot(at: base, remaining: 80, resetAt: resetAt),
+                dropped,
+                dropped
+            ]),
+            now: { base.addingTimeInterval(5 * 60) }
+        )
+        defer { appState.shutdown() }
+        var anomalies: [QuotaAnomaly] = []
+        appState.onQuotaAnomalyDetected = { anomalies.append($0) }
+
+        let baseline = UsageTrendAnalyzer.debugAnalysisInvocationCount
+        for _ in 0..<3 {
+            await appState.refreshNow(trigger: .manual)
+        }
+
+        XCTAssertEqual(anomalies.count, 1)
+        XCTAssertEqual(anomalies.first?.current.remainingPercent, 40)
+        // One analysis for the baseline sample, one for the anomalous sample;
+        // the repeated commits of the same anomaly must not re-analyze, and the
+        // memoized analysis must still carry the notice.
+        XCTAssertEqual(UsageTrendAnalyzer.debugAnalysisInvocationCount - baseline, 2)
+        XCTAssertEqual(appState.usageTrendAnalysis.latestNotice, .anomalousJump)
+        XCTAssertEqual(appState.usageTrendAnalysis.samples.map(\.remainingPercent), [40])
+    }
+
+    func testAccountBoundaryChangeAnalyzesOnlyTheNewHistory() async {
+        let (defaults, suiteName) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let base = Date(timeIntervalSince1970: 350_000)
+        let resetAt = base.addingTimeInterval(24 * 3600)
+        var boundary = QuotaAccountBoundary.testDefault
+        let appState = makeAppState(
+            defaults: defaults,
+            service: UsageTrendSequenceRefreshService(snapshots: [
+                makeSnapshot(at: base, remaining: 90, resetAt: resetAt),
+                makeSnapshot(at: base.addingTimeInterval(10 * 60), remaining: 85, resetAt: resetAt),
+                makeSnapshot(at: base.addingTimeInterval(20 * 60), remaining: 80, resetAt: resetAt),
+                makeSnapshot(at: base.addingTimeInterval(30 * 60), remaining: 70, resetAt: resetAt, boundary: .testOtherAccount),
+                makeSnapshot(at: base.addingTimeInterval(40 * 60), remaining: 68, resetAt: resetAt, boundary: .testOtherAccount),
+                makeSnapshot(at: base.addingTimeInterval(50 * 60), remaining: 66, resetAt: resetAt, boundary: .testOtherAccount)
+            ]),
+            now: { base.addingTimeInterval(50 * 60) },
+            accountBoundary: { boundary }
+        )
+        defer { appState.shutdown() }
+
+        let baseline = UsageTrendAnalyzer.debugAnalysisInvocationCount
+        for _ in 0..<3 {
+            await appState.refreshNow(trigger: .manual)
+        }
+        XCTAssertEqual(appState.usageTrendAnalysis.ratePercentPerHour ?? 0, 30, accuracy: 0.001)
+
+        boundary = .testOtherAccount
+        for _ in 0..<3 {
+            await appState.refreshNow(trigger: .manual)
+        }
+
+        XCTAssertEqual(UsageTrendAnalyzer.debugAnalysisInvocationCount - baseline, 6)
+        // The new account's history starts from its own first sample: 70 → 66
+        // over 20 minutes is 12%/h, not a blend with the previous account.
+        XCTAssertEqual(appState.usageTrendAnalysis.state, .consuming)
+        XCTAssertEqual(appState.usageTrendAnalysis.ratePercentPerHour ?? 0, 12, accuracy: 0.001)
+        XCTAssertEqual(appState.usageTrendAnalysis.samples.map(\.remainingPercent), [70, 68, 66])
+    }
+
+    func testSessionChangeAloneAnalyzesOnlyTheNewHistory() async {
+        let (defaults, suiteName) = makeDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let base = Date(timeIntervalSince1970: 360_000)
+        let resetAt = base.addingTimeInterval(24 * 3600)
+        var boundary = QuotaAccountBoundary.testDefault
+        let appState = makeAppState(
+            defaults: defaults,
+            service: UsageTrendSequenceRefreshService(snapshots: [
+                makeSnapshot(at: base, remaining: 80, resetAt: resetAt),
+                makeSnapshot(at: base.addingTimeInterval(10 * 60), remaining: 79, resetAt: resetAt),
+                makeSnapshot(at: base.addingTimeInterval(20 * 60), remaining: 78, resetAt: resetAt),
+                // Same Codex account, new login session: the retained history
+                // belongs to the previous session and must not be reused.
+                makeSnapshot(at: base.addingTimeInterval(20 * 60), remaining: 60, resetAt: resetAt, boundary: .testRelogin),
+                makeSnapshot(at: base.addingTimeInterval(30 * 60), remaining: 59, resetAt: resetAt, boundary: .testRelogin),
+                makeSnapshot(at: base.addingTimeInterval(40 * 60), remaining: 58, resetAt: resetAt, boundary: .testRelogin)
+            ]),
+            now: { base.addingTimeInterval(40 * 60) },
+            accountBoundary: { boundary }
+        )
+        defer { appState.shutdown() }
+
+        let baseline = UsageTrendAnalyzer.debugAnalysisInvocationCount
+        for _ in 0..<3 {
+            await appState.refreshNow(trigger: .manual)
+        }
+        XCTAssertEqual(appState.usageTrendAnalysis.samples.map(\.remainingPercent), [80, 79, 78])
+
+        boundary = .testRelogin
+        for _ in 0..<3 {
+            await appState.refreshNow(trigger: .manual)
+        }
+
+        XCTAssertEqual(UsageTrendAnalyzer.debugAnalysisInvocationCount - baseline, 6)
+        XCTAssertEqual(appState.usageTrendAnalysis.samples.map(\.remainingPercent), [60, 59, 58])
+        XCTAssertEqual(appState.usageTrendAnalysis.ratePercentPerHour ?? 0, 6, accuracy: 0.001)
+        XCTAssertEqual(trendSamples(in: defaults, matching: .testRelogin), 3)
+        XCTAssertNil(trendSamples(in: defaults))
+    }
+
+    // MARK: - Helpers
+
+    private func makeDefaults() -> (UsageTrendWriteRecorder, String) {
+        let suiteName = "CodexMonitorNativeTests.trendAnalysisRedundancy.\(UUID().uuidString)"
+        let defaults = UsageTrendWriteRecorder(suiteName: suiteName)!
+        return (defaults, suiteName)
+    }
+
+    private func trendSamples(
+        in defaults: UserDefaults,
+        matching boundary: QuotaAccountBoundary = .testDefault
+    ) -> Int? {
+        UsageTrendStore(defaults: defaults, key: Self.trendKey)
+            .load(matching: boundary)?
+            .samples
+            .count
+    }
+
+    private func makeAppState<T: QuotaRefreshing>(
+        defaults: UserDefaults,
+        service: T,
+        now: @escaping () -> Date,
+        accountBoundary: @escaping () -> QuotaAccountBoundary? = { .testDefault }
+    ) -> AppState {
+        AppState(
+            snapshotStore: SnapshotStore(defaults: defaults, key: "snapshot"),
+            refreshService: service,
+            now: now,
+            sleep: { _ in throw CancellationError() },
+            accountBoundaryProvider: accountBoundary,
+            usageTrendStore: UsageTrendStore(defaults: defaults, key: Self.trendKey)
+        )
+    }
+
+    private func makeSnapshot(
+        at date: Date,
+        remaining: Int,
+        resetAt: Date?,
+        boundary: QuotaAccountBoundary = .testDefault
+    ) -> QuotaSnapshot {
+        QuotaSnapshot(
+            weeklyQuotaPercent: remaining,
+            fiveHourQuotaPercent: 80,
+            refreshedAt: date,
+            dataSource: .real,
+            quotaWindows: [
+                QuotaWindow(
+                    limitId: "codex",
+                    windowId: "secondary",
+                    kind: .weekly,
+                    durationMinutes: 10_080,
+                    remainingPercent: remaining,
+                    resetAt: resetAt
+                )
+            ],
+            accountBoundary: boundary
+        )
+    }
+
+    /// A real snapshot whose weekly quota cannot be sampled: no current weekly
+    /// window is reported and the scalar fallback is not current either.
+    private func makeSnapshotWithoutWeeklyWindow(at date: Date) -> QuotaSnapshot {
+        QuotaSnapshot(
+            weeklyQuotaPercent: 80,
+            fiveHourQuotaPercent: 80,
+            weeklyQuotaState: .unavailable,
+            refreshedAt: date,
+            dataSource: .real,
+            accountBoundary: .testDefault
+        )
+    }
+}

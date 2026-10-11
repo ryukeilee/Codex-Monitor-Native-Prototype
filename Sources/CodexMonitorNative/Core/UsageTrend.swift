@@ -137,6 +137,29 @@ struct UsageTrendAnalysis: Equatable {
 }
 
 enum UsageTrendAnalyzer {
+#if DEBUG
+    // MARK: - Test instrumentation
+
+    /// Invocation counter for redundancy tests: callers that memoize the
+    /// analyzer's inputs must be able to prove the analyzer is not re-entered
+    /// for an unchanged input instead of inferring it from timing. Compiled
+    /// out of release builds.
+    private static let invocationCountLock = NSLock()
+    nonisolated(unsafe) private static var invocationCount = 0
+
+    static var debugAnalysisInvocationCount: Int {
+        invocationCountLock.lock()
+        defer { invocationCountLock.unlock() }
+        return invocationCount
+    }
+
+    private static func recordAnalysisInvocation() {
+        invocationCountLock.lock()
+        defer { invocationCountLock.unlock() }
+        invocationCount += 1
+    }
+#endif
+
     static let minimumSampleCount = 3
     static let minimumObservationInterval: TimeInterval = 10 * 60
     // Robustness tuning — conservative to avoid false exhaustion.
@@ -150,6 +173,9 @@ enum UsageTrendAnalyzer {
         history: UsageTrendHistory,
         currentResetAt: Date?
     ) -> UsageTrendAnalysis {
+#if DEBUG
+        recordAnalysisInvocation()
+#endif
         let samples = history.samples
         guard let first = samples.first, let last = samples.last else {
             return .unavailable

@@ -215,4 +215,99 @@ final class OptimizationBenchmarkTests: XCTestCase {
             print("BENCH round=\(round) persistence=\(persistence) trend=\(Date().timeIntervalSince(start)) rateSum=\(rateSum) consuming=\(consuming)")
         }
     }
+
+    /// A refresh commits the same quota state twice (refreshing + settled) and
+    /// repeated refusals re-commit the last accepted snapshot, so the trend
+    /// analyzer used to run once per commit for an unchanged sample. This
+    /// measures the analyzer work that repetition used to perform against the
+    /// end-to-end cost of the same commits after memoizing the analysis input.
+    @MainActor
+    func testRepeatedCommitTrendAnalysisBaseline() async throws {
+        guard ProcessInfo.processInfo.environment["CODEX_MONITOR_BENCHMARK"] == "1" else {
+            throw XCTSkip("Opt-in performance comparison")
+        }
+        let suite = "OptimizationBenchmarkTests.trend.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let base = Date(timeIntervalSince1970: 20_000)
+        let resetAt = base.addingTimeInterval(6 * 24 * 3600)
+        // A saturated history makes the analyzer's per-call cost measurable;
+        // its sample values match the refreshes replayed below.
+        let snapshots = (0..<96).map { index in
+            QuotaSnapshot(
+                weeklyQuotaPercent: 96 - index,
+                fiveHourQuotaPercent: 80,
+                refreshedAt: base.addingTimeInterval(Double(index) * 600),
+                dataSource: .real,
+                quotaWindows: [
+                    QuotaWindow(
+                        limitId: "codex",
+                        windowId: "secondary",
+                        kind: .weekly,
+                        durationMinutes: 10_080,
+                        remainingPercent: 96 - index,
+                        resetAt: resetAt
+                    )
+                ],
+                accountBoundary: .testDefault
+            )
+        }
+        let appState = AppState(
+            snapshotStore: SnapshotStore(defaults: defaults, key: "benchmark"),
+            refreshService: RepeatingTailRefreshService(snapshots: snapshots),
+            now: { base.addingTimeInterval(95 * 600) },
+            sleep: { _ in throw CancellationError() },
+            accountBoundaryProvider: { .testDefault },
+            usageTrendStore: UsageTrendStore(defaults: defaults, key: "trend")
+        )
+        defer { appState.shutdown() }
+        for _ in 0..<96 {
+            await appState.refreshNow(trigger: .manual)
+        }
+        let history = try XCTUnwrap(
+            UsageTrendStore(defaults: defaults, key: "trend").load(matching: .testDefault)
+        )
+        XCTAssertEqual(history.samples.count, 96)
+
+        let refreshes = 100
+        let commits = refreshes * 2
+        for round in 0..<5 {
+            var start = Date()
+            var rateSum = 0.0
+            for _ in 0..<commits {
+                rateSum += UsageTrendAnalyzer.analyze(history: history, currentResetAt: resetAt).ratePercentPerHour ?? 0
+            }
+            let redundant = Date().timeIntervalSince(start)
+
+            let invocationBaseline = UsageTrendAnalyzer.debugAnalysisInvocationCount
+            start = Date()
+            for _ in 0..<refreshes {
+                await appState.refreshNow(trigger: .manual)
+            }
+            let memoized = Date().timeIntervalSince(start)
+            let invocations = UsageTrendAnalyzer.debugAnalysisInvocationCount - invocationBaseline
+            XCTAssertEqual(invocations, 0)
+            print(
+                "BENCH trend-redundancy round=\(round) commits=\(commits) redundantAnalyze=\(redundant) "
+                    + "memoizedCommits=\(memoized) analyzeInvocations=\(invocations) rateSum=\(rateSum)"
+            )
+        }
+    }
+}
+
+/// Yields the given snapshots once, then keeps returning the last one so the
+/// benchmark can replay commits of an unchanged sample.
+private actor RepeatingTailRefreshService: QuotaRefreshing {
+    private var pending: [QuotaSnapshot]
+    private let repeating: QuotaSnapshot
+
+    init(snapshots: [QuotaSnapshot]) {
+        self.pending = snapshots
+        self.repeating = snapshots[snapshots.count - 1]
+    }
+
+    func refresh(basedOn current: QuotaSnapshot) async throws -> QuotaSnapshot {
+        if pending.isEmpty { return repeating }
+        return pending.removeFirst()
+    }
 }
