@@ -476,3 +476,244 @@ private actor UsageTrendSequenceRefreshService: QuotaRefreshing {
         return snapshots.removeFirst()
     }
 }
+
+private actor UsageTrendRepeatingRefreshService: QuotaRefreshing {
+    private let snapshot: QuotaSnapshot
+
+    init(snapshot: QuotaSnapshot) {
+        self.snapshot = snapshot
+    }
+
+    func refresh(basedOn current: QuotaSnapshot) async throws -> QuotaSnapshot {
+        snapshot
+    }
+}
+
+/// Counts `UserDefaults` writes per key so persistence redundancy is directly
+/// observable instead of being inferred from timing. Keys in `failingKeys`
+/// swallow their write to simulate a persistence failure.
+private final class UsageTrendWriteRecorder: UserDefaults {
+    private var counts: [String: Int] = [:]
+    var failingKeys: Set<String> = []
+
+    override func set(_ value: Any?, forKey defaultName: String) {
+        counts[defaultName, default: 0] += 1
+        guard !failingKeys.contains(defaultName) else { return }
+        super.set(value, forKey: defaultName)
+    }
+
+    func writeCount(forKey key: String) -> Int { counts[key] ?? 0 }
+}
+
+@MainActor
+final class UsageTrendPersistenceRedundancyTests: XCTestCase {
+    static let trendKey = "trend"
+
+    func testUnchangedSnapshotDoesNotRewriteTrendHistory() async {
+        let (defaults, suiteName) = makeRecorder()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let base = Date(timeIntervalSince1970: 200_000)
+        let snapshot = makeSnapshot(at: base, remaining: 80)
+        let appState = makeAppState(
+            defaults: defaults,
+            service: UsageTrendRepeatingRefreshService(snapshot: snapshot),
+            now: { base }
+        )
+        defer { appState.shutdown() }
+
+        for _ in 0..<5 {
+            await appState.refreshNow(trigger: .manual)
+        }
+
+        // Five refreshes each commit twice (refreshing + settled). Only the first
+        // commit introduces a new sample, so only one write may reach UserDefaults.
+        XCTAssertEqual(defaults.writeCount(forKey: Self.trendKey), 1)
+        XCTAssertEqual(
+            UsageTrendStore(defaults: defaults, key: Self.trendKey).load(matching: .testDefault)?.samples.count,
+            1
+        )
+        XCTAssertEqual(appState.usageTrendAnalysis.state, .insufficientData)
+    }
+
+    func testEachNewSamplePersistsExactlyOneTrendWrite() async {
+        let (defaults, suiteName) = makeRecorder()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let base = Date(timeIntervalSince1970: 210_000)
+        let resetAt = base.addingTimeInterval(24 * 3600)
+        let appState = makeAppState(
+            defaults: defaults,
+            service: UsageTrendSequenceRefreshService(snapshots: [
+                makeSnapshot(at: base, remaining: 80, resetAt: resetAt),
+                makeSnapshot(at: base.addingTimeInterval(10 * 60), remaining: 79, resetAt: resetAt),
+                makeSnapshot(at: base.addingTimeInterval(20 * 60), remaining: 78, resetAt: resetAt)
+            ]),
+            now: { base.addingTimeInterval(20 * 60) }
+        )
+        defer { appState.shutdown() }
+
+        for _ in 0..<3 {
+            await appState.refreshNow(trigger: .manual)
+        }
+
+        XCTAssertEqual(defaults.writeCount(forKey: Self.trendKey), 3)
+        XCTAssertEqual(
+            UsageTrendStore(defaults: defaults, key: Self.trendKey).load(matching: .testDefault)?.samples.count,
+            3
+        )
+    }
+
+    func testCorruptPersistedTrendIsReplacedByNextAcceptedSample() async {
+        let (defaults, suiteName) = makeRecorder()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(Data("not-json".utf8), forKey: Self.trendKey)
+        let baselineWrites = defaults.writeCount(forKey: Self.trendKey)
+
+        let base = Date(timeIntervalSince1970: 220_000)
+        let appState = makeAppState(
+            defaults: defaults,
+            service: UsageTrendRepeatingRefreshService(
+                snapshot: makeSnapshot(at: base, remaining: 60)
+            ),
+            now: { base }
+        )
+        defer { appState.shutdown() }
+
+        await appState.refreshNow(trigger: .manual)
+
+        XCTAssertEqual(defaults.writeCount(forKey: Self.trendKey), baselineWrites + 1)
+        XCTAssertEqual(
+            UsageTrendStore(defaults: defaults, key: Self.trendKey).load(matching: .testDefault)?.samples.count,
+            1
+        )
+    }
+
+    func testFailedTrendWriteIsRetriedByNextCommit() async {
+        let (defaults, suiteName) = makeRecorder()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.failingKeys = [Self.trendKey]
+
+        let base = Date(timeIntervalSince1970: 230_000)
+        let appState = makeAppState(
+            defaults: defaults,
+            service: UsageTrendRepeatingRefreshService(
+                snapshot: makeSnapshot(at: base, remaining: 70)
+            ),
+            now: { base }
+        )
+        defer { appState.shutdown() }
+
+        await appState.refreshNow(trigger: .manual)
+        XCTAssertEqual(defaults.writeCount(forKey: Self.trendKey), 1)
+        XCTAssertNil(UsageTrendStore(defaults: defaults, key: Self.trendKey).load(matching: .testDefault))
+
+        defaults.failingKeys = []
+        await appState.refreshNow(trigger: .manual)
+
+        // The history is unchanged, but the previous write was never confirmed,
+        // so the next commit must retry rather than skip.
+        XCTAssertEqual(defaults.writeCount(forKey: Self.trendKey), 2)
+        XCTAssertEqual(
+            UsageTrendStore(defaults: defaults, key: Self.trendKey).load(matching: .testDefault)?.samples.count,
+            1
+        )
+    }
+
+    func testAccountBoundaryChangePersistsUnderTheNewBoundary() async {
+        let (defaults, suiteName) = makeRecorder()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let base = Date(timeIntervalSince1970: 240_000)
+        var boundary = QuotaAccountBoundary.testDefault
+        let appState = makeAppState(
+            defaults: defaults,
+            service: UsageTrendSequenceRefreshService(snapshots: [
+                makeSnapshot(at: base, remaining: 80, boundary: .testDefault),
+                makeSnapshot(at: base.addingTimeInterval(10 * 60), remaining: 75, boundary: .testOtherAccount)
+            ]),
+            now: { base.addingTimeInterval(10 * 60) },
+            accountBoundary: { boundary }
+        )
+        defer { appState.shutdown() }
+
+        await appState.refreshNow(trigger: .manual)
+        XCTAssertEqual(defaults.writeCount(forKey: Self.trendKey), 1)
+
+        boundary = .testOtherAccount
+        await appState.refreshNow(trigger: .manual)
+
+        XCTAssertEqual(defaults.writeCount(forKey: Self.trendKey), 2)
+        XCTAssertEqual(
+            UsageTrendStore(defaults: defaults, key: Self.trendKey).load(matching: .testOtherAccount)?.samples.count,
+            1
+        )
+        XCTAssertNil(UsageTrendStore(defaults: defaults, key: Self.trendKey).load(matching: .testDefault))
+    }
+
+    func testSnapshotFromUnverifiedAccountBoundaryIsNeverPersisted() async {
+        let (defaults, suiteName) = makeRecorder()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let base = Date(timeIntervalSince1970: 250_000)
+        let appState = makeAppState(
+            defaults: defaults,
+            service: UsageTrendRepeatingRefreshService(
+                snapshot: makeSnapshot(at: base, remaining: 65, boundary: .testDefault)
+            ),
+            now: { base },
+            accountBoundary: { .testOtherAccount }
+        )
+        defer { appState.shutdown() }
+
+        await appState.refreshNow(trigger: .manual)
+
+        XCTAssertEqual(defaults.writeCount(forKey: Self.trendKey), 0)
+        XCTAssertEqual(appState.usageTrendAnalysis, .unavailable)
+    }
+
+    // MARK: - Helpers
+
+    private func makeRecorder() -> (UsageTrendWriteRecorder, String) {
+        let suiteName = "CodexMonitorNativeTests.trendRedundancy.\(UUID().uuidString)"
+        let defaults = UsageTrendWriteRecorder(suiteName: suiteName)!
+        return (defaults, suiteName)
+    }
+
+    private func makeAppState<T: QuotaRefreshing>(
+        defaults: UserDefaults,
+        service: T,
+        now: @escaping () -> Date,
+        accountBoundary: @escaping () -> QuotaAccountBoundary? = { .testDefault }
+    ) -> AppState {
+        AppState(
+            snapshotStore: SnapshotStore(defaults: defaults, key: "snapshot"),
+            refreshService: service,
+            now: now,
+            sleep: { _ in throw CancellationError() },
+            accountBoundaryProvider: accountBoundary,
+            usageTrendStore: UsageTrendStore(defaults: defaults, key: Self.trendKey)
+        )
+    }
+
+    private func makeSnapshot(
+        at date: Date,
+        remaining: Int,
+        resetAt: Date? = nil,
+        boundary: QuotaAccountBoundary = .testDefault
+    ) -> QuotaSnapshot {
+        QuotaSnapshot(
+            weeklyQuotaPercent: remaining,
+            fiveHourQuotaPercent: 80,
+            refreshedAt: date,
+            dataSource: .real,
+            quotaWindows: [
+                QuotaWindow(
+                    limitId: "codex",
+                    windowId: "secondary",
+                    kind: .weekly,
+                    durationMinutes: 10_080,
+                    remainingPercent: remaining,
+                    resetAt: resetAt
+                )
+            ],
+            accountBoundary: boundary
+        )
+    }
+}

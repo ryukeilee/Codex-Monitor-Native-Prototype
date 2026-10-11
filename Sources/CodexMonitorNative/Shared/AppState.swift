@@ -153,6 +153,10 @@ final class AppState: ObservableObject {
     private let usageTrendStore: UsageTrendStore?
     private let refreshAction: @Sendable (QuotaSnapshot) async throws -> QuotaSnapshot
     private var usageTrendHistory: UsageTrendHistory
+    /// Content most recently confirmed as persisted (or restored from disk).
+    /// Commits that reproduce this exact history skip the encode/write/readback
+    /// cycle; a failed save leaves it unchanged so the next commit retries.
+    private var persistedUsageTrendHistory: UsageTrendHistory?
     private var latestRealSnapshot: QuotaSnapshot?
     private var stagedSuccessfulSnapshot: QuotaSnapshot?
     private var clockRollbackObserved = false
@@ -223,10 +227,13 @@ final class AppState: ObservableObject {
 
         let currentAccountBoundary = accountBoundaryProvider()
         lastObservedAccountBoundary = currentAccountBoundary
-        usageTrendHistory = usageTrendStore?.load(
+        let restoredUsageTrendHistory = usageTrendStore?.load(
             matching: currentAccountBoundary,
             allowsUnboundHistory: allowsUnboundSnapshotsForTesting
-        ) ?? UsageTrendHistory(accountBoundary: currentAccountBoundary)
+        )
+        usageTrendHistory = restoredUsageTrendHistory
+            ?? UsageTrendHistory(accountBoundary: currentAccountBoundary)
+        persistedUsageTrendHistory = restoredUsageTrendHistory
 
         let persistedState = snapshotStore.loadState()
         if let persistedState {
@@ -1215,11 +1222,24 @@ final class AppState: ObservableObject {
             history: usageTrendHistory,
             currentResetAt: sample.resetAt
         )
-        if usageTrendStore?.save(usageTrendHistory) == false {
-            AppLogger.snapshot.error("Failed to persist usage trend history")
-        }
+        persistUsageTrendIfNeeded()
         if let anomaly {
             onQuotaAnomalyDetected?(anomaly)
+        }
+    }
+
+    /// Writes the trend history only when its content differs from the last
+    /// confirmed persistence. Repeated commits for an unchanged snapshot would
+    /// otherwise re-encode, write, and read back identical bytes on every
+    /// quota state update. A failed write keeps the marker stale so the next
+    /// commit retries instead of silently dropping the update.
+    private func persistUsageTrendIfNeeded() {
+        guard let usageTrendStore else { return }
+        guard usageTrendHistory != persistedUsageTrendHistory else { return }
+        if usageTrendStore.save(usageTrendHistory) {
+            persistedUsageTrendHistory = usageTrendHistory
+        } else {
+            AppLogger.snapshot.error("Failed to persist usage trend history")
         }
     }
 
