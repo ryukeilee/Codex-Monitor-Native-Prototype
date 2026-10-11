@@ -127,6 +127,10 @@ final class QuotaRefreshServiceTests: XCTestCase {
         let appServerSnapshot = QuotaSnapshot(
             weeklyQuotaPercent: 70,
             fiveHourQuotaPercent: 64,
+            // Non-default states and schema version, so a projection that
+            // relies on initializer defaults cannot pass this test.
+            weeklyQuotaState: .cached,
+            fiveHourQuotaState: .invalid,
             resetAvailableCount: 1,
             resetCreditDetailsState: .appServerCountOnly,
             resetCreditTimeEntries: [
@@ -144,11 +148,15 @@ final class QuotaRefreshServiceTests: XCTestCase {
             refreshedAt: refreshedAt,
             dataSource: .real,
             errorMessage: "app-server note",
+            schemaVersion: 7,
             quotaWindows: [weeklyWindow],
             accountBoundary: .testDefault
         )
+        // A payload without a count must keep the app-server count; the
+        // override direction is covered by
+        // testRefreshEnrichesAppServerCountOnlySnapshotWithResetCreditDetails.
         let details = ResetCreditsDetailPayload(
-            availableCount: 1,
+            availableCount: nil,
             availableCredits: [
                 ResetCreditDetailSnapshot(
                     ordinal: 1,
@@ -183,12 +191,17 @@ final class QuotaRefreshServiceTests: XCTestCase {
         XCTAssertEqual(succeeded.resetCreditDetailsState, .detailed)
         XCTAssertEqual(emptyFromServer.resetCreditDetailsState, .appServerCountOnly)
         XCTAssertEqual(failed.resetCreditDetailsState, .unavailable)
+        XCTAssertEqual(succeeded.resetCreditDetails, details.availableCredits)
+        XCTAssertEqual(succeeded.resetCreditStatusSummary, details.statusSummary)
+        XCTAssertNil(succeeded.resetCreditDiagnostic)
+        XCTAssertNil(emptyFromServer.resetCreditDiagnostic)
+        XCTAssertEqual(failed.resetCreditDiagnostic?.summary, "HTTP 状态码 503")
 
         for refreshed in [succeeded, emptyFromServer, failed] {
             XCTAssertEqual(refreshed.weeklyQuotaPercent, 70)
             XCTAssertEqual(refreshed.fiveHourQuotaPercent, 64)
-            XCTAssertEqual(refreshed.weeklyQuotaState, .live)
-            XCTAssertEqual(refreshed.fiveHourQuotaState, .live)
+            XCTAssertEqual(refreshed.weeklyQuotaState, .cached)
+            XCTAssertEqual(refreshed.fiveHourQuotaState, .invalid)
             XCTAssertEqual(refreshed.resetAvailableCount, 1)
             XCTAssertEqual(refreshed.fiveHourResetAt, fiveHourResetAt)
             XCTAssertEqual(refreshed.resetBanks, [weeklyBank])
@@ -196,7 +209,7 @@ final class QuotaRefreshServiceTests: XCTestCase {
             XCTAssertEqual(refreshed.refreshedAt, refreshedAt)
             XCTAssertEqual(refreshed.dataSource, .real)
             XCTAssertEqual(refreshed.errorMessage, "app-server note")
-            XCTAssertEqual(refreshed.schemaVersion, QuotaSnapshot.currentSchemaVersion)
+            XCTAssertEqual(refreshed.schemaVersion, 7)
             XCTAssertEqual(refreshed.accountBoundary, .testDefault)
             // The detail provider owns the reset-credit presentation on this
             // path, so the raw app-server rendering never survives it.
