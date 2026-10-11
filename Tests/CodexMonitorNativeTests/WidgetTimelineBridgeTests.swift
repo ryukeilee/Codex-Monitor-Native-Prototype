@@ -930,6 +930,221 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         XCTAssertEqual(try envelope.decode(WidgetDisplayState.self), state)
     }
 
+    // MARK: - Single-pass classification
+
+    /// Runs `body` and reports the widget store's own JSON work, which is
+    /// deterministic unlike a load/save timing.
+    private func widgetStateWork(_ body: () -> Void) -> WidgetDisplayStateStore.Instrumentation {
+        let before = WidgetDisplayStateStore.debugWidgetStateInstrumentation
+        body()
+        let after = WidgetDisplayStateStore.debugWidgetStateInstrumentation
+        return WidgetDisplayStateStore.Instrumentation(
+            decodes: after.decodes - before.decodes,
+            payloadEncodes: after.payloadEncodes - before.payloadEncodes,
+            checksumValidations: after.checksumValidations - before.checksumValidations
+        )
+    }
+
+    private func makeWidgetStateTestDirectory(
+        _ label: String
+    ) -> (fileManager: FileManager, groupURL: URL, stateURL: URL) {
+        let groupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexMonitorNativeTests.\(label).\(UUID().uuidString)", isDirectory: true)
+        let fileManager = WidgetStateTestFileManager(groupURL: groupURL)
+        return (
+            fileManager,
+            groupURL,
+            WidgetDisplayStateStore.stateURL(fileManager: fileManager)
+        )
+    }
+
+    private func makeTrustedWidgetState(
+        weekly: Int,
+        refreshedAt: Date = Date(timeIntervalSince1970: 100)
+    ) -> WidgetDisplayState {
+        WidgetDisplayState.make(
+            snapshot: QuotaSnapshot(
+                weeklyQuotaPercent: weekly,
+                fiveHourQuotaPercent: 60,
+                refreshedAt: refreshedAt,
+                dataSource: .real,
+                accountBoundary: .testDefault
+            ),
+            status: .success,
+            lastSuccessAt: refreshedAt,
+            lastAttemptAt: nil,
+            effectiveFiveHourResetAt: nil,
+            savedAt: refreshedAt
+        )
+    }
+
+    /// A warm commit used to classify the same primary five times
+    /// (`containsNewerPersistenceVersion`, `decodeEnvelope`, `envelopeRevision`,
+    /// the backup-trust probe, and the write readback) and used to encode the
+    /// same `WidgetDisplayState` twice. The single-pass audit must classify the
+    /// primary once and reuse that result for the newer-version, trust,
+    /// revision, and account-boundary decisions.
+    func testWarmWidgetStateCommitAndLoadClassifyPrimaryOnce() throws {
+        let (fileManager, groupURL, stateURL) = makeWidgetStateTestDirectory("widgetStoreWarm")
+        defer { try? FileManager.default.removeItem(at: groupURL) }
+        let state = makeTrustedWidgetState(weekly: 72)
+        XCTAssertTrue(WidgetDisplayStateStore.save(state, fileManager: fileManager))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stateURL.appendingPathExtension("backup").path))
+        let firstPrimary = try Data(contentsOf: stateURL)
+
+        let commit = widgetStateWork {
+            XCTAssertTrue(WidgetDisplayStateStore.save(state, fileManager: fileManager))
+        }
+
+        // One audit (envelope + payload + checksum validation) and the write
+        // readback envelope check. Measured against the pre-change store, the
+        // same commit spent 10 decodes, 2 payload encodes, and 8 checksum
+        // validations.
+        XCTAssertEqual(
+            commit,
+            WidgetDisplayStateStore.Instrumentation(decodes: 3, payloadEncodes: 1, checksumValidations: 2)
+        )
+        // A trusted primary is what backs the backup, byte for byte.
+        XCTAssertEqual(
+            try Data(contentsOf: stateURL.appendingPathExtension("backup")),
+            firstPrimary
+        )
+
+        let load = widgetStateWork {
+            XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager), state)
+        }
+        // One audit for the warm primary. The pre-change load decoded it four
+        // times and validated its checksum three times.
+        XCTAssertEqual(
+            load,
+            WidgetDisplayStateStore.Instrumentation(decodes: 2, payloadEncodes: 0, checksumValidations: 1)
+        )
+    }
+
+    /// A primary whose envelope checksum fails is still repairable, but the
+    /// checksum failure alone decides it is untrusted, so the flattened fields
+    /// are never probed and every pre-write decision reuses that one verdict.
+    func testWidgetStateChecksumFailureRepairClassifiesPrimaryOnce() throws {
+        let (fileManager, groupURL, stateURL) = makeWidgetStateTestDirectory("widgetStoreChecksum")
+        defer { try? FileManager.default.removeItem(at: groupURL) }
+        let corruptState = makeTrustedWidgetState(weekly: 90)
+        var object = try JSONSerialization.jsonObject(
+            with: legacyCompatibleEnvelopeData(corruptState, revision: 1)
+        ) as! [String: Any]
+        object["checksum"] = "invalid"
+        try FileManager.default.createDirectory(at: groupURL, withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]).write(to: stateURL)
+
+        let replacement = makeTrustedWidgetState(weekly: 40, refreshedAt: Date(timeIntervalSince1970: 200))
+        let repair = widgetStateWork {
+            XCTAssertTrue(WidgetDisplayStateStore.save(replacement, fileManager: fileManager))
+        }
+        // Envelope + checksum for the untrusted primary, one payload encode, and
+        // one envelope check for the write readback. The pre-change repair spent
+        // 6 decodes, 2 payload encodes, and 6 checksum validations.
+        XCTAssertEqual(
+            repair,
+            WidgetDisplayStateStore.Instrumentation(decodes: 2, payloadEncodes: 1, checksumValidations: 2)
+        )
+        // An untrusted primary never becomes the backup.
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stateURL.appendingPathExtension("backup").path))
+        let load = widgetStateWork {
+            XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager), replacement)
+        }
+        XCTAssertEqual(
+            load,
+            WidgetDisplayStateStore.Instrumentation(decodes: 2, payloadEncodes: 0, checksumValidations: 1)
+        )
+    }
+
+    /// Loading past a future-format primary still reports the backup, and each
+    /// datum is classified once: the future primary needs no payload decode and
+    /// the backup needs exactly one.
+    func testWidgetStateFuturePrimaryLoadClassifiesEachDatumOnce() throws {
+        let (fileManager, groupURL, stateURL) = makeWidgetStateTestDirectory("widgetStoreFuturePrimary")
+        defer { try? FileManager.default.removeItem(at: groupURL) }
+        let trusted = makeTrustedWidgetState(weekly: 70)
+        var object = try JSONSerialization.jsonObject(
+            with: legacyCompatibleEnvelopeData(trusted, revision: 2)
+        ) as! [String: Any]
+        object["formatVersion"] = PersistenceEnvelope.currentFormatVersion + 1
+        let futureData = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        try FileManager.default.createDirectory(at: groupURL, withIntermediateDirectories: true)
+        try futureData.write(to: stateURL)
+        try legacyCompatibleEnvelopeData(trusted, revision: 1)
+            .write(to: stateURL.appendingPathExtension("backup"))
+
+        let load = widgetStateWork {
+            XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager), trusted)
+        }
+        // Future primary: envelope + checksum. Backup: envelope + payload +
+        // checksum. The pre-change load decoded each datum twice.
+        XCTAssertEqual(
+            load,
+            WidgetDisplayStateStore.Instrumentation(decodes: 3, payloadEncodes: 0, checksumValidations: 2)
+        )
+        XCTAssertEqual(try Data(contentsOf: stateURL), futureData)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stateURL.appendingPathExtension("corrupt").path))
+    }
+
+    /// A pre-envelope primary is migrated through one classification per pass:
+    /// the load decodes it once to recognize the legacy shape, and the migration
+    /// commit classifies it once more for revision, trust, and boundary.
+    func testWidgetStateLegacyMigrationClassifiesPrimaryOnce() throws {
+        let (fileManager, groupURL, stateURL) = makeWidgetStateTestDirectory("widgetStoreLegacyMigration")
+        defer { try? FileManager.default.removeItem(at: groupURL) }
+        let state = makeTrustedWidgetState(weekly: 78)
+        try FileManager.default.createDirectory(at: groupURL, withIntermediateDirectories: true)
+        try JSONEncoder().encode(state).write(to: stateURL)
+
+        let migration = widgetStateWork {
+            XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager), state)
+        }
+        // Load audit: envelope probe + legacy payload. Migration commit: envelope
+        // probe + legacy payload + one payload encode + the write readback. The
+        // pre-change migration spent 13 decodes and 2 payload encodes.
+        XCTAssertEqual(
+            migration,
+            WidgetDisplayStateStore.Instrumentation(decodes: 5, payloadEncodes: 1, checksumValidations: 1)
+        )
+        let envelope = try JSONDecoder().decode(
+            PersistenceEnvelope.self,
+            from: try Data(contentsOf: stateURL)
+        )
+        XCTAssertEqual(envelope.revision, 1)
+        XCTAssertEqual(try envelope.decode(WidgetDisplayState.self), state)
+    }
+
+    /// The version probes never inspected the flattened fields once an envelope
+    /// shape decoded, so a current envelope whose flattened payload declares a
+    /// newer schema is still served from its (current) envelope payload. The
+    /// single-pass audit must keep that decision instead of newly rejecting or
+    /// quarantining the primary.
+    func testWidgetStateEnvelopeDecidesVersionWithoutProbingFlattenedSchema() throws {
+        let (fileManager, groupURL, stateURL) = makeWidgetStateTestDirectory("widgetStoreHybridSchema")
+        defer { try? FileManager.default.removeItem(at: groupURL) }
+        let state = makeTrustedWidgetState(weekly: 81)
+        var object = try JSONSerialization.jsonObject(
+            with: legacyCompatibleEnvelopeData(state, revision: 1)
+        ) as! [String: Any]
+        var flattenedSnapshot = try XCTUnwrap(object["snapshot"] as? [String: Any])
+        flattenedSnapshot["schemaVersion"] = QuotaSnapshot.currentSchemaVersion + 1
+        object["snapshot"] = flattenedSnapshot
+        let hybridData = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        try FileManager.default.createDirectory(at: groupURL, withIntermediateDirectories: true)
+        try hybridData.write(to: stateURL)
+
+        let load = widgetStateWork {
+            XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager), state)
+        }
+        XCTAssertEqual(
+            load,
+            WidgetDisplayStateStore.Instrumentation(decodes: 2, payloadEncodes: 0, checksumValidations: 1)
+        )
+        XCTAssertEqual(try Data(contentsOf: stateURL), hybridData)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stateURL.appendingPathExtension("corrupt").path))
+    }
+
     func testWidgetRealStateIsNotReplacedByLaterMockState() {
         let groupURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("CodexMonitorNativeTests.widgetRealThenMock.\(UUID().uuidString)", isDirectory: true)

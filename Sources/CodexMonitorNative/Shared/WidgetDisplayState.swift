@@ -23,7 +23,14 @@ struct PersistenceEnvelope: Codable {
     let writtenAt: Date
 
     init<T: Encodable>(value: T, revision: UInt64, encoder: JSONEncoder = PersistenceEnvelope.encoder) throws {
-        let payload = try encoder.encode(value)
+        try self.init(payload: encoder.encode(value), revision: revision)
+    }
+
+    /// Builds the envelope around an already-encoded payload. A writer that also
+    /// needs the raw payload bytes (the widget store mirrors them at the top
+    /// level for pre-envelope readers) can reuse them instead of encoding the
+    /// same value twice.
+    init(payload: Data, revision: UInt64) {
         self.formatVersion = Self.currentFormatVersion
         self.revision = revision
         self.payload = payload
@@ -524,6 +531,121 @@ enum WidgetDisplayStateStore {
         "formatVersion", "revision", "payload", "checksum", "writtenAt"
     ]
 
+    // MARK: - Test instrumentation
+
+#if DEBUG
+    /// Deterministic counts of the JSON work this store performs, so redundancy
+    /// tests can assert that one load or commit classifies its persisted bytes
+    /// once instead of re-parsing them per decision. `checksumValidations`
+    /// counts checksum verification attempts, not the single checksum generated
+    /// when an envelope is written. Compiled out of release builds.
+    struct Instrumentation: Equatable {
+        var decodes = 0
+        var payloadEncodes = 0
+        var checksumValidations = 0
+    }
+
+    private static let instrumentationLock = NSLock()
+    nonisolated(unsafe) private static var instrumentation = Instrumentation()
+
+    static var debugWidgetStateInstrumentation: Instrumentation {
+        instrumentationLock.lock()
+        defer { instrumentationLock.unlock() }
+        return instrumentation
+    }
+
+    private static func recordDecode() { recordInstrumentation { $0.decodes += 1 } }
+    private static func recordPayloadEncode() { recordInstrumentation { $0.payloadEncodes += 1 } }
+    private static func recordChecksumValidation() { recordInstrumentation { $0.checksumValidations += 1 } }
+
+    private static func recordInstrumentation(_ update: (inout Instrumentation) -> Void) {
+        instrumentationLock.lock()
+        defer { instrumentationLock.unlock() }
+        update(&instrumentation)
+    }
+#else
+    private static func recordDecode() {}
+    private static func recordPayloadEncode() {}
+    private static func recordChecksumValidation() {}
+#endif
+
+    /// One decode/validation pass over a single persisted widget-state datum
+    /// (the primary or its backup).
+    ///
+    /// `load` and `saveUnlocked` need the same facts about those bytes: whether
+    /// a newer persistence version wrote them, whether they are a current-format
+    /// envelope with a revision, whether they are a supported legacy payload, and
+    /// whether either can be trusted. Classifying each datum once keeps those
+    /// answers consistent and removes the repeated envelope, payload, checksum,
+    /// and raw-state parses the call sites used to run independently.
+    private struct WidgetStateAudit {
+        struct Envelope {
+            let state: WidgetDisplayState
+            let revision: UInt64
+        }
+
+        /// Present when the datum is a current-format envelope whose checksum
+        /// verifies, whose payload decodes, and whose schema is supported.
+        let envelope: Envelope?
+        /// The unwrapped legacy payload, decoded only for a datum that carries
+        /// no envelope metadata at all.
+        let legacyState: WidgetDisplayState?
+        /// The datum was written by a newer persistence format, or by a newer
+        /// snapshot schema, than this binary understands.
+        let isNewerPersistenceVersion: Bool
+
+        /// A datum that either the envelope or the legacy path accepted.
+        var isTrusted: Bool { envelope != nil || legacyState != nil }
+
+        static let absent = WidgetStateAudit(
+            envelope: nil,
+            legacyState: nil,
+            isNewerPersistenceVersion: false
+        )
+    }
+
+    private static func audit(_ data: Data?) -> WidgetStateAudit {
+        guard let data else { return .absent }
+
+        var envelope: WidgetStateAudit.Envelope?
+        var legacyState: WidgetDisplayState?
+        var isNewerPersistenceVersion = false
+
+        if let rawEnvelope = decodePersistedEnvelope(data) {
+            // Envelope metadata is present, so the flattened legacy fields can
+            // never describe this datum: a checksum failure must not fall
+            // through to them.
+            if validateChecksum(of: rawEnvelope) {
+                if rawEnvelope.formatVersion > PersistenceEnvelope.currentFormatVersion {
+                    isNewerPersistenceVersion = true
+                } else if rawEnvelope.formatVersion == PersistenceEnvelope.currentFormatVersion,
+                          let state = decodePayload(from: rawEnvelope) {
+                    if state.snapshot.schemaVersion > QuotaSnapshot.currentSchemaVersion {
+                        isNewerPersistenceVersion = true
+                    } else if isSupported(state) {
+                        envelope = WidgetStateAudit.Envelope(
+                            state: state,
+                            revision: rawEnvelope.revision
+                        )
+                    }
+                }
+            }
+        } else if !containsEnvelopeMetadata(data),
+                  let state = decodeState(data) {
+            if state.snapshot.schemaVersion > QuotaSnapshot.currentSchemaVersion {
+                isNewerPersistenceVersion = true
+            } else if isSupported(state) {
+                legacyState = state
+            }
+        }
+
+        return WidgetStateAudit(
+            envelope: envelope,
+            legacyState: legacyState,
+            isNewerPersistenceVersion: isNewerPersistenceVersion
+        )
+    }
+
     static func load(fileManager: FileManager = .default) -> WidgetDisplayState {
         lock.lock()
         defer { lock.unlock() }
@@ -534,29 +656,27 @@ enum WidgetDisplayStateStore {
         defer { transactionLock.release() }
 
         let url = stateURL(fileManager: fileManager)
-        let primaryData = try? Data(contentsOf: url)
-        let primaryWasWrittenByNewerVersion = primaryData.map(containsNewerPersistenceVersion) ?? false
+        let primary = audit(try? Data(contentsOf: url))
 
-        if let data = primaryData {
-            if let state = decodeEnvelope(data) {
-                return state
-            }
+        if let envelope = primary.envelope {
+            return envelope.state
+        }
 
-            // Read pre-envelope files once and immediately migrate them.
-            if let legacy = decodeLegacyState(data) {
-                saveUnlocked(legacy, fileManager: fileManager)
-                return legacy
-            }
+        // Read pre-envelope files once and immediately migrate them.
+        if let legacy = primary.legacyState {
+            saveUnlocked(legacy, fileManager: fileManager)
+            return legacy
         }
 
         let backupURL = url.appendingPathExtension("backup")
         let backupData = try? Data(contentsOf: backupURL)
-        if primaryWasWrittenByNewerVersion {
-            if let backupData, let backup = decodeEnvelope(backupData) {
+        if primary.isNewerPersistenceVersion {
+            let backup = audit(backupData)
+            if let envelope = backup.envelope {
                 PersistenceLog.logger.error("Widget state uses a newer persistence version; displaying backup without replacing primary")
-                return backup
+                return envelope.state
             }
-            if let backupData, let legacyBackup = decodeLegacyState(backupData) {
+            if let legacyBackup = backup.legacyState {
                 PersistenceLog.logger.error("Widget state uses a newer persistence version; displaying legacy backup without replacing primary")
                 return legacyBackup
             }
@@ -565,21 +685,25 @@ enum WidgetDisplayStateStore {
         }
 
         if let backupData {
-            if let backup = decodeEnvelope(backupData) {
+            let backup = audit(backupData)
+            if let envelope = backup.envelope {
                 quarantine(url: url, fileManager: fileManager)
-                if restoreEnvelopeBackup(backupData, state: backup, to: url) {
+                if restoreEnvelopeBackup(backupData, to: url) {
                     PersistenceLog.logger.error("Recovered widget state from backup after primary corruption")
                 } else {
                     PersistenceLog.logger.error("Widget backup was readable but could not be restored to primary storage")
                 }
-                return backup
+                return envelope.state
             }
 
-            if let legacyBackup = decodeLegacyState(backupData) {
+            if let legacyBackup = backup.legacyState {
                 quarantine(url: url, fileManager: fileManager)
                 try? backupData.write(to: url, options: .atomic)
                 saveUnlocked(legacyBackup, fileManager: fileManager)
-                if let readback = try? Data(contentsOf: url), decodeEnvelope(readback) == legacyBackup {
+                // The migration round-trip is the one place worth re-decoding:
+                // it proves the flattened legacy payload survived the envelope
+                // re-encode written by `saveUnlocked`.
+                if let readback = try? Data(contentsOf: url), audit(readback).envelope?.state == legacyBackup {
                     PersistenceLog.logger.error("Recovered and migrated legacy widget state from backup after primary corruption")
                 } else {
                     PersistenceLog.logger.error("Legacy widget backup was readable but migration could not be persisted")
@@ -656,15 +780,12 @@ enum WidgetDisplayStateStore {
             let currentData = try? Data(contentsOf: url)
             let requestsFailClosedInvalidation = state.snapshot.dataSource != .real
                 && state.status != .demoMode
-            if let current = currentData,
-               containsNewerPersistenceVersion(current),
-               !requestsFailClosedInvalidation {
+            let current = audit(currentData)
+            if current.isNewerPersistenceVersion, !requestsFailClosedInvalidation {
                 PersistenceLog.logger.error("Cannot overwrite widget state written by a newer persistence version")
                 return false
             }
-            let currentState = currentData.flatMap {
-                decodeEnvelope($0) ?? decodeLegacyState($0)
-            }
+            let currentState = current.envelope?.state ?? current.legacyState
             // The Widget cannot independently read the current Codex identity.
             // Any explicit host invalidation therefore has to remove every old
             // real recovery source, even when the primary is missing, corrupt,
@@ -714,21 +835,20 @@ enum WidgetDisplayStateStore {
                 }
             }
 
-            let currentRevision = currentData.flatMap { envelopeRevision($0) } ?? 0
+            let currentRevision = current.envelope?.revision ?? 0
             guard currentRevision < UInt64.max else {
                 PersistenceLog.logger.error("Cannot persist widget state: revision reached UInt64.max")
                 return false
             }
             let revision = currentRevision + 1
-            let envelope = try PersistenceEnvelope(value: state, revision: revision)
-            let data = try encodedEnvelopeData(envelope, preservingLegacyPayload: state)
+            let payload = try encodePayload(state)
+            let data = try encodedEnvelopeData(payload: payload, revision: revision)
             let backupURL = url.appendingPathExtension("backup")
             if explicitlyInvalidatesRealSnapshot || crossesAccountBoundary {
                 try? fileManager.removeItem(at: backupURL)
-            } else if let current = currentData,
-               decodeEnvelope(current) != nil || decodeLegacyState(current) != nil {
-                try current.write(to: backupURL, options: .atomic)
-                guard let backupReadback = try? Data(contentsOf: backupURL), backupReadback == current else {
+            } else if let currentData, current.isTrusted {
+                try currentData.write(to: backupURL, options: .atomic)
+                guard let backupReadback = try? Data(contentsOf: backupURL), backupReadback == currentData else {
                     PersistenceLog.logger.error("Widget state backup verification failed; primary was not replaced")
                     return false
                 }
@@ -752,15 +872,19 @@ enum WidgetDisplayStateStore {
                     try fileManager.moveItem(at: temporaryURL, to: url)
                     writeURL = url
                 }
-                guard let readback = try? Data(contentsOf: writeURL), readback == data, envelopeRevision(readback) == revision else {
+                guard let readback = try? Data(contentsOf: writeURL),
+                      readback == data,
+                      isEnvelope(data, atRevision: revision) else {
                     PersistenceLog.logger.error("Widget state write verification failed at revision \(revision); restoring backup")
                     try? fileManager.removeItem(at: writeURL)
-                    if let current = currentData { try? current.write(to: url, options: .atomic) }
+                    if let currentData { try? currentData.write(to: url, options: .atomic) }
                     return false
                 }
             } else {
                 try fileManager.moveItem(at: temporaryURL, to: url)
-                guard let readback = try? Data(contentsOf: url), readback == data, envelopeRevision(readback) == revision else {
+                guard let readback = try? Data(contentsOf: url),
+                      readback == data,
+                      isEnvelope(data, atRevision: revision) else {
                     PersistenceLog.logger.error("Widget state write verification failed at revision \(revision); rolling back")
                     try? fileManager.removeItem(at: url)
                     if let current = currentData { try? current.write(to: url, options: .atomic) }
@@ -774,19 +898,40 @@ enum WidgetDisplayStateStore {
         }
     }
 
-    private static func decodeEnvelope(_ data: Data) -> WidgetDisplayState? {
-        guard let envelope = try? decoder.decode(PersistenceEnvelope.self, from: data) else { return nil }
-        guard let state = try? envelope.decode(WidgetDisplayState.self), isSupported(state) else { return nil }
-        return state
+    private static func decodePersistedEnvelope(_ data: Data) -> PersistenceEnvelope? {
+        recordDecode()
+        return try? decoder.decode(PersistenceEnvelope.self, from: data)
     }
 
-    private static func decodeLegacyState(_ data: Data) -> WidgetDisplayState? {
-        guard !containsEnvelopeMetadata(data),
-              let state = try? decoder.decode(WidgetDisplayState.self, from: data),
-              isSupported(state) else {
-            return nil
+    private static func decodePayload(from envelope: PersistenceEnvelope) -> WidgetDisplayState? {
+        recordDecode()
+        return try? decoder.decode(WidgetDisplayState.self, from: envelope.payload)
+    }
+
+    private static func decodeState(_ data: Data) -> WidgetDisplayState? {
+        recordDecode()
+        return try? decoder.decode(WidgetDisplayState.self, from: data)
+    }
+
+    private static func encodePayload(_ state: WidgetDisplayState) throws -> Data {
+        recordPayloadEncode()
+        return try encoder.encode(state)
+    }
+
+    private static func validateChecksum(of envelope: PersistenceEnvelope) -> Bool {
+        recordChecksumValidation()
+        return envelope.hasValidChecksum
+    }
+
+    /// Verifies the envelope bytes this store just produced. The payload is not
+    /// re-decoded: this same call encoded it from an already-supported state.
+    private static func isEnvelope(_ data: Data, atRevision revision: UInt64) -> Bool {
+        guard let envelope = decodePersistedEnvelope(data),
+              validateChecksum(of: envelope),
+              envelope.formatVersion == PersistenceEnvelope.currentFormatVersion else {
+            return false
         }
-        return state
+        return envelope.revision == revision
     }
 
     private static func containsEnvelopeMetadata(_ data: Data) -> Bool {
@@ -794,26 +939,6 @@ enum WidgetDisplayStateStore {
             return false
         }
         return object.keys.contains { envelopeMetadataKeys.contains($0) }
-    }
-
-    private static func containsNewerPersistenceVersion(_ data: Data) -> Bool {
-        if let envelope = try? decoder.decode(PersistenceEnvelope.self, from: data) {
-            guard envelope.hasValidChecksum else { return false }
-            if envelope.formatVersion > PersistenceEnvelope.currentFormatVersion {
-                return true
-            }
-            guard envelope.formatVersion == PersistenceEnvelope.currentFormatVersion,
-                  let state = try? envelope.decode(WidgetDisplayState.self) else {
-                return false
-            }
-            return state.snapshot.schemaVersion > QuotaSnapshot.currentSchemaVersion
-        }
-
-        guard !containsEnvelopeMetadata(data),
-              let state = try? decoder.decode(WidgetDisplayState.self, from: data) else {
-            return false
-        }
-        return state.snapshot.schemaVersion > QuotaSnapshot.currentSchemaVersion
     }
 
     private static func isSupported(_ state: WidgetDisplayState) -> Bool {
@@ -824,16 +949,13 @@ enum WidgetDisplayStateStore {
             || state.snapshot.accountBoundary?.isValid == true
     }
 
-    private static func restoreEnvelopeBackup(
-        _ data: Data,
-        state: WidgetDisplayState,
-        to url: URL
-    ) -> Bool {
+    private static func restoreEnvelopeBackup(_ data: Data, to url: URL) -> Bool {
         do {
             try data.write(to: url, options: .atomic)
-            guard let readback = try? Data(contentsOf: url),
-                  readback == data,
-                  decodeEnvelope(readback) == state else {
+            // Exact readback equality preserves the validation this call already
+            // performed on the same bytes, so the restored primary is not
+            // decoded a second time.
+            guard let readback = try? Data(contentsOf: url), readback == data else {
                 PersistenceLog.logger.error("Widget state backup restore verification failed")
                 return false
             }
@@ -844,37 +966,23 @@ enum WidgetDisplayStateStore {
         }
     }
 
-    private static func encodedEnvelopeData(
-        _ envelope: PersistenceEnvelope,
-        preservingLegacyPayload state: WidgetDisplayState
-    ) throws -> Data {
+    private static func encodedEnvelopeData(payload: Data, revision: UInt64) throws -> Data {
+        let envelope = PersistenceEnvelope(payload: payload, revision: revision)
         guard var envelopeObject = try JSONSerialization.jsonObject(
             with: encoder.encode(envelope)
         ) as? [String: Any],
-              let legacyObject = try JSONSerialization.jsonObject(
-                with: encoder.encode(state)
-              ) as? [String: Any] else {
+              let legacyObject = try JSONSerialization.jsonObject(with: payload) as? [String: Any] else {
             throw PersistenceError.invalidEnvelopeEncoding
         }
 
         // Keep the payload fields at the top level for older Widget extensions
         // that predate the checksummed envelope and decode WidgetDisplayState
-        // directly. New readers still verify the envelope checksum first.
+        // directly. New readers still verify the envelope checksum first. The
+        // payload bytes come from the single encode of `state`.
         for (key, value) in legacyObject {
             envelopeObject[key] = value
         }
         return try JSONSerialization.data(withJSONObject: envelopeObject, options: [.sortedKeys])
-    }
-
-    private static func envelopeRevision(_ data: Data) -> UInt64? {
-        guard let envelope = try? decoder.decode(PersistenceEnvelope.self, from: data),
-              envelope.hasValidChecksum,
-              envelope.formatVersion == PersistenceEnvelope.currentFormatVersion,
-              let state = try? envelope.decode(WidgetDisplayState.self),
-              isSupported(state) else {
-            return nil
-        }
-        return envelope.revision
     }
 
     private static func quarantine(url: URL, fileManager: FileManager) {

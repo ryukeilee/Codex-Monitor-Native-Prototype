@@ -382,6 +382,115 @@ final class OptimizationBenchmarkTests: XCTestCase {
             XCTAssertEqual(commitDecodes, iterations * 6)
         }
     }
+
+    /// One widget-state load used to classify the same primary bytes through
+    /// `containsNewerPersistenceVersion` and `decodeEnvelope`, and one commit
+    /// classified them four more times before encoding the same
+    /// `WidgetDisplayState` twice. This measures save+load pairs end to end, so
+    /// the same benchmark can be run against the pre-change store in an isolated
+    /// copy of the repository. The `scaled` payload makes the JSON work
+    /// measurable; the `realistic` payload is roughly what a refresh publishes,
+    /// where file I/O dominates.
+    func testWidgetDisplayStateStoreBaseline() throws {
+        guard ProcessInfo.processInfo.environment["CODEX_MONITOR_BENCHMARK"] == "1" else {
+            throw XCTSkip("Opt-in performance comparison")
+        }
+        let groupURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("OptimizationBenchmarkTests.widgetState.\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: groupURL) }
+        let fileManager = BenchmarkWidgetStateFileManager(groupURL: groupURL)
+        let now = Date(timeIntervalSince1970: 1_000)
+
+        func makeState(windowCount: Int, creditCount: Int, bankCount: Int) -> WidgetDisplayState {
+            WidgetDisplayState.make(
+                snapshot: QuotaSnapshot(
+                    weeklyQuotaPercent: 72,
+                    fiveHourQuotaPercent: 69,
+                    resetAvailableCount: 3,
+                    resetCreditDetailsState: .detailed,
+                    resetCreditDetails: (0..<creditCount).map {
+                        ResetCreditDetailSnapshot(
+                            ordinal: $0,
+                            status: "available",
+                            grantedAt: now,
+                            expiresAt: now.addingTimeInterval(Double($0) * 600 + 600)
+                        )
+                    },
+                    resetBanks: (0..<bankCount).map {
+                        ResetBankSnapshot(
+                            limitId: "codex",
+                            windowId: "bank-\($0)",
+                            displayName: "Bank \($0)",
+                            remainingPercent: 72 - $0,
+                            resetAt: now.addingTimeInterval(3_600)
+                        )
+                    },
+                    refreshedAt: now,
+                    dataSource: .real,
+                    quotaWindows: (0..<windowCount).map {
+                        QuotaWindow(
+                            limitId: "codex",
+                            windowId: "window-\($0)",
+                            kind: $0.isMultiple(of: 2) ? .weekly : .fiveHour,
+                            durationMinutes: 10_080 + $0,
+                            remainingPercent: 100 - $0 % 100,
+                            resetAt: now.addingTimeInterval(Double($0) * 60)
+                        )
+                    },
+                    accountBoundary: .testDefault
+                ),
+                status: .success,
+                lastSuccessAt: now,
+                lastAttemptAt: now,
+                effectiveFiveHourResetAt: now,
+                savedAt: now
+            )
+        }
+
+        let payloads = [
+            (label: "scaled", state: makeState(windowCount: 256, creditCount: 64, bankCount: 8)),
+            (label: "realistic", state: makeState(windowCount: 4, creditCount: 3, bankCount: 2))
+        ]
+        for payload in payloads {
+            XCTAssertTrue(WidgetDisplayStateStore.save(payload.state, fileManager: fileManager))
+        }
+
+        let iterations = 100
+        for payload in payloads {
+            for round in 0..<5 {
+                var start = Date()
+                for _ in 0..<iterations {
+                    XCTAssertTrue(WidgetDisplayStateStore.save(payload.state, fileManager: fileManager))
+                }
+                let save = Date().timeIntervalSince(start)
+
+                start = Date()
+                for _ in 0..<iterations {
+                    XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager), payload.state)
+                }
+                let load = Date().timeIntervalSince(start)
+                print(
+                    "BENCH widget-state[\(payload.label)] round=\(round) iterations=\(iterations) "
+                        + "save=\(save) load=\(load) combined=\(save + load)"
+                )
+            }
+        }
+    }
+}
+
+/// Routes the widget state store at an isolated directory, like the other
+/// widget-state test file managers, without sharing their private types.
+private final class BenchmarkWidgetStateFileManager: FileManager {
+    private let groupURL: URL
+
+    init(groupURL: URL) {
+        self.groupURL = groupURL
+        super.init()
+    }
+
+    override func containerURL(forSecurityApplicationGroupIdentifier groupIdentifier: String) -> URL? {
+        groupURL
+    }
 }
 
 /// Replays the decode passes the pre-change commit performed beyond the single
