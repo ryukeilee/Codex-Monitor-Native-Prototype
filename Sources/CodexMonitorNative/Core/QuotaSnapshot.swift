@@ -710,13 +710,21 @@ struct QuotaSnapshot: Codable, Equatable {
             return []
         }
 
+        // Index the cache once by semantic identity, keeping the first
+        // displayable window per identity, so each fallback lookup below is a
+        // single dictionary read instead of another scan of the cache.
+        var cachedByIdentity: [String: QuotaWindow] = [:]
+        for cached in cachedSnapshot.quotaWindows where cached.state.isDisplayable {
+            if cachedByIdentity[cached.semanticIdentity] == nil {
+                cachedByIdentity[cached.semanticIdentity] = cached
+            }
+        }
+
         var merged = quotaWindows
         for index in merged.indices {
             let current = merged[index]
             guard !current.state.isCurrent,
-                  let cached = cachedSnapshot.quotaWindows.first(where: {
-                      $0.semanticIdentity == current.semanticIdentity && $0.state.isDisplayable
-                  }) else {
+                  let cached = cachedByIdentity[current.semanticIdentity] else {
                 continue
             }
             merged[index] = QuotaWindow(
@@ -730,7 +738,9 @@ struct QuotaSnapshot: Codable, Equatable {
             )
         }
 
-        let identities = Set(merged.map(\.semanticIdentity))
+        // Replacing a window in place keeps its semantic identity, so the
+        // identities already merged are exactly those of `quotaWindows`.
+        let identities = Set(quotaWindows.map(\.semanticIdentity))
         for cached in cachedSnapshot.quotaWindows where cached.state.isDisplayable && !identities.contains(cached.semanticIdentity) {
             merged.append(
                 QuotaWindow(
