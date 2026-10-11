@@ -30,6 +30,30 @@ struct SnapshotStore {
         return created
     }
 
+    // MARK: - Test instrumentation
+
+#if DEBUG
+    /// Counts every JSON decode this store performs against persisted state so
+    /// redundancy tests can assert that one commit validates its primary data
+    /// once instead of inferring it from timing. Compiled out of release builds.
+    private static let decodeCountLock = NSLock()
+    nonisolated(unsafe) private static var decodeCount = 0
+
+    static var debugPersistenceDecodeCount: Int {
+        decodeCountLock.lock()
+        defer { decodeCountLock.unlock() }
+        return decodeCount
+    }
+
+    private static func recordPersistenceDecode() {
+        decodeCountLock.lock()
+        defer { decodeCountLock.unlock() }
+        decodeCount += 1
+    }
+#else
+    private static func recordPersistenceDecode() {}
+#endif
+
     func loadSnapshot() -> QuotaSnapshot? {
         loadState()?.snapshot
     }
@@ -37,23 +61,22 @@ struct SnapshotStore {
     func loadState() -> PersistedAppState? {
         lock.lock()
         defer { lock.unlock() }
-        let primaryData = defaults.data(forKey: key)
-        if let state = decodeState(from: primaryData) {
-            return migratePersistedStateIfNeeded(state)
+        let primary = auditPersistenceData(defaults.data(forKey: key))
+        if let envelope = primary.envelope, isSupported(envelope.value) {
+            return migratePersistedStateIfNeeded(envelope.value)
         }
 
-        if let data = primaryData, let state = decodeLegacyState(from: data) {
+        if let state = primary.legacyState {
             saveStateUnlocked(state)
             AppLogger.snapshot.info("Migrated legacy snapshot schemaV\(state.snapshot.schemaVersion) to unified persistence")
             return state
         }
 
-        let primaryWasWrittenByNewerVersion = primaryData.map(containsNewerPersistenceVersion) ?? false
-        if let state = recoverStateFromBackup(preservingPrimary: primaryWasWrittenByNewerVersion) {
+        if let state = recoverStateFromBackup(preservingPrimary: primary.isNewerPersistenceVersion) {
             return state
         }
 
-        if primaryWasWrittenByNewerVersion {
+        if primary.isNewerPersistenceVersion {
             AppLogger.snapshot.error("Persisted app state uses a newer persistence version; preserving primary and starting not-connected")
             return nil
         }
@@ -87,29 +110,29 @@ struct SnapshotStore {
             AppLogger.snapshot.error("Refused to persist app state with an unsupported schema")
             return false
         }
-        guard currentData.map(containsNewerPersistenceVersion) != true else {
+        let current = auditPersistenceData(currentData)
+        guard !current.isNewerPersistenceVersion else {
             AppLogger.snapshot.error("Refused to overwrite persisted app state written by a newer persistence version")
             return false
         }
-        let current = loadEnvelope(from: currentData)
-        if let current, !isSupported(current.value) {
+        if let envelope = current.envelope, !isSupported(envelope.value) {
             AppLogger.snapshot.error("Refused to overwrite persisted app state with a newer schema")
             return false
         }
-        if let current, shouldReject(
+        if let envelope = current.envelope, shouldReject(
             state: state,
-            existing: current.value,
+            existing: envelope.value,
             allowOlderRealSnapshot: allowOlderRealSnapshot
         ) {
-            AppLogger.snapshot.info("Ignored persisted app state revision \(current.revision) because it is older or non-real")
+            AppLogger.snapshot.info("Ignored persisted app state revision \(envelope.revision) because it is older or non-real")
             return false
         }
 
-        let currentRevision = current?.revision ?? 0
-        let explicitlyInvalidatesRealSnapshot = current.map {
+        let currentRevision = current.envelope?.revision ?? 0
+        let explicitlyInvalidatesRealSnapshot = current.envelope.map {
             isExplicitRealSnapshotInvalidation(state: state, existing: $0.value)
         } ?? false
-        let crossesAccountBoundary = current.map {
+        let crossesAccountBoundary = current.envelope.map {
             isRealSnapshotBoundaryReplacement(state: state, existing: $0.value)
         } ?? false
         guard currentRevision < UInt64.max else {
@@ -118,14 +141,12 @@ struct SnapshotStore {
         }
         let nextRevision = currentRevision + 1
         do {
-            let envelope = try PersistenceEnvelope(value: state, revision: nextRevision)
-            let data = try encoder.encode(envelope)
-            let currentIsTrusted = currentData.map(isTrustedPersistenceData) == true
-            let trustedData = (currentIsTrusted ? currentData : nil)
-                ?? defaults.data(forKey: backupKey).flatMap { isTrustedPersistenceData($0) ? $0 : nil }
+            let nextEnvelope = try PersistenceEnvelope(value: state, revision: nextRevision)
+            let data = try encoder.encode(nextEnvelope)
+            let trustedData = (current.isTrusted ? currentData : nil) ?? trustedBackupData()
             if explicitlyInvalidatesRealSnapshot || crossesAccountBoundary {
                 defaults.removeObject(forKey: backupKey)
-            } else if let currentData, currentIsTrusted {
+            } else if let currentData, current.isTrusted {
                 defaults.set(currentData, forKey: backupKey)
                 // Exact readback equality preserves the validation of currentData.
                 guard defaults.data(forKey: backupKey) == currentData else {
@@ -154,16 +175,96 @@ struct SnapshotStore {
         let revision: UInt64
     }
 
-    private func decodeState(from data: Data?) -> PersistedAppState? {
-        guard let data else { return nil }
-        guard let envelope = loadEnvelope(from: data) else { return nil }
-        guard isSupported(envelope.value) else { return nil }
-        return envelope.value
+    /// One decode/validation pass over a single persisted-state datum.
+    ///
+    /// `saveState`, `saveStateUnlocked`, `loadState`, and backup recovery all
+    /// need the same facts about the primary or backup bytes: whether a newer
+    /// persistence version wrote them, whether their schema is supported, their
+    /// revision, and their decode-backed trustworthiness. Classifying the datum
+    /// once keeps those answers consistent and removes the repeated envelope,
+    /// payload, and raw-snapshot parses those call sites used to run
+    /// independently.
+    private struct PersistenceDataAudit {
+        /// Present when the datum is a current-format envelope whose checksum
+        /// and payload both decode. The payload is retained even when its schema
+        /// is out of range so callers can report that instead of trusting it.
+        let envelope: DecodedEnvelope<PersistedAppState>?
+        /// The unwrapped legacy state, decoded only when the envelope path
+        /// cannot describe the datum.
+        let legacyState: PersistedAppState?
+        let isNewerPersistenceVersion: Bool
+        let isTrusted: Bool
+    }
+
+    private func auditPersistenceData(_ data: Data?) -> PersistenceDataAudit {
+        guard let data else {
+            return PersistenceDataAudit(
+                envelope: nil,
+                legacyState: nil,
+                isNewerPersistenceVersion: false,
+                isTrusted: false
+            )
+        }
+
+        var envelope: DecodedEnvelope<PersistedAppState>?
+        var isNewerPersistenceVersion = false
+        // A structurally valid envelope with a broken checksum was never probed
+        // for a newer raw snapshot; keep that behavior while sharing the probe
+        // with the structural-failure path. The probe itself must stay
+        // unconditional otherwise: JSON decodes `"weeklyQuota\u0050ercent"` to
+        // the legacy key, so only a real decode can rule a raw snapshot out.
+        var shouldProbeRawSnapshot = true
+
+        if let rawEnvelope = decodeEnvelope(from: data) {
+            if !rawEnvelope.hasValidChecksum {
+                shouldProbeRawSnapshot = false
+            } else if rawEnvelope.formatVersion > PersistenceEnvelope.currentFormatVersion {
+                isNewerPersistenceVersion = true
+                shouldProbeRawSnapshot = false
+            } else if rawEnvelope.formatVersion == PersistenceEnvelope.currentFormatVersion,
+                      let value = decodePayload(from: rawEnvelope) {
+                if value.schemaVersion > PersistedAppState.currentSchemaVersion
+                    || value.snapshot.schemaVersion > QuotaSnapshot.currentSchemaVersion {
+                    isNewerPersistenceVersion = true
+                } else {
+                    envelope = DecodedEnvelope(value: value, revision: rawEnvelope.revision)
+                }
+            }
+        }
+
+        if !isNewerPersistenceVersion, shouldProbeRawSnapshot,
+           (decodeRawSnapshot(data)?.schemaVersion ?? 0) > QuotaSnapshot.currentSchemaVersion {
+            isNewerPersistenceVersion = true
+        }
+
+        let envelopeIsSupported = envelope.map { isSupported($0.value) } ?? false
+        // An unsupported envelope still falls back to the legacy shape: the old
+        // `decodeState` reported it as "no state" and let `loadState` try
+        // `decodeLegacyState`, which made a hand-written hybrid recoverable.
+        let legacyState = envelopeIsSupported ? nil : decodeLegacyState(from: data)
+        return PersistenceDataAudit(
+            envelope: envelope,
+            legacyState: legacyState,
+            isNewerPersistenceVersion: isNewerPersistenceVersion,
+            isTrusted: envelopeIsSupported || (envelope == nil && legacyState != nil)
+        )
+    }
+
+    private func decodeEnvelope(from data: Data) -> PersistenceEnvelope? {
+        Self.recordPersistenceDecode()
+        return try? decoder.decode(PersistenceEnvelope.self, from: data)
+    }
+
+    private func decodePayload(from envelope: PersistenceEnvelope) -> PersistedAppState? {
+        Self.recordPersistenceDecode()
+        return try? decoder.decode(PersistedAppState.self, from: envelope.payload)
     }
 
     private func loadEnvelope(from data: Data?) -> DecodedEnvelope<PersistedAppState>? {
-        guard let data, let envelope = try? decoder.decode(PersistenceEnvelope.self, from: data),
-              let value = try? envelope.decode(PersistedAppState.self) else {
+        guard let data, let envelope = decodeEnvelope(from: data),
+              envelope.hasValidChecksum,
+              envelope.formatVersion == PersistenceEnvelope.currentFormatVersion,
+              let value = decodePayload(from: envelope) else {
             return nil
         }
         return DecodedEnvelope(value: value, revision: envelope.revision)
@@ -188,12 +289,14 @@ struct SnapshotStore {
 
     private func recoverStateFromBackup(preservingPrimary: Bool) -> PersistedAppState? {
         let backup = defaults.data(forKey: backupKey)
+        let backupAudit = auditPersistenceData(backup)
+
         if preservingPrimary {
-            if let backup, let state = decodeState(from: backup) {
+            if let envelope = backupAudit.envelope, isSupported(envelope.value) {
                 AppLogger.snapshot.error("Persisted app state uses a newer version; using backup without replacing primary")
-                return migratePersistedStateIfNeeded(state, persist: false)
+                return migratePersistedStateIfNeeded(envelope.value, persist: false)
             }
-            if let backup, let state = decodeLegacyState(from: backup) {
+            if let state = backupAudit.legacyState {
                 AppLogger.snapshot.error("Persisted app state uses a newer version; using legacy backup without replacing primary")
                 return state
             }
@@ -202,13 +305,15 @@ struct SnapshotStore {
 
         quarantinePrimary()
 
-        if let backup, let state = decodeState(from: backup) {
+        guard let backup else { return nil }
+
+        if let envelope = backupAudit.envelope, isSupported(envelope.value) {
             defaults.set(backup, forKey: key)
             AppLogger.snapshot.error("Recovered persisted app state from backup after primary corruption")
-            return migratePersistedStateIfNeeded(state)
+            return migratePersistedStateIfNeeded(envelope.value)
         }
 
-        if let backup, let state = decodeLegacyState(from: backup) {
+        if let state = backupAudit.legacyState {
             saveStateUnlocked(state)
             AppLogger.snapshot.error("Recovered legacy snapshot from backup after primary corruption")
             return state
@@ -222,22 +327,6 @@ struct SnapshotStore {
             && (1...QuotaSnapshot.currentSchemaVersion).contains(state.snapshot.schemaVersion)
     }
 
-    private func containsNewerPersistenceVersion(_ data: Data) -> Bool {
-        if let envelope = try? decoder.decode(PersistenceEnvelope.self, from: data) {
-            guard envelope.hasValidChecksum else { return false }
-            if envelope.formatVersion > PersistenceEnvelope.currentFormatVersion {
-                return true
-            }
-            if envelope.formatVersion == PersistenceEnvelope.currentFormatVersion,
-               let state = try? envelope.decode(PersistedAppState.self),
-               (state.schemaVersion > PersistedAppState.currentSchemaVersion
-                || state.snapshot.schemaVersion > QuotaSnapshot.currentSchemaVersion) {
-                return true
-            }
-        }
-        return (decodeRawSnapshot(data)?.schemaVersion ?? 0) > QuotaSnapshot.currentSchemaVersion
-    }
-
     private func isTrustedPersistenceData(_ data: Data) -> Bool {
         if let envelope = loadEnvelope(from: data) {
             return isSupported(envelope.value)
@@ -245,7 +334,15 @@ struct SnapshotStore {
         return decodeLegacyState(from: data) != nil
     }
 
+    private func trustedBackupData() -> Data? {
+        guard let data = defaults.data(forKey: backupKey), isTrustedPersistenceData(data) else {
+            return nil
+        }
+        return data
+    }
+
     private func decodeRawSnapshot(_ data: Data) -> QuotaSnapshot? {
+        Self.recordPersistenceDecode()
         if let snapshot = try? decoder.decode(QuotaSnapshot.self, from: data) {
             return snapshot
         }
@@ -255,6 +352,7 @@ struct SnapshotStore {
             let fiveHourQuotaPercent: Int
             let refreshedAt: Date
         }
+        Self.recordPersistenceDecode()
         guard let legacy = try? decoder.decode(LegacySnapshot.self, from: data) else { return nil }
         return QuotaSnapshot(
             weeklyQuotaPercent: legacy.weeklyQuotaPercent,
@@ -276,6 +374,7 @@ struct SnapshotStore {
     }
 
     private func hasSchemaVersion(in data: Data) -> Bool {
+        Self.recordPersistenceDecode()
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
         return object["schemaVersion"] != nil
     }
@@ -286,11 +385,12 @@ struct SnapshotStore {
             AppLogger.snapshot.error("Cannot migrate app state with an unsupported schema")
             return
         }
-        guard currentData.map(containsNewerPersistenceVersion) != true else {
+        let current = auditPersistenceData(currentData)
+        guard !current.isNewerPersistenceVersion else {
             AppLogger.snapshot.error("Cannot migrate over app state written by a newer persistence version")
             return
         }
-        let currentRevision = loadEnvelope(from: currentData)?.revision ?? 0
+        let currentRevision = current.envelope?.revision ?? 0
         guard currentRevision < UInt64.max else {
             AppLogger.snapshot.error("Cannot migrate app state: revision reached UInt64.max")
             return
@@ -298,10 +398,8 @@ struct SnapshotStore {
         let nextRevision = currentRevision + 1
         do {
             let data = try encoder.encode(PersistenceEnvelope(value: state, revision: nextRevision))
-            let currentIsTrusted = currentData.map(isTrustedPersistenceData) == true
-            let trustedData = (currentIsTrusted ? currentData : nil)
-                ?? defaults.data(forKey: backupKey).flatMap { isTrustedPersistenceData($0) ? $0 : nil }
-            if let currentData, currentIsTrusted {
+            let trustedData = (current.isTrusted ? currentData : nil) ?? trustedBackupData()
+            if let currentData, current.isTrusted {
                 defaults.set(currentData, forKey: backupKey)
                 // Exact readback equality preserves the validation of currentData.
                 guard defaults.data(forKey: backupKey) == currentData else {

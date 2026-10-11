@@ -293,6 +293,117 @@ final class OptimizationBenchmarkTests: XCTestCase {
             )
         }
     }
+
+    /// A commit that replaced an already-valid primary used to validate that
+    /// datum three separate times (`containsNewerPersistenceVersion`,
+    /// `loadEnvelope`, and `isTrustedPersistenceData`). The single-pass audit now
+    /// performs the first of those validation passes plus the write readback, so
+    /// this replays exactly the second and third envelope validations and their
+    /// payload decodes — the four decode passes that were removed. Because the
+    /// old commit performed the same audit-equivalent and write work, its cost
+    /// is `commit + removedValidation`.
+    func testSnapshotStoreRedundantValidationBaseline() throws {
+        guard ProcessInfo.processInfo.environment["CODEX_MONITOR_BENCHMARK"] == "1" else {
+            throw XCTSkip("Opt-in performance comparison")
+        }
+        let suite = "OptimizationBenchmarkTests.snapshot.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = SnapshotStore(defaults: defaults, key: "benchmark")
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 72,
+            fiveHourQuotaPercent: 69,
+            resetAvailableCount: 2,
+            resetCreditDetails: (0..<4).map {
+                ResetCreditDetailSnapshot(
+                    ordinal: $0,
+                    status: "available",
+                    grantedAt: Date(timeIntervalSince1970: 800),
+                    expiresAt: Date(timeIntervalSince1970: 4_000 + Double($0) * 600)
+                )
+            },
+            resetBanks: (0..<3).map {
+                ResetBankSnapshot(
+                    limitId: "codex",
+                    windowId: "w\($0)",
+                    displayName: "Bank \($0)",
+                    remainingPercent: 72 - $0,
+                    resetAt: Date(timeIntervalSince1970: 5_000)
+                )
+            },
+            refreshedAt: Date(timeIntervalSince1970: 1_000),
+            dataSource: .real,
+            quotaWindows: (0..<4).map {
+                QuotaWindow(
+                    limitId: "codex",
+                    windowId: "w\($0)",
+                    kind: .weekly,
+                    durationMinutes: 10_080,
+                    remainingPercent: 72 - $0,
+                    resetAt: Date(timeIntervalSince1970: 5_000)
+                )
+            },
+            accountBoundary: .testDefault
+        )
+        let state = PersistedAppState(
+            snapshot: snapshot,
+            status: .success,
+            lastSuccessAt: snapshot.refreshedAt,
+            lastAttemptAt: nil,
+            failureCount: 0
+        )
+        XCTAssertTrue(store.saveState(state))
+        let primary = try XCTUnwrap(defaults.data(forKey: "benchmark"))
+
+        XCTAssertEqual(removedValidationDecodeCount(of: primary), 4)
+
+        let iterations = 200
+        for round in 0..<5 {
+            var start = Date()
+            for _ in 0..<iterations {
+                _ = removedValidationDecodeCount(of: primary)
+            }
+            let removedValidation = Date().timeIntervalSince(start)
+
+            let decodeBaseline = SnapshotStore.debugPersistenceDecodeCount
+            start = Date()
+            for _ in 0..<iterations {
+                XCTAssertTrue(store.saveState(state))
+            }
+            let commit = Date().timeIntervalSince(start)
+            let commitDecodes = SnapshotStore.debugPersistenceDecodeCount - decodeBaseline
+
+            print(
+                "BENCH snapshot-store round=\(round) iterations=\(iterations) "
+                    + "legacyCommitDecodes=\(iterations * 10) commitDecodes=\(commitDecodes) "
+                    + "removedValidation=\(removedValidation) commit=\(commit) "
+                    + "estimatedLegacyCommit=\(removedValidation + commit)"
+            )
+            XCTAssertEqual(commitDecodes, iterations * 6)
+        }
+    }
+}
+
+/// Replays the decode passes the pre-change commit performed beyond the single
+/// audit and the write readback that remain: the second envelope validation from
+/// `loadEnvelope`, the third from `isTrustedPersistenceData`, and both payload
+/// decodes. Returns how many JSON decodes it performed.
+private func removedValidationDecodeCount(of data: Data) -> Int {
+    let decoder = JSONDecoder()
+    var decodes = 0
+
+    func count<T: Decodable>(_ decode: () -> T?) -> T? {
+        decodes += 1
+        return decode()
+    }
+
+    // `loadEnvelope` followed by `isTrustedPersistenceData`'s `loadEnvelope`.
+    for _ in 0..<2 {
+        if let envelope = count({ try? decoder.decode(PersistenceEnvelope.self, from: data) }) {
+            _ = count { try? envelope.decode(PersistedAppState.self) }
+        }
+    }
+    return decodes
 }
 
 /// Yields the given snapshots once, then keeps returning the last one so the
