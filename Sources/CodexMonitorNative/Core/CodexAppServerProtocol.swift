@@ -143,12 +143,16 @@ enum CodexAppServerCodec {
     /// `JSONSerialization` probe for the top-level shape followed by `JSONDecoder`) and paid the
     /// decoder's per-node `try?` cascade for values it immediately discarded.
     ///
-    /// `JSONSerialization` carries numbers as `NSNumber`. Decimal storage is read back through the
-    /// exact decimal text, so those values keep the written digits; an integer written with more
-    /// digits than a double can carry is already rounded when it is stored as a plain double, and
-    /// the previous `JSONDecoder` pass read the written digits instead. See
-    /// `docs/optimization-2026-10-11-rpc-parse.md` and `CodexAppServerProtocolTests` for the pinned
-    /// cases.
+    /// `JSONSerialization` carries numbers as `NSNumber`. Integer storage keeps the written value
+    /// exactly and decimal storage is read back through its exact decimal text, but floating-point
+    /// storage keeps only the double image: a written number that needs more precision than a
+    /// double carries has already been rounded by then. The pre-change `JSONDecoder` pass converted
+    /// the written digits instead, so a float-syntax literal with more significant digits than a
+    /// double carries reads differently here. The bound is measured by magnitude, not by digit
+    /// count: `[2^50,2^54)` showed no difference in 80000 sampled shortest-round-trip texts, and
+    /// differences appear from 2^54 upward, far above every number the quota path consumes or the
+    /// real app-server emits. See `docs/optimization-2026-10-11-rpc-parse.md` and
+    /// `CodexAppServerProtocolTests` for the measured bound and the pinned cases.
     static func decodeLine(_ data: Data) throws -> CodexAppServerMessage {
         let json: Any
         do {
@@ -203,11 +207,19 @@ enum CodexAppServerCodec {
 ///   and any other number is not an identifier.
 /// - A key that is absent, or present with JSON `null`, is not a value (`data`, `params`), while a
 ///   `null` `result` is the response payload because the response role makes it one.
-/// - Decimal-stored numbers are read through their exact decimal text (`double(from:)`), so they
-///   keep the written value. An integer whose digits exceed what a double carries and that
-///   `JSONSerialization` stored as a plain double keeps only the double image of those digits; the
-///   pre-change `JSONDecoder` pass read the written digits instead. Those inputs are pinned by
-///   `CodexAppServerProtocolTests` and listed in `docs/optimization-2026-10-11-rpc-parse.md`.
+/// - Decimal-stored numbers are read through their exact decimal text (`double(from:)`) so they
+///   keep the written value as a double, because `NSDecimalNumber.doubleValue` is not correctly
+///   rounded for them; that is what keeps ordinary percentages exact.
+/// - Floating-point storage is read as the double's image: an integral double becomes `.integer`
+///   when it denotes an `Int64`. A double does not always carry the digits that were written
+///   (`1.152921504606847e+18` denotes `1152921504606847000` but is the double
+///   `1152921504606846976`), and the pre-change `JSONDecoder` pass converted those written digits,
+///   so the two decoders differ for a float-syntax literal with more significant digits than a
+///   double carries. The bound is measured by magnitude: `[2^50,2^54)` showed no difference in
+///   80000 sampled shortest-round-trip texts and differences appear from 2^54 upward; the quota
+///   path consumes no value of that size, so no quota decision can be affected. Those inputs are
+///   pinned by `CodexAppServerProtocolTests` and measured in
+///   `docs/optimization-2026-10-11-rpc-parse.md`.
 private enum CodexAppServerMessageDecoder {
     static func message(from object: [String: Any]) throws -> CodexAppServerMessage {
         let hasResult = object["result"] != nil
@@ -361,6 +373,11 @@ private enum CodexAppServerMessageDecoder {
             guard double.isFinite, double.rounded() == double else {
                 return nil
             }
+            // The double image, not the written digits: floating-point storage has already lost
+            // whatever precision the written number had beyond the double, so the digits are not
+            // available here. See `CodexAppServerMessageDecoder` for the affected family and its
+            // measured bound.
+            //
             // Every written value in (-9223372036854776832, -9223372036854775809] shares
             // `Int64.min`'s double image, so a floating-point number is never read as
             // `Int64.min`; that exact value still arrives through integer storage.
