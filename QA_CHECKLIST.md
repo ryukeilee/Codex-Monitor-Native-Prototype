@@ -164,6 +164,13 @@ AppKit / `os_log` 会将错误载荷脱敏为 `<private>`，因此失败路径�
 
 此项不是可机检项：`widgetRenderingMode` 分支只有在系统实际以 accented 渲染时才生效，XCTest 与 SwiftUI preview 无法复现桌面渲染模式。该人工门禁源于提交 `e3288e6` 修复的 macOS 27 accented 渲染问题。
 
+### 8. 启动窗口外观
+
+历史回归：`@main` 的 SwiftUI `App` 若只声明一个空 `Settings` 场景，SwiftUI 会在冷启动以及选择“设置…”时呈现空的 `CodexMonitorNative Settings` 窗口。这是 `NSApplication` 启动路径行为，XCTest 宿主无法覆盖，因此列为人工门禁。
+
+- [ ] 冷启动（双击 App / `open -a`）后只出现菜单栏状态项，不出现任何空白窗口
+- [ ] App 已运行时再次“打开”App，只显示现有 owner 的 Popover，不出现空白窗口
+
 ## D. 记录区
 
 记录本次发布前检查：
