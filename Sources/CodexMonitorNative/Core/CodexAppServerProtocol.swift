@@ -135,25 +135,85 @@ enum CodexAppServerProtocolViolation: Error, Sendable, Equatable {
     case invalidMessage
 }
 
+/// One inbound protocol frame read straight from the object `JSONSerialization` produced.
+///
+/// This is the representation the production client consumes: a response payload stays the
+/// Foundation object the single parse already built, so `RealQuotaProvider` reads it without an
+/// intermediate typed value tree or a `foundationObject()` conversion back. `message()` builds the
+/// typed `CodexAppServerMessage` the wire-contract tests assert, from the same validated values.
+enum CodexAppServerInboundFrame {
+    case response(id: CodexAppServerRequestID, result: Any)
+    case error(id: CodexAppServerRequestID, error: CodexAppServerRemoteError)
+    case request(id: CodexAppServerRequestID, method: String, params: CodexAppServerJSONValue?)
+    case notification(method: String, params: CodexAppServerJSONValue?)
+}
+
+extension CodexAppServerInboundFrame {
+    /// Builds the typed protocol message. Only the raw response payload still needs converting; the
+    /// other roles keep the typed values the frame decoder already built from the single parse.
+    func message() throws -> CodexAppServerMessage {
+        switch self {
+        case .response(let id, let result):
+            return .response(id: id, result: try CodexAppServerMessageDecoder.value(from: result))
+        case .error(let id, let error):
+            return .error(id: id, error: error)
+        case .request(let id, let method, let params):
+            return .request(id: id, method: method, params: params)
+        case .notification(let method, let params):
+            return .notification(method: method, params: params)
+        }
+    }
+}
+
 enum CodexAppServerCodec {
+    /// Decodes one newline-delimited protocol frame into the inbound representation.
+    ///
+    /// The line is parsed once and a response payload is kept as the Foundation object that pass
+    /// produced: no value tree is constructed and nothing is converted back. The same pass rejects
+    /// a non-finite number anywhere in a payload, because `JSONSerialization` accepts `-1e400` as
+    /// `-infinity` where the pre-change `JSONDecoder` refused non-finite numbers. See
+    /// `CodexAppServerMessageDecoder` for the numeric typing that is the wire contract inherited
+    /// from the previous decoder, and `docs/optimization-2026-10-11-rpc-parse.md` plus
+    /// `CodexAppServerProtocolTests` for the measured bound and the pinned cases.
+    static func decodeInboundFrame(_ data: Data) throws -> CodexAppServerInboundFrame {
+        try decodeFrame(from: data, validating: true)
+    }
+
     /// Decodes one newline-delimited protocol frame.
     ///
-    /// The line is parsed once: `JSONSerialization` produces the Foundation object that the
-    /// message is read from. The previous implementation parsed every line twice (a
-    /// `JSONSerialization` probe for the top-level shape followed by `JSONDecoder`) and paid the
-    /// decoder's per-node `try?` cascade for values it immediately discarded.
-    ///
-    /// `JSONSerialization` carries numbers as `NSNumber`. Integer storage keeps the written value
-    /// exactly and decimal storage is read back through its exact decimal text, but floating-point
-    /// storage keeps only the double image: a written number that needs more precision than a
-    /// double carries has already been rounded by then. The pre-change `JSONDecoder` pass converted
-    /// the written digits instead, so a float-syntax literal with more significant digits than a
-    /// double carries reads differently here. The bound is measured by magnitude, not by digit
-    /// count: `[2^50,2^54)` showed no difference in 80000 sampled shortest-round-trip texts, and
-    /// differences appear from 2^54 upward, far above every number the quota path consumes or the
-    /// real app-server emits. See `docs/optimization-2026-10-11-rpc-parse.md` and
-    /// `CodexAppServerProtocolTests` for the measured bound and the pinned cases.
+    /// The previous implementation parsed every line twice (a `JSONSerialization` probe for the
+    /// top-level shape followed by `JSONDecoder`) and paid the decoder's per-node `try?` cascade
+    /// for values it immediately discarded. This shares the single `JSONSerialization` pass with
+    /// `decodeInboundFrame`; `message()` validates the payload while it converts it to the value
+    /// tree, so the frame extraction skips its own scan and the typed path keeps one traversal.
     static func decodeLine(_ data: Data) throws -> CodexAppServerMessage {
+        try decodeFrame(from: data, validating: false).message()
+    }
+
+    /// The Foundation number the typed value tree exposes for one raw JSON number.
+    ///
+    /// A raw payload keeps the storage `JSONSerialization` chose, while the typed tree maps an
+    /// integral number that fits `Int64` to that integer and every other finite number to its
+    /// double image. Callers that read raw numbers use this to see the value the decoded tree held,
+    /// which is what the removed `foundationObject()` handed the parser.
+    static func foundationNumber(from rawNumber: NSNumber) -> NSNumber {
+        CodexAppServerMessageDecoder.foundationNumber(from: rawNumber)
+    }
+
+    /// Compares two raw JSON values the way the typed value tree compared them.
+    ///
+    /// `NSObject.isEqual` alone compares an integer-stored and a floating-stored number after a
+    /// lossy conversion (so `9007199254740993` would equal `9007199254740993.0`), while the typed
+    /// tree mapped them to different integers. This applies the same numeric contract recursively
+    /// so a caller comparing raw payloads sees the decoded tree's equality.
+    static func rawValuesAreEqual(_ lhs: Any, _ rhs: Any) -> Bool {
+        CodexAppServerMessageDecoder.rawValuesAreEqual(lhs, rhs)
+    }
+
+    private static func decodeFrame(
+        from data: Data,
+        validating: Bool
+    ) throws -> CodexAppServerInboundFrame {
         let json: Any
         do {
             json = try JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
@@ -165,7 +225,7 @@ enum CodexAppServerCodec {
             throw CodexAppServerProtocolViolation.topLevelNotObject
         }
 
-        return try CodexAppServerMessageDecoder.message(from: object)
+        return try CodexAppServerMessageDecoder.frame(from: object, validating: validating)
     }
 
     static func encodeRequest(
@@ -221,7 +281,10 @@ enum CodexAppServerCodec {
 ///   pinned by `CodexAppServerProtocolTests` and measured in
 ///   `docs/optimization-2026-10-11-rpc-parse.md`.
 private enum CodexAppServerMessageDecoder {
-    static func message(from object: [String: Any]) throws -> CodexAppServerMessage {
+    static func frame(
+        from object: [String: Any],
+        validating: Bool
+    ) throws -> CodexAppServerInboundFrame {
         let hasResult = object["result"] != nil
         let hasError = object["error"] != nil
         let hasMethod = object["method"] != nil
@@ -234,9 +297,11 @@ private enum CodexAppServerMessageDecoder {
             guard let id = object["id"] else {
                 throw CodexAppServerProtocolViolation.missingID
             }
+            let requestID = try requestID(from: id)
+            let result = object["result"]!
             return .response(
-                id: try requestID(from: id),
-                result: try value(from: object["result"]!)
+                id: requestID,
+                result: validating ? try finiteValue(from: result) : result
             )
         }
 
@@ -244,16 +309,16 @@ private enum CodexAppServerMessageDecoder {
             guard let id = object["id"] else {
                 throw CodexAppServerProtocolViolation.missingID
             }
-            return .error(
-                id: try requestID(from: id),
-                error: try remoteError(from: object["error"]!)
-            )
+            let requestID = try requestID(from: id)
+            return .error(id: requestID, error: try remoteError(from: object["error"]!))
         }
 
         if hasMethod {
             guard let method = object["method"] as? String else {
                 throw CodexAppServerProtocolViolation.invalidMessage
             }
+            // Params are decoded to the value tree before the id, exactly as the previous decoder
+            // did. The typed message reuses this value, so the payload is traversed once.
             let params = try optionalValue(from: object["params"])
             guard let id = object["id"] else {
                 return .notification(method: method, params: params)
@@ -262,6 +327,42 @@ private enum CodexAppServerMessageDecoder {
         }
 
         throw CodexAppServerProtocolViolation.missingMessageRole
+    }
+
+    /// Validates that every number in a raw payload is finite and returns the value unchanged.
+    ///
+    /// `JSONSerialization` accepts `-1e400` as `-infinity` where the pre-change `JSONDecoder`
+    /// refused non-finite numbers, so the payload is walked without rebuilding containers and the
+    /// frame is rejected exactly as before. This walk replaces the removed value-tree construction
+    /// on the production path.
+    static func finiteValue(from value: Any) throws -> Any {
+        if let number = value as? NSNumber {
+            if !isBoolean(number),
+               numberType(of: number) == .floatingPoint,
+               !double(from: number).isFinite {
+                throw CodexAppServerProtocolViolation.invalidMessage
+            }
+            return value
+        }
+
+        // `JSONSerialization` hands back Objective-C containers below the top level. Iterating them
+        // directly keeps the scan free of the `as? [String: Any]` bridge that would copy each
+        // container; the quota parser still bridges what it reads.
+        if let dictionary = value as? NSDictionary {
+            for (_, nested) in dictionary {
+                _ = try finiteValue(from: nested)
+            }
+            return value
+        }
+
+        if let array = value as? NSArray {
+            for element in array {
+                _ = try finiteValue(from: element)
+            }
+            return value
+        }
+
+        return value
     }
 
     static func requestID(from value: Any) throws -> CodexAppServerRequestID {
@@ -298,6 +399,53 @@ private enum CodexAppServerMessageDecoder {
             return nil
         }
         return try self.value(from: value)
+    }
+
+    /// The Foundation number the typed value tree exposes for one raw JSON number.
+    static func foundationNumber(from number: NSNumber) -> NSNumber {
+        if isBoolean(number) {
+            return NSNumber(value: number.boolValue)
+        }
+        if let integer = integer(from: number) {
+            return NSNumber(value: integer)
+        }
+        return NSNumber(value: double(from: number))
+    }
+
+    /// Recursive counterpart of `foundationNumber(from:)` for whole payload values.
+    ///
+    /// Numbers are compared through their decoded representation, while nested containers keep the
+    /// value equality Foundation's `NSArray` / `NSDictionary` applied to the converted tree (so a
+    /// boolean nested in an array still equals the number `1`). The top-level boolean/number
+    /// mismatch is enforced by `mergeAliasedValues` before it calls this.
+    static func rawValuesAreEqual(_ lhs: Any, _ rhs: Any) -> Bool {
+        if let lhsNumber = lhs as? NSNumber, let rhsNumber = rhs as? NSNumber {
+            return foundationNumber(from: lhsNumber).isEqual(foundationNumber(from: rhsNumber))
+        }
+
+        if let lhsObject = lhs as? NSDictionary, let rhsObject = rhs as? NSDictionary {
+            guard lhsObject.count == rhsObject.count else { return false }
+            for (key, value) in lhsObject {
+                guard let rhsValue = rhsObject.object(forKey: key),
+                      rawValuesAreEqual(value, rhsValue) else {
+                    return false
+                }
+            }
+            return true
+        }
+
+        if let lhsArray = lhs as? NSArray, let rhsArray = rhs as? NSArray {
+            guard lhsArray.count == rhsArray.count else { return false }
+            for index in 0..<lhsArray.count where !rawValuesAreEqual(lhsArray[index], rhsArray[index]) {
+                return false
+            }
+            return true
+        }
+
+        guard let lhsObject = lhs as? NSObject, let rhsObject = rhs as? NSObject else {
+            return false
+        }
+        return lhsObject.isEqual(rhsObject)
     }
 
     static func value(from value: Any) throws -> CodexAppServerJSONValue {

@@ -27,7 +27,7 @@
 
 保留项：`CodexAppServerProtocolViolation` 的分类与优先级、四个协议类型的取值类型与 `Equatable`/`Sendable` 语义、`foundationObject()` 与 `handleLine` 的错误映射（`protocolFrameError()`）、`params`/`data`/`result` 的可选语义、配额解析与账户边界校验。
 
-未完成项：值树构造与 `foundationObject()` 往返转换仍然存在（占优化后 `full` 的约 50% 与 7%，见下）。它们由 `CodexAppServerMessage.response(id:result:)` 的 `CodexAppServerJSONValue` 契约决定，要消除必须改变该类型的表示，属于消息类型契约变更，本轮不扩大范围。
+未完成项：值树构造与 `foundationObject()` 往返转换仍然存在（占优化后 `full` 的约 50% 与 7%，见下）。它们由 `CodexAppServerMessage.response(id:result:)` 的 `CodexAppServerJSONValue` 契约决定，要消除必须改变该类型的表示，属于消息类型契约变更，本轮不扩大范围。**后续（2026-10-13）**：生产路径已改用 `CodexAppServerInboundFrame` 直接消费原始 Foundation 载荷，类型化消息契约保留；见 `optimization-2026-10-13-rpc-inbound-frame.md`。
 
 ## 可复现 A/B 基准
 
@@ -240,7 +240,7 @@ CODEX_MONITOR_LIVE_CODEX=1 swift test --filter LiveCodexAppServerProtocolTests
 
 - **族 1（可达但本协议不可达）**：浮点语法、量级 ≥2^54 且十进制整数与 double 精确整数不同的文本（正常 f64 writer 会产生）在 `.integer` 精确值上与旧解码不同。配额路径消费的字段都远低于该量级，真实 `app-server` 也未出现浮点语法数字，因此无端到端影响；若要彻底消除，需要放弃 `JSONSerialization`（放弃本轮收益）或改变值表示以保留原始文本，代价与风险见「修复评估」。
 - **族 2–4（正常 writer 不产生）**：分数文本截断、人为超精度文本、`Int64.min` double 像内的负值浮点文本。均已用测试固定，其中族 4 会把 `id`/`code` 由接受变为拒绝（需要负值恰好落在 `-9223372036854776832…-9223372036854775809` 且写成浮点语法）。
-- **未消除的往返转换**：值树构造（占优化后 `full` 约 50%）与 `foundationObject()`（约 7%）仍在；消除它们需要改变 `CodexAppServerJSONValue` 的表示，未在本轮范围。
+- **未消除的往返转换（后续已处理）**：值树构造（占优化后 `full` 约 50%）与 `foundationObject()`（约 7%）仍在；消除它们需要改变 `CodexAppServerJSONValue` 的表示，未在本轮范围。生产路径现在改为直接消费原始 Foundation 载荷，见 `optimization-2026-10-13-rpc-inbound-frame.md`（类型化消息与其往返仍保留给契约测试）。
 - **`convert`/`parse` 阶段的小幅开销**：新值树的数字来自 `JSONSerialization`（含 `NSDecimalNumber`），下游类型判定略慢（实测 0%–10%，本轮 `convert` 为噪声级）；`full` 整体仍下降约 59%/77%。
 - **真实联调覆盖有限**：只覆盖一个账号状态与 `codex-cli 0.162.1`；不覆盖超时、进程死亡、认证失败、服务端主动请求等失败路径；需要本机 `codex` 与登录态，默认跳过（报告为 skipped 而非 passed）。
 - **计时数据来自本机 debug 构建**；仓库现有测试依赖 DEBUG 默认参数，release 配置下测试不可编译，因此没有 release 计时结论。

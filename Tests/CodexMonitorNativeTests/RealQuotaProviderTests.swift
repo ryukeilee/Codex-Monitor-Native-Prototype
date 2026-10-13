@@ -967,6 +967,120 @@ final class RealQuotaProviderTests: XCTestCase {
         await assertFailure(.responseInvalid, from: task)
     }
 
+    func testRPCClientKeepsDecimalStoredPercentageAtItsWrittenDecision() async throws {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.initializeResponse)
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+        transport.emitStdout(Data("{\"id\":2,\"result\":{\"rateLimits\":{\"primary\":{\"windowDurationMins\":300,\"usedPercent\":50},\"secondary\":{\"windowDurationMins\":10080,\"remainingPercent\":1.49999999999999985}}}}\n".utf8))
+
+        let snapshot = try await task.value
+        XCTAssertEqual(snapshot.weeklyQuotaPercent, 1)
+        XCTAssertEqual(snapshot.weeklyQuotaState, .live)
+    }
+
+    func testRPCClientRejectsNestedNonFinitePayload() async {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.initializeResponse)
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+        // The non-finite number is outside every quota field, so only the decoder's finite-number
+        // walk can reject the frame.
+        transport.emitStdout(Data("{\"id\":2,\"result\":{\"rateLimitsByLimitId\":{\"codex\":{\"primary\":{\"windowDurationMins\":300,\"usedPercent\":50}}},\"future\":{\"x\":-1e400}}}\n".utf8))
+
+        await assertFailure(.responseInvalid, from: task)
+    }
+
+    /// The production frame decoder hands `parseRateLimits` the raw Foundation payload while the
+    /// typed message path hands it the removed `foundationObject()` conversion. Both must decide
+    /// every quota field identically, including decimal-stored numbers.
+    func testRawInboundPayloadParsesLikeTheConvertedValueTree() throws {
+        var payloads = [
+            // Decimal-stored percentage and reset timestamp.
+            #"{"rateLimits":{"primary":{"windowDurationMins":300,"usedPercent":33.33},"secondary":{"windowDurationMins":10080,"remainingPercent":1.49999999999999985,"resetAt":1800000000.123}}}"#,
+            // Legacy mirror plus dynamic buckets, double counts and fractional timestamps.
+            #"{"rateLimits":{"primary":{"windowDurationMins":300,"usedPercent":12.5,"resetAt":1800000000.123},"secondary":{"windowDurationMins":10080,"usedPercent":43.75,"resetAt":1800500000.5}},"rateLimitsByLimitId":{"codex":{"primary":{"windowDurationMins":300,"usedPercent":12.5,"resetAt":1800000000.123},"secondary":{"windowDurationMins":10080,"usedPercent":43.75,"resetAt":1800500000.5}},"codex_other":{"primary":{"windowDurationMins":10080,"usedPercent":7.25,"resetAt":1800900000.25}}},"rateLimitResetCredits":{"availableCount":9007199254740993.0}}"#,
+            // Two alias spellings whose decimal texts differ but denote the same double.
+            #"{"rateLimits":{"primary":{"windowDurationMins":300,"usedPercent":33.330000000000000001}},"rate_limits":{"primary":{"windowDurationMins":300,"usedPercent":33.330000000000000002}}}"#,
+            // Alias spellings of one magnitude stored as an integer and as a float. The typed tree
+            // mapped them to different integers, so they stay a conflict on the raw path too.
+            #"{"rateLimits":{"primary":{"windowDurationMins":300,"usedPercent":50}},"rateLimitResetCredits":{"availableCount":9007199254740993},"rate_limit_reset_credits":{"availableCount":9007199254740993.0}}"#,
+            // The same pairing with the storages swapped.
+            #"{"rateLimits":{"primary":{"windowDurationMins":300,"usedPercent":50}},"rateLimitResetCredits":{"availableCount":9007199254740993.0},"rate_limit_reset_credits":{"availableCount":9007199254740993}}"#
+        ]
+
+        // Numeric grid: every literal is read once as a percentage, once as a duration, and once
+        // as a reset time, so any value whose raw read could differ from the normalized tree shows
+        // up as a projection mismatch.
+        let literals = [
+            "0", "100", "50", "33.33", "87.5", "1.49999999999999985", "0.0077740401686756605",
+            "12.499999999999998", "0.30000000000000004", "9007199254740993", "9007199254740993.0",
+            "1.152921504606847e+18", "1800000000.123", "300", "10080", "-0.0", "1e-320"
+        ]
+        for literal in literals {
+            payloads.append(
+                #"{"rateLimits":{"primary":{"windowDurationMins":300,"usedPercent":50},"secondary":{"windowDurationMins":10080,"remainingPercent":\#(literal),"resetAt":\#(literal)}}}"#
+            )
+            payloads.append(
+                #"{"rateLimits":{"primary":{"windowDurationMins":\#(literal),"usedPercent":50}}}"#
+            )
+        }
+
+        for payload in payloads {
+            let line = Data(#"{"id":2,"result":\#(payload)}"#.utf8)
+            let typed = try CodexAppServerCodec.decodeLine(line)
+            let raw = try CodexAppServerCodec.decodeInboundFrame(line)
+            guard case .response(_, let typedResult) = typed,
+                  let typedObject = typedResult.foundationObject(),
+                  case .response(_, let rawResult) = raw,
+                  let rawObject = rawResult as? [String: Any] else {
+                return XCTFail("expected response payload objects for \(payload)")
+            }
+
+            let typedSnapshot = try XCTUnwrap(RealQuotaProvider.parseRateLimits(response: typedObject))
+            let rawSnapshot = try XCTUnwrap(RealQuotaProvider.parseRateLimits(response: rawObject))
+            XCTAssertEqual(
+                QuotaDecisionProjection(rawSnapshot),
+                QuotaDecisionProjection(typedSnapshot),
+                "payload: \(payload)"
+            )
+        }
+    }
+
+    private struct QuotaDecisionProjection: Equatable {
+        let weeklyQuotaPercent: Int
+        let weeklyQuotaState: QuotaFieldState
+        let fiveHourQuotaPercent: Int
+        let fiveHourQuotaState: QuotaFieldState
+        let resetAvailableCount: Int?
+        let fiveHourResetAt: Date?
+        let quotaWindows: [QuotaWindow]
+        let resetBanks: [ResetBankSnapshot]
+
+        init(_ snapshot: QuotaSnapshot) {
+            weeklyQuotaPercent = snapshot.weeklyQuotaPercent
+            weeklyQuotaState = snapshot.weeklyQuotaState
+            fiveHourQuotaPercent = snapshot.fiveHourQuotaPercent
+            fiveHourQuotaState = snapshot.fiveHourQuotaState
+            resetAvailableCount = snapshot.resetAvailableCount
+            fiveHourResetAt = snapshot.fiveHourResetAt
+            quotaWindows = snapshot.quotaWindows
+            resetBanks = snapshot.resetBanks
+        }
+    }
+
     func testRPCClientRejectsResponseWhenEveryQuotaWindowIsMalformed() async {
         let transport = ControlledRPCTransport()
         let client = CodexRPCClient(

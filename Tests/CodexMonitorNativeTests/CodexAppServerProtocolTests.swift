@@ -371,6 +371,36 @@ final class CodexAppServerProtocolTests: XCTestCase {
         XCTAssertEqual(snapshot.quotaWindows.map(\.kind), [.unknown, .weekly])
     }
 
+    /// The production frame decoder validates numbers itself, so removing the typed message from
+    /// the production path cannot let a non-finite payload through.
+    func testInboundFrameRejectsNonFiniteWireNumbers() {
+        assertInboundViolation(.invalidMessage, line: #"{"id":1,"result":-1e400}"#)
+        assertInboundViolation(.invalidMessage, line: #"{"id":1,"result":{"x":-1e400}}"#)
+        assertInboundViolation(.invalidMessage, line: #"{"id":1,"result":[0,-1e400]}"#)
+        assertInboundViolation(.invalidMessage, line: #"{"id":1,"method":"m","params":-1e400}"#)
+        assertInboundViolation(.invalidMessage, line: #"{"method":"m","params":-1e400}"#)
+        assertInboundViolation(.invalidMessage, line: #"{"id":1,"error":{"code":1,"message":"m","data":-1e400}}"#)
+        assertInboundViolation(.invalidID, line: #"{"id":-1e400,"result":{}}"#)
+        assertInboundViolation(.invalidJSON, line: #"{"id":1,"result":1e400}"#)
+    }
+
+    /// The comparator the quota parser uses for alias merging follows the decoded number contract,
+    /// while nested containers keep the value equality the converted tree's containers had.
+    func testRawValuesAreEqualFollowsTheDecodedNumberContract() {
+        XCTAssertTrue(CodexAppServerCodec.rawValuesAreEqual(NSNumber(value: 1), NSNumber(value: 1.0)))
+        // An integer and a float whose double image is a different integer stay distinct.
+        XCTAssertFalse(
+            CodexAppServerCodec.rawValuesAreEqual(
+                NSNumber(value: 9_007_199_254_740_993),
+                NSNumber(value: 9_007_199_254_740_993.0)
+            )
+        )
+        // Foundation compared numbers nested in containers by value, so `true` equals `1` there.
+        XCTAssertTrue(CodexAppServerCodec.rawValuesAreEqual([true], [NSNumber(value: 1)]))
+        XCTAssertFalse(CodexAppServerCodec.rawValuesAreEqual([true, true], [true]))
+        XCTAssertFalse(CodexAppServerCodec.rawValuesAreEqual(["a": 1], ["a": 2]))
+    }
+
     func testEncodesRequestWithoutJSONRPCHeaderOrNewline() throws {
         let data = try CodexAppServerCodec.encodeRequest(
             id: .integer(3),
@@ -420,6 +450,21 @@ final class CodexAppServerProtocolTests: XCTestCase {
         lineNumber: UInt = #line
     ) {
         XCTAssertThrowsError(try decode(line), file: file, line: lineNumber) { error in
+            XCTAssertEqual(error as? CodexAppServerProtocolViolation, expected, file: file, line: lineNumber)
+        }
+    }
+
+    private func assertInboundViolation(
+        _ expected: CodexAppServerProtocolViolation,
+        line: String,
+        file: StaticString = #filePath,
+        lineNumber: UInt = #line
+    ) {
+        XCTAssertThrowsError(
+            try CodexAppServerCodec.decodeInboundFrame(Data(line.utf8)),
+            file: file,
+            line: lineNumber
+        ) { error in
             XCTAssertEqual(error as? CodexAppServerProtocolViolation, expected, file: file, line: lineNumber)
         }
     }

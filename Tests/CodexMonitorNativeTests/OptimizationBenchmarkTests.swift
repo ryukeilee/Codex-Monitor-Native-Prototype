@@ -480,12 +480,15 @@ final class OptimizationBenchmarkTests: XCTestCase {
     /// A rate-limit response used to be parsed twice: `JSONSerialization` validated the top-level
     /// shape and `JSONDecoder` then decoded the same line into `CodexAppServerMessage`, whose value
     /// tree `handleRateLimitsResponse` immediately converted back to a Foundation object.
-    /// `decodeLine` now reads the message straight from the parsed object, so this measures the
-    /// whole line-to-snapshot path that both trees expose: the shared codec entry point plus the
-    /// quota parser. The stage columns isolate where the work goes: `json` is one
-    /// `JSONSerialization` pass, `decode` adds `decodeLine`, `convert` adds `foundationObject()`,
-    /// `parse` is the quota parser alone on an already-converted object, and `full` is the
-    /// complete `decodeLine` → `foundationObject()` → `parseRateLimits` path.
+    /// `decodeLine` now reads the message straight from the parsed object, and the production
+    /// client goes further: `decodeInboundFrame` keeps the response payload as the Foundation
+    /// object, so nothing builds a value tree or converts it back. This measures the whole
+    /// line-to-snapshot path that both trees expose. The stage columns isolate where the work goes:
+    /// `json` is one `JSONSerialization` pass, `decode` adds the typed `decodeLine`,
+    /// `convert` adds `foundationObject()`, `parse` is the quota parser alone on an
+    /// already-converted object, `full` is the legacy `decodeLine` → `foundationObject()` →
+    /// `parseRateLimits` chain, `inbound` is the production `decodeInboundFrame`, and
+    /// `productionFull` is the production `decodeInboundFrame` → `parseRateLimits` chain.
     func testRPCLineDecodeBaseline() throws {
         guard ProcessInfo.processInfo.environment["CODEX_MONITOR_BENCHMARK"] == "1" else {
             throw XCTSkip("Opt-in performance comparison")
@@ -558,7 +561,30 @@ final class OptimizationBenchmarkTests: XCTestCase {
                 }
                 let full = Date().timeIntervalSince(start)
 
+                start = Date()
+                var inboundCount = 0
+                for _ in 0..<iterations {
+                    let frame = try CodexAppServerCodec.decodeInboundFrame(payload.line)
+                    if case .response = frame { inboundCount += 1 }
+                }
+                let inbound = Date().timeIntervalSince(start)
+
+                start = Date()
+                var productionWindows = 0
+                for _ in 0..<iterations {
+                    let frame = try CodexAppServerCodec.decodeInboundFrame(payload.line)
+                    guard case .response(_, let result) = frame,
+                          let object = result as? [String: Any],
+                          let snapshot = RealQuotaProvider.parseRateLimits(response: object) else {
+                        continue
+                    }
+                    productionWindows += snapshot.quotaWindows.count
+                }
+                let productionFull = Date().timeIntervalSince(start)
+
                 XCTAssertEqual(decodedCount, iterations)
+                XCTAssertEqual(inboundCount, iterations)
+                XCTAssertEqual(productionWindows, payload.windowCount * iterations)
                 XCTAssertEqual(windows, parsedWindows)
                 XCTAssertEqual(parsedWindows, payload.windowCount * iterations)
                 XCTAssertEqual(weeklySum, expected.weeklyQuotaPercent * iterations)
@@ -567,7 +593,7 @@ final class OptimizationBenchmarkTests: XCTestCase {
                 print(
                     "BENCH rpc-line[\(payload.label)] bytes=\(payload.line.count) round=\(round) "
                         + "iterations=\(iterations) json=\(json) decode=\(decode) convert=\(convert) "
-                        + "parse=\(parse) full=\(full)"
+                        + "parse=\(parse) full=\(full) inbound=\(inbound) productionFull=\(productionFull)"
                 )
             }
         }

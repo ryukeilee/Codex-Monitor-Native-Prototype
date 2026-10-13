@@ -724,12 +724,12 @@ actor CodexRPCClient {
         )
     }
 
-    private func handleInitializeResponse(_ result: CodexAppServerJSONValue) {
-        guard case .object(let object) = result,
-              case .string(let codexHome) = object["codexHome"],
-              case .string = object["platformFamily"],
-              case .string = object["platformOs"],
-              case .string = object["userAgent"] else {
+    private func handleInitializeResponse(_ result: Any) {
+        guard let object = result as? [String: Any],
+              let codexHome = object["codexHome"] as? String,
+              (object["platformFamily"] as? String) != nil,
+              (object["platformOs"] as? String) != nil,
+              (object["userAgent"] as? String) != nil else {
             complete(.failure(RealQuotaError.codexIncompatible))
             return
         }
@@ -749,16 +749,14 @@ actor CodexRPCClient {
         sendRequest(operation: .rateLimitsRead, method: "account/rateLimits/read")
     }
 
-    private func handleRateLimitsResponse(_ result: CodexAppServerJSONValue) {
-        guard case .object(let object) = result,
-              let response = result.foundationObject() else {
+    private func handleRateLimitsResponse(_ result: Any) {
+        guard let response = result as? [String: Any] else {
             complete(.failure(RealQuotaError.responseInvalid))
             return
         }
 
         let hasSupportedContainer = RateLimitResponseSchema.containerKeys.contains { key in
-            guard let value = object[key], case .object = value else { return false }
-            return true
+            (response[key] as? [String: Any]) != nil
         }
         guard hasSupportedContainer else {
             complete(.failure(RealQuotaError.responseInvalid))
@@ -864,16 +862,16 @@ actor CodexRPCClient {
             return
         }
 
-        let message: CodexAppServerMessage
+        let frame: CodexAppServerInboundFrame
         do {
-            message = try CodexAppServerCodec.decodeLine(lineData)
+            frame = try CodexAppServerCodec.decodeInboundFrame(lineData)
         } catch {
             AppLogger.codexRPC.error("Codex app-server emitted an invalid protocol frame")
             complete(.failure(protocolFrameError()))
             return
         }
 
-        switch message {
+        switch frame {
         case .response(let id, let result):
             guard let pendingResponse, pendingResponse.id == id else {
                 AppLogger.codexRPC.error("Codex app-server response id did not match the pending request")
@@ -977,28 +975,28 @@ actor CodexRPCClient {
         return .rpcRejected(code: remoteError.code)
     }
 
-    private func handleAccountReadAfterRateLimitsInvalidRequest(_ result: CodexAppServerJSONValue) {
-        guard case .object(let object) = result else {
+    private func handleAccountReadAfterRateLimitsInvalidRequest(_ result: Any) {
+        guard let object = result as? [String: Any] else {
             complete(.failure(RealQuotaError.rpcRejected(code: -32_600)))
             return
         }
 
-        if case .null? = object["account"] {
-            let error: RealQuotaError = object["requiresOpenaiAuth"] == .bool(true)
+        if let account = object["account"], account is NSNull {
+            let error: RealQuotaError = isTrueJSONBoolean(object["requiresOpenaiAuth"])
                 ? .authenticationRequired
                 : .rpcRejected(code: -32_600)
             complete(.failure(error))
             return
         }
-        if case .object(let account)? = object["account"],
-           case .string(let accountType)? = account["type"] {
+        if let account = object["account"] as? [String: Any],
+           let accountType = account["type"] as? String {
             let error: RealQuotaError = accountType == "chatgpt"
                 ? .codexIncompatible
                 : .chatGPTAccountRequired
             complete(.failure(error))
             return
         }
-        if case .bool(true)? = object["requiresOpenaiAuth"] {
+        if isTrueJSONBoolean(object["requiresOpenaiAuth"]) {
             complete(.failure(RealQuotaError.authenticationRequired))
             return
         }
@@ -1329,9 +1327,10 @@ struct RealQuotaProvider: RealQuotaRefreshing {
         if isBooleanJSONValue(lhs) != isBooleanJSONValue(rhs) {
             return ConflictingSchemaValue.marker
         }
-        if let lhsObject = lhs as? NSObject,
-           let rhsObject = rhs as? NSObject,
-           lhsObject.isEqual(rhsObject) {
+        // Raw payloads keep `JSONSerialization`'s number storage while the removed
+        // `foundationObject()` handed the parser the typed tree's representation; compare through
+        // the same numeric contract so an integer and a rounded float are not treated as equal.
+        if CodexAppServerCodec.rawValuesAreEqual(lhs, rhs) {
             return lhs
         }
         return ConflictingSchemaValue.marker
@@ -1487,16 +1486,19 @@ struct RealQuotaProvider: RealQuotaRefreshing {
         return ParsedQuotaField(remaining: remaining, state: .live)
     }
 
+    /// Reads a raw JSON number the way the typed decode read it before `foundationObject()` was
+    /// removed: `CodexAppServerCodec.foundationNumber(from:)` applies the codec's numeric contract,
+    /// including reading a decimal-stored value through its exact decimal text because
+    /// `NSDecimalNumber.doubleValue` is not correctly rounded for it.
+    private static func rawNumberDouble(_ rawValue: Any) -> Double? {
+        guard let number = rawValue as? NSNumber else { return nil }
+        return CodexAppServerCodec.foundationNumber(from: number).doubleValue
+    }
+
     private static func parsePercentage(_ rawValue: Any) -> Double? {
         guard !isBooleanJSONValue(rawValue) else { return nil }
-        if let number = rawValue as? NSNumber {
-            return number.doubleValue
-        }
-        if let value = rawValue as? Double {
+        if let value = rawNumberDouble(rawValue) {
             return value
-        }
-        if let value = rawValue as? Int {
-            return Double(value)
         }
         if let value = rawValue as? String {
             return Double(value.trimmingCharacters(in: .whitespacesAndNewlines))
@@ -1516,7 +1518,7 @@ struct RealQuotaProvider: RealQuotaRefreshing {
                 break
             }
 
-            let value = number.doubleValue
+            let value = CodexAppServerCodec.foundationNumber(from: number).doubleValue
             guard value.isFinite,
                   value.rounded() == value,
                   let integer = Int(exactly: value) else {
@@ -1673,12 +1675,8 @@ struct RealQuotaProvider: RealQuotaRefreshing {
             return date
         }
 
-        if let seconds = rawValue as? Double {
-            return dateFromTimestamp(seconds)
-        }
-
-        if let seconds = rawValue as? Int {
-            return dateFromTimestamp(Double(seconds))
+        if let number = rawValue as? NSNumber {
+            return dateFromTimestamp(CodexAppServerCodec.foundationNumber(from: number).doubleValue)
         }
 
         if let string = rawValue as? String {
@@ -1699,11 +1697,6 @@ struct RealQuotaProvider: RealQuotaRefreshing {
         return nil
     }
 
-    private static func isBooleanJSONValue(_ rawValue: Any?) -> Bool {
-        guard let number = rawValue as? NSNumber else { return false }
-        return CFGetTypeID(number) == CFBooleanGetTypeID()
-    }
-
     private static func dateFromTimestamp(_ rawValue: Double) -> Date? {
         guard rawValue.isFinite, rawValue > 0 else {
             return nil
@@ -1713,6 +1706,18 @@ struct RealQuotaProvider: RealQuotaRefreshing {
         return Date(timeIntervalSince1970: seconds)
     }
 
+}
+
+/// True when the raw value is a JSON boolean (`CFBoolean`) rather than a number.
+private func isBooleanJSONValue(_ rawValue: Any?) -> Bool {
+    guard let number = rawValue as? NSNumber else { return false }
+    return CFGetTypeID(number) == CFBooleanGetTypeID()
+}
+
+/// True only when the raw value is JSON `true`; a numeric `1` is not JSON `true`.
+private func isTrueJSONBoolean(_ rawValue: Any?) -> Bool {
+    guard isBooleanJSONValue(rawValue), let number = rawValue as? NSNumber else { return false }
+    return number.boolValue
 }
 
 private extension RealQuotaError {
