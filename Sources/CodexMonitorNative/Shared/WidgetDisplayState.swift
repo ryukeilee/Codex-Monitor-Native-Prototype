@@ -604,6 +604,20 @@ enum WidgetDisplayStateStore {
         )
     }
 
+    /// How this binary can treat the snapshot schema of a decoded widget state.
+    private enum SchemaSupport {
+        case newerVersion
+        case supported
+        case unsupported
+    }
+
+    private static func classifySchemaSupport(_ state: WidgetDisplayState) -> SchemaSupport {
+        if state.snapshot.schemaVersion > QuotaSnapshot.currentSchemaVersion {
+            return .newerVersion
+        }
+        return isSupported(state) ? .supported : .unsupported
+    }
+
     private static func audit(_ data: Data?) -> WidgetStateAudit {
         guard let data else { return .absent }
 
@@ -620,22 +634,28 @@ enum WidgetDisplayStateStore {
                     isNewerPersistenceVersion = true
                 } else if rawEnvelope.formatVersion == PersistenceEnvelope.currentFormatVersion,
                           let state = decodePayload(from: rawEnvelope) {
-                    if state.snapshot.schemaVersion > QuotaSnapshot.currentSchemaVersion {
+                    switch classifySchemaSupport(state) {
+                    case .newerVersion:
                         isNewerPersistenceVersion = true
-                    } else if isSupported(state) {
+                    case .supported:
                         envelope = WidgetStateAudit.Envelope(
                             state: state,
                             revision: rawEnvelope.revision
                         )
+                    case .unsupported:
+                        break
                     }
                 }
             }
         } else if !containsEnvelopeMetadata(data),
                   let state = decodeState(data) {
-            if state.snapshot.schemaVersion > QuotaSnapshot.currentSchemaVersion {
+            switch classifySchemaSupport(state) {
+            case .newerVersion:
                 isNewerPersistenceVersion = true
-            } else if isSupported(state) {
+            case .supported:
                 legacyState = state
+            case .unsupported:
+                break
             }
         }
 
@@ -670,8 +690,8 @@ enum WidgetDisplayStateStore {
 
         let backupURL = url.appendingPathExtension("backup")
         let backupData = try? Data(contentsOf: backupURL)
+        let backup = audit(backupData)
         if primary.isNewerPersistenceVersion {
-            let backup = audit(backupData)
             if let envelope = backup.envelope {
                 PersistenceLog.logger.error("Widget state uses a newer persistence version; displaying backup without replacing primary")
                 return envelope.state
@@ -685,7 +705,6 @@ enum WidgetDisplayStateStore {
         }
 
         if let backupData {
-            let backup = audit(backupData)
             if let envelope = backup.envelope {
                 quarantine(url: url, fileManager: fileManager)
                 if restoreEnvelopeBackup(backupData, to: url) {
@@ -778,19 +797,18 @@ enum WidgetDisplayStateStore {
                 withIntermediateDirectories: true
             )
             let currentData = try? Data(contentsOf: url)
-            let requestsFailClosedInvalidation = state.snapshot.dataSource != .real
-                && state.status != .demoMode
-            let current = audit(currentData)
-            if current.isNewerPersistenceVersion, !requestsFailClosedInvalidation {
-                PersistenceLog.logger.error("Cannot overwrite widget state written by a newer persistence version")
-                return false
-            }
-            let currentState = current.envelope?.state ?? current.legacyState
             // The Widget cannot independently read the current Codex identity.
             // Any explicit host invalidation therefore has to remove every old
             // real recovery source, even when the primary is missing, corrupt,
             // or from a newer format that this binary cannot decode.
-            let explicitlyInvalidatesRealSnapshot = requestsFailClosedInvalidation
+            let explicitlyInvalidatesRealSnapshot = state.snapshot.dataSource != .real
+                && state.status != .demoMode
+            let current = audit(currentData)
+            if current.isNewerPersistenceVersion, !explicitlyInvalidatesRealSnapshot {
+                PersistenceLog.logger.error("Cannot overwrite widget state written by a newer persistence version")
+                return false
+            }
+            let currentState = current.envelope?.state ?? current.legacyState
             let crossesAccountBoundary = currentState.map {
                 guard let currentBoundary = $0.snapshot.accountBoundary,
                       let newBoundary = state.snapshot.accountBoundary else {
@@ -801,7 +819,8 @@ enum WidgetDisplayStateStore {
                     && !newBoundary.matches(currentBoundary)
             } ?? false
             if let currentState {
-                // Block non-real writes over real data unless explicit invalidation
+                // Block every non-real write over real data unless this write is
+                // the explicit fail-closed invalidation.
                 if currentState.snapshot.dataSource == .real
                     && state.snapshot.dataSource != .real
                     && !explicitlyInvalidatesRealSnapshot {
@@ -824,13 +843,6 @@ enum WidgetDisplayStateStore {
                     && currentState.snapshot.dataSource != .real
                     && state.savedAt < currentState.savedAt {
                     PersistenceLog.logger.info("Ignored older non-real widget state write savedAt=\(state.savedAt.timeIntervalSince1970, format: .fixed(precision: 0))")
-                    return false
-                }
-                // Block mock writes over real data
-                if state.snapshot.dataSource != .real
-                    && currentState.snapshot.dataSource == .real
-                    && !explicitlyInvalidatesRealSnapshot {
-                    PersistenceLog.logger.info("Ignored mock widget state write over real data")
                     return false
                 }
             }
