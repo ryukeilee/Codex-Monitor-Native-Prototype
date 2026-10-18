@@ -673,6 +673,253 @@ final class RealQuotaProviderTests: XCTestCase {
         await assertFailure(.codexIncompatible, from: task)
     }
 
+    // MARK: - Frame length boundaries
+
+    /// The frame limit is inclusive: a body of exactly `maxFrameBytes` followed by LF is accepted,
+    /// and the request can still complete through the frames that follow it.
+    func testRPCClientAcceptsFrameExactlyAtMaxFrameBytes() async throws {
+        let frameLimit = Self.initializeResponse.count - 1
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler(),
+            maxFrameBytes: frameLimit
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        // The LF sits exactly at the limit, so the frame body is exactly `frameLimit` bytes.
+        XCTAssertEqual(Self.initializeResponse.last, 0x0A)
+        transport.emitStdout(Self.initializeResponse)
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.compactRateLimitResponse)
+
+        let snapshot = try await task.value
+        XCTAssertEqual(snapshot.fiveHourQuotaPercent, 50)
+    }
+
+    /// One byte over the inclusive limit is rejected before the line is handed to the decoder.
+    func testRPCClientRejectsFrameOneByteOverMaxFrameBytes() async {
+        // The frame body is one byte longer than the limit.
+        let frameLimit = Self.initializeResponse.count - 2
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler(),
+            maxFrameBytes: frameLimit
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.initializeResponse)
+
+        await assertFailure(.codexIncompatible, from: task)
+    }
+
+    /// Newline-less data that reaches the limit exactly is not an error, and the client keeps
+    /// reading: the whitespace line is skipped and the pending request can still be answered.
+    func testRPCClientAcceptsNoNewlineDataExactlyAtMaxFrameBytesAcrossChunks() async throws {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler(),
+            maxFrameBytes: 140
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.initializeResponse)
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+
+        let spaces = Data(repeating: 0x20, count: 70)
+        transport.emitStdout(spaces)
+        transport.emitStdout(spaces)
+        let pendingAfterLimit = await rpcClientCompleted(transport, within: 0.1)
+        XCTAssertFalse(pendingAfterLimit, "140 bytes of newline-less data is at the limit, not over it")
+
+        transport.emitStdout(Data([0x0A]) + Self.rateLimitResponse)
+
+        let snapshot = try await task.value
+        XCTAssertEqual(snapshot.fiveHourQuotaPercent, 50)
+    }
+
+    /// The chunk that pushes newline-less data past the limit is the one that rejects it. The
+    /// classification shows it fired while the rate limits request was pending, so the data was
+    /// accepted up to the limit and only the crossing chunk failed.
+    func testRPCClientRejectsNoNewlineDataThatCrossesMaxFrameBytesAcrossChunks() async {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler(),
+            maxFrameBytes: 140
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.initializeResponse)
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+
+        transport.emitStdout(Data(repeating: 0x20, count: 140))
+        let failedAtLimit = await rpcClientCompleted(transport, within: 0.1)
+        XCTAssertFalse(failedAtLimit, "data exactly at the limit must not fail")
+
+        transport.emitStdout(Data([0x20]))
+        let failedOnCrossingChunk = await rpcClientCompleted(transport, within: 1)
+        if failedOnCrossingChunk {
+            await assertFailure(.responseInvalid, from: task)
+        } else {
+            // Reclaim the pending request instead of leaking it: cancelling resumes the client's
+            // continuation with a CancellationError, so this await always settles.
+            task.cancel()
+            _ = try? await task.value
+            XCTFail("the chunk that crosses the limit must fail the request")
+        }
+    }
+
+    /// An oversized newline-less trailing line is rejected by the chunk that crosses the limit,
+    /// while the rate limits request is still pending and before any EOF is delivered.
+    ///
+    /// Both the chunk-time limit and the EOF length guard classify this data as `.responseInvalid`,
+    /// so the classification alone cannot tell them apart. This test therefore observes the
+    /// completion *without emitting any EOF*, which can only happen if the chunk-time limit fired.
+    /// The body is a valid rate-limits response that is merely too long, so no decoder or handler
+    /// path could produce the same classification either. Emitting EOF afterwards pins that it
+    /// cannot change the outcome already recorded.
+    func testRPCClientRejectsOversizedTrailingLineOnTheCrossingChunkBeforeEOF() async {
+        let frameLimit = Self.initializeResponse.count - 1
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler(),
+            maxFrameBytes: frameLimit
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.initializeResponse)
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+
+        var validOversizedLine = Data(
+            #"{"id":2,"result":{"rateLimits":{"primary":{"windowDurationMins":300,"usedPercent":50}},"padding":""#.utf8
+        )
+        validOversizedLine.append(Data(repeating: 0x41, count: frameLimit))
+        validOversizedLine.append(Data(#""}}"#.utf8))
+        XCTAssertGreaterThan(validOversizedLine.count, frameLimit)
+
+        transport.emitStdout(validOversizedLine)
+        let rejectedWithoutEOF = await rpcClientCompleted(transport, within: 1)
+        guard rejectedWithoutEOF else {
+            // Reclaim the pending request instead of leaking it.
+            task.cancel()
+            _ = try? await task.value
+            XCTFail("the crossing chunk must reject the request while the rate limits request is pending, with no EOF")
+            return
+        }
+
+        transport.emitStdoutEOF()
+        await assertFailure(.responseInvalid, from: task)
+    }
+
+    // MARK: - Frame ordering
+
+    /// Several complete frames in one chunk are consumed left to right: the notification is
+    /// ignored, the initialize response advances the handshake, and the rate limits response that
+    /// follows it in the same chunk is still matched to the request the handshake just sent.
+    func testRPCClientConsumesMultipleFramesInOneChunkInWireOrder() async throws {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        let notification = Data("{\"method\":\"account/rateLimits/updated\",\"params\":{}}\n".utf8)
+        transport.emitStdout(notification + Self.initializeResponse + Self.rateLimitResponse)
+
+        let snapshot = try await task.value
+        XCTAssertEqual(snapshot.fiveHourQuotaPercent, 50)
+        XCTAssertEqual(
+            transport.writtenMessages.map { message -> String in
+                switch message {
+                case .request(_, let method, _): return method
+                case .notification(let method, _): return method
+                case .response, .error: return "unexpected"
+                }
+            },
+            ["initialize", "initialized", "account/rateLimits/read"]
+        )
+    }
+
+    /// The same frames in the wrong wire order are rejected: the rate limits response cannot be
+    /// matched while the initialize request is still the pending one.
+    func testRPCClientRejectsResponseThatPrecedesItsRequestInTheSameChunk() async {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        transport.emitStdout(Self.rateLimitResponse + Self.initializeResponse)
+
+        await assertFailure(.codexIncompatible, from: task)
+    }
+
+    /// Once a frame completes the request, the rest of the same chunk is not processed: the
+    /// successful result is unaffected by the mismatched response and the short malformed line that
+    /// follow it, and the client completes (and shuts down) exactly once.
+    ///
+    /// The client's own completion guards are what keep those trailing frames from being decoded,
+    /// so this pins the observable outcome — an unaffected successful result and a single shutdown —
+    /// rather than the absence of decoding itself.
+    func testRPCClientDiscardsFramesAfterCompletionInTheSameChunk() async throws {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        let mismatchedResponse = Data("{\"id\":99,\"result\":{\"rateLimits\":{}}}\n".utf8)
+        let malformedLine = Data("not a protocol frame\n".utf8)
+        transport.emitStdout(Self.initializeResponse + Self.rateLimitResponse + mismatchedResponse + malformedLine)
+
+        let snapshot = try await task.value
+        XCTAssertEqual(snapshot.fiveHourQuotaPercent, 50)
+        XCTAssertEqual(transport.shutdownCount, 1)
+    }
+
+    /// A frame delivered one byte at a time is reassembled exactly, including the frame that
+    /// arrives in seven byte pieces.
+    func testRPCClientReassemblesFramesSplitAcrossSmallChunks() async throws {
+        let transport = ControlledRPCTransport()
+        let client = CodexRPCClient(
+            transport: transport,
+            timeoutScheduler: ControlledTimeoutScheduler()
+        )
+        let task = Task { try await client.fetchQuota(timeoutSeconds: 60) }
+
+        await fulfillment(of: [transport.initializeRequestExpectation], timeout: 1)
+        for byte in Self.initializeResponse {
+            transport.emitStdout(Data([byte]))
+        }
+        await fulfillment(of: [transport.rateLimitRequestExpectation], timeout: 1)
+
+        var index = Self.rateLimitResponse.startIndex
+        while index < Self.rateLimitResponse.endIndex {
+            let end = Self.rateLimitResponse.index(index, offsetBy: 7, limitedBy: Self.rateLimitResponse.endIndex)
+                ?? Self.rateLimitResponse.endIndex
+            transport.emitStdout(Self.rateLimitResponse[index..<end])
+            index = end
+        }
+
+        let snapshot = try await task.value
+        XCTAssertEqual(snapshot.fiveHourQuotaPercent, 50)
+    }
+
     func testRPCClientTreatsInitializeWriteFailureAsSpawnFailure() async {
         let transport = ControlledRPCTransport(writeError: .writeFailed)
         let client = CodexRPCClient(
@@ -1304,6 +1551,9 @@ final class RealQuotaProviderTests: XCTestCase {
 
     private static let initializeResponse = Data("{\"id\":1,\"result\":{\"codexHome\":\"/tmp/codex\",\"platformFamily\":\"unix\",\"platformOs\":\"macos\",\"userAgent\":\"codex-test\"}}\n".utf8)
     private static let rateLimitResponse = Data("{\"id\":2,\"result\":{\"rateLimits\":{},\"rateLimitsByLimitId\":{\"codex\":{\"primary\":{\"windowDurationMins\":300,\"usedPercent\":50}}}}}\n".utf8)
+    /// The legacy container shape in a frame short enough to fit the initialize response's own
+    /// frame limit, so a test can pin that limit and still complete the request.
+    private static let compactRateLimitResponse = Data("{\"id\":2,\"result\":{\"rateLimits\":{\"primary\":{\"windowDurationMins\":300,\"usedPercent\":50}}}}\n".utf8)
 
     private func assertFailure(
         _ expected: RealQuotaError,
@@ -1319,6 +1569,23 @@ final class RealQuotaProviderTests: XCTestCase {
         } catch {
             XCTFail("Expected \(expected), got \(error)", file: file, line: line)
         }
+    }
+
+    /// Bounded wait for the client's single completion path.
+    ///
+    /// `Task.sleep` polling keeps the wait bounded so a test can assert that a frame error fired
+    /// without a newline ever arriving, instead of hanging on a stalled request. The probe reads
+    /// the transport's completion flag under its lock because the client may still be live.
+    private func rpcClientCompleted(
+        _ transport: ControlledRPCTransport,
+        within seconds: TimeInterval
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if transport.hasShutDown { return true }
+            try? await Task.sleep(nanoseconds: 200_000)
+        }
+        return transport.hasShutDown
     }
 
     func testParseRateLimitsUsesLegacySnapshotWhenDynamicBucketsAreAbsent() throws {
@@ -2275,6 +2542,16 @@ private final class ControlledRPCTransport: CodexRPCTransport, @unchecked Sendab
     private(set) var startCount = 0
     private(set) var shutdownCount = 0
     private(set) var handlersCleared = false
+    private let shutdownLock = NSLock()
+
+    /// `shutdownAndWait` runs exactly once per client completion, so this is the observable
+    /// completion signal. It is read under a lock because a caller that asserts the client has
+    /// *not* completed yet reads it while the client is still live.
+    var hasShutDown: Bool {
+        shutdownLock.lock()
+        defer { shutdownLock.unlock() }
+        return shutdownCount > 0
+    }
     private(set) var writtenMessages: [CodexAppServerMessage] = []
     private var stdout: (@Sendable (Data) -> Void)?
     private var stdoutEOF: (@Sendable () -> Void)?
@@ -2338,7 +2615,9 @@ private final class ControlledRPCTransport: CodexRPCTransport, @unchecked Sendab
     }
 
     func shutdownAndWait() throws {
+        shutdownLock.lock()
         shutdownCount += 1
+        shutdownLock.unlock()
         stdout = nil
         stdoutEOF = nil
         stderr = nil

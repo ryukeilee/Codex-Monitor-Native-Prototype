@@ -592,6 +592,10 @@ actor CodexRPCClient {
         let operation: Operation
     }
 
+    /// The single line-feed byte that terminates a protocol frame. Built once instead of per
+    /// frame search; the scan only reads it.
+    private static let lineFeed = Data([0x0A])
+
     private let transport: any CodexRPCTransport
     private let timeoutScheduler: any CodexRPCTimeoutScheduling
     private let authBoundaryReader: @Sendable (String) -> QuotaAccountBoundary?
@@ -791,7 +795,7 @@ actor CodexRPCClient {
         guard !hasResumed else { return }
         stdoutBuffer.append(chunk)
 
-        while let newlineRange = stdoutBuffer.range(of: Data("\n".utf8)) {
+        while let newlineRange = stdoutBuffer.range(of: Self.lineFeed) {
             if newlineRange.lowerBound > maxFrameBytes {
                 complete(.failure(protocolFrameError()))
                 return
