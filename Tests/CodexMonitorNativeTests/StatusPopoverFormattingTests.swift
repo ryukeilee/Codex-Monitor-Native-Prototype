@@ -147,28 +147,6 @@ final class StatusPopoverFormattingTests: XCTestCase {
         )
     }
 
-    func testCredibilityLineCombinesUpdateSourceAndStatus() {
-        let calendar = Calendar(identifier: .gregorian)
-        let timeZone = TimeZone(secondsFromGMT: 0)!
-        let locale = Locale(identifier: "en_US")
-        let now = makeDate("2026-06-19T12:50:00Z")
-        let lastSuccess = makeDate("2026-06-19T12:40:00Z")
-        let lastAttempt = makeDate("2026-06-19T12:48:00Z")
-
-        let formatted = StatusPopoverFormatting.credibilityLine(
-            lastSuccess: lastSuccess,
-            lastAttempt: lastAttempt,
-            dataSource: .real,
-            status: .success,
-            now: now,
-            calendar: calendar.setting(timeZone: timeZone),
-            locale: locale,
-            timeZone: timeZone
-        )
-
-        XCTAssertEqual(formatted, "更新 今天 12:40 · 尝试 今天 12:48 · 真实数据 · 最新")
-    }
-
     func testEnvironmentInfoLineKeepsSourceStatusWhenAvailable() {
         let calendar = Calendar(identifier: .gregorian)
         let timeZone = TimeZone(secondsFromGMT: 0)!
@@ -1042,32 +1020,6 @@ final class StatusPopoverFormattingTests: XCTestCase {
         XCTAssertEqual(formatted, "额度 --")
     }
 
-    func testRecoverySummaryLineUsesPlaceholdersWithoutUsableQuotaState() {
-        let formatted = StatusPopoverFormatting.recoverySummaryLine(
-            resetAt: makeDate("2026-06-19T13:25:00Z"),
-            status: .noSnapshot,
-            now: makeDate("2026-06-19T12:40:00Z"),
-            calendar: Calendar(identifier: .gregorian).setting(timeZone: TimeZone(secondsFromGMT: 0)!),
-            locale: Locale(identifier: "en_US"),
-            timeZone: TimeZone(secondsFromGMT: 0)!
-        )
-
-        XCTAssertEqual(formatted, "恢复 -- · 还需 --")
-    }
-
-    func testRecoverySummaryLineShowsUnknownWhenRealResetTimeIsNotExposed() {
-        let formatted = StatusPopoverFormatting.recoverySummaryLine(
-            resetAt: nil,
-            status: .success,
-            now: makeDate("2026-06-19T12:40:00Z"),
-            calendar: Calendar(identifier: .gregorian).setting(timeZone: TimeZone(secondsFromGMT: 0)!),
-            locale: Locale(identifier: "en_US"),
-            timeZone: TimeZone(secondsFromGMT: 0)!
-        )
-
-        XCTAssertEqual(formatted, "恢复 未知（未暴露） · 还需 未暴露")
-    }
-
     func testRecoveryDetailsExposeResetAndRemainingSeparately() {
         let now = makeDate("2026-06-19T12:40:00Z")
         let resetAt = makeDate("2026-06-19T14:10:00Z")
@@ -1082,6 +1034,39 @@ final class StatusPopoverFormattingTests: XCTestCase {
         )
 
         XCTAssertEqual(details, .init(resetText: "今天 14:10", remainingText: "1小时30分"))
+    }
+
+    func testRecoveryDetailsUsePlaceholdersWithoutUsableQuotaState() {
+        let now = makeDate("2026-06-19T12:40:00Z")
+        let resetAt = makeDate("2026-06-19T13:25:00Z")
+
+        for status in [QuotaRefreshStatus.noSnapshot, .idle, .demoMode] {
+            let details = StatusPopoverFormatting.recoveryDetails(
+                resetAt: resetAt,
+                status: status,
+                now: now,
+                calendar: Calendar(identifier: .gregorian).setting(timeZone: TimeZone(secondsFromGMT: 0)!),
+                locale: Locale(identifier: "en_US"),
+                timeZone: TimeZone(secondsFromGMT: 0)!
+            )
+
+            XCTAssertEqual(details, .init(resetText: "--", remainingText: "--"), "status: \(status)")
+        }
+    }
+
+    func testRecoveryDetailsShowsUnknownWhenRealResetTimeIsNotExposed() {
+        let now = makeDate("2026-06-19T12:40:00Z")
+
+        let details = StatusPopoverFormatting.recoveryDetails(
+            resetAt: nil,
+            status: .success,
+            now: now,
+            calendar: Calendar(identifier: .gregorian).setting(timeZone: TimeZone(secondsFromGMT: 0)!),
+            locale: Locale(identifier: "en_US"),
+            timeZone: TimeZone(secondsFromGMT: 0)!
+        )
+
+        XCTAssertEqual(details, .init(resetText: "未知（未暴露）", remainingText: "未暴露"))
     }
 
     func testResetCreditsSummaryUsesRealCountWhenExposed() {
@@ -1237,17 +1222,11 @@ final class StatusPopoverFormattingTests: XCTestCase {
             dataSource: .real
         )
 
-        let items = StatusPopoverFormatting.resetCreditTimeDisplayItems(
-            snapshot: snapshot,
-            status: .success
-        )
-
         let summary = StatusPopoverFormatting.resetCreditsSummary(
             snapshot: snapshot,
             status: .success
         )
 
-        XCTAssertTrue(items.isEmpty)
         XCTAssertEqual(summary?.timingLine, "到期时间暂不可用")
     }
 
@@ -1339,120 +1318,6 @@ final class StatusPopoverFormattingTests: XCTestCase {
 
         XCTAssertEqual(summary?.featuredCreditItem?.expiryText, "今天 13:10")
         XCTAssertEqual(summary?.additionalCreditItems.map(\.expiryText), ["今天 15:10", "今天 18:10"])
-    }
-
-    func testResetBankDisplayItemsClampToFastestThreeRowsByResetTime() {
-        let now = makeDate("2026-06-19T12:40:00Z")
-        let snapshot = QuotaSnapshot(
-            weeklyQuotaPercent: 80,
-            fiveHourQuotaPercent: 70,
-            resetBanks: [
-                makeResetBank(id: "d.primary", percent: 40, resetAt: "2026-06-19T16:40:00Z"),
-                makeResetBank(id: "b.primary", percent: 60, resetAt: "2026-06-19T13:40:00Z"),
-                makeResetBank(id: "c.primary", percent: 50, resetAt: "2026-06-19T15:40:00Z"),
-                makeResetBank(id: "a.primary", percent: 70, resetAt: "2026-06-19T12:50:00Z")
-            ],
-            refreshedAt: .now,
-            dataSource: .real
-        )
-
-        let items = StatusPopoverFormatting.resetBankDisplayItems(
-            snapshot: snapshot,
-            status: .success,
-            now: now,
-            calendar: Calendar(identifier: .gregorian).setting(timeZone: TimeZone(secondsFromGMT: 0)!),
-            locale: Locale(identifier: "en_US"),
-            timeZone: TimeZone(secondsFromGMT: 0)!
-        )
-
-        XCTAssertEqual(items.count, 3)
-        XCTAssertEqual(items.map(\.id), ["a.primary", "b.primary", "c.primary"])
-    }
-
-    func testResetBankDisplayItemsRespectTimeZoneForAbsoluteTimestamp() {
-        let timeZone = TimeZone(secondsFromGMT: 8 * 3600)!
-        let calendar = Calendar(identifier: .gregorian).setting(timeZone: timeZone)
-        let now = makeDate("2026-06-19T15:40:00Z")
-        let snapshot = QuotaSnapshot(
-            weeklyQuotaPercent: 80,
-            fiveHourQuotaPercent: 70,
-            resetBanks: [
-                ResetBankSnapshot(
-                    limitId: "codex",
-                    windowId: "primary",
-                    displayName: "5小时额度",
-                    remainingPercent: 70,
-                    resetAt: makeDate("2026-06-19T16:10:00Z")
-                )
-            ],
-            refreshedAt: .now,
-            dataSource: .real
-        )
-
-        let items = StatusPopoverFormatting.resetBankDisplayItems(
-            snapshot: snapshot,
-            status: .success,
-            now: now,
-            calendar: calendar,
-            locale: Locale(identifier: "zh_CN"),
-            timeZone: timeZone
-        )
-
-        XCTAssertEqual(items.first?.resetText, "6月20日 00:10")
-        XCTAssertEqual(items.first?.remainingText, "30分")
-    }
-
-    func testResetBankDisplayItemsDoNotRepeatGlobalStaleStatePerRow() {
-        let snapshot = QuotaSnapshot(
-            weeklyQuotaPercent: 80,
-            fiveHourQuotaPercent: 70,
-            resetBanks: [
-                ResetBankSnapshot(
-                    limitId: "codex",
-                    windowId: "primary",
-                    displayName: "5小时额度",
-                    remainingPercent: 70,
-                    resetAt: makeDate("2026-06-19T16:10:00Z")
-                )
-            ],
-            refreshedAt: .now,
-            dataSource: .real
-        )
-
-        let items = StatusPopoverFormatting.resetBankDisplayItems(
-            snapshot: snapshot,
-            status: .stale
-        )
-
-        XCTAssertNil(items.first?.detailText)
-    }
-
-    func testResetBankDisplayItemsUseSemanticDiagnosticsWithoutProtocolPaths() {
-        let snapshot = QuotaSnapshot(
-            weeklyQuotaPercent: 80,
-            fiveHourQuotaPercent: 70,
-            resetBanks: [
-                ResetBankSnapshot(
-                    limitId: "codex",
-                    windowId: "primary",
-                    displayName: "5小时额度",
-                    remainingPercent: 70,
-                    resetAt: nil,
-                    resetTimeStatus: .parseFailed
-                )
-            ],
-            refreshedAt: .now,
-            dataSource: .real
-        )
-
-        let item = StatusPopoverFormatting.resetBankDisplayItems(
-            snapshot: snapshot,
-            status: .success
-        ).first
-
-        XCTAssertNil(item?.sourceText)
-        XCTAssertEqual(item?.detailText, "诊断：重置时间格式不受支持")
-        XCTAssertFalse(item?.detailText?.contains("rateLimitsByLimitId") ?? true)
     }
 
     func testResetCreditsSummaryHidesNonAvailableStatesInDiagnostics() {
@@ -1613,17 +1478,6 @@ final class StatusPopoverFormattingTests: XCTestCase {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
         return formatter.date(from: iso8601)!
-    }
-
-    private func makeResetBank(id: String, percent: Int, resetAt: String) -> ResetBankSnapshot {
-        let parts = id.split(separator: ".", maxSplits: 1).map(String.init)
-        return ResetBankSnapshot(
-            limitId: parts[0],
-            windowId: parts[1],
-            displayName: id,
-            remainingPercent: percent,
-            resetAt: makeDate(resetAt)
-        )
     }
 }
 

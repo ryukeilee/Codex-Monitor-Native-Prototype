@@ -74,22 +74,6 @@ enum StatusPopoverFormatting {
         let tooltip: String
     }
 
-    struct ResetBankDisplayItem: Equatable, Identifiable {
-        let id: String
-        let resetText: String
-        let remainingText: String
-        let sourceText: String?
-        let detailText: String?
-    }
-
-    struct ResetCreditTimeDisplayItem: Equatable, Identifiable {
-        let id: String
-        let label: String
-        let resetText: String
-        let remainingText: String
-        let sourceText: String
-    }
-
     struct ResetCreditDisplayItem: Equatable, Identifiable {
         let id: String
         let expiryText: String
@@ -246,28 +230,6 @@ enum StatusPopoverFormatting {
 
     static func sourceStatusLine(dataSource: QuotaDataSource, status: QuotaRefreshStatus) -> String {
         "\(sourceLabel(for: dataSource)) · \(statusLabel(for: status))"
-    }
-
-    static func credibilityLine(
-        lastSuccess: Date?,
-        lastAttempt: Date?,
-        dataSource: QuotaDataSource,
-        status: QuotaRefreshStatus,
-        now: Date = .now,
-        calendar: Calendar = .current,
-        locale: Locale = .current,
-        timeZone: TimeZone = .current
-    ) -> String {
-        let updated = updatedLine(
-            lastSuccess: lastSuccess,
-            lastAttempt: lastAttempt,
-            now: now,
-            calendar: calendar,
-            locale: locale,
-            timeZone: timeZone
-        )
-        let sourceStatus = sourceStatusLine(dataSource: dataSource, status: status)
-        return "\(updated) · \(sourceStatus)"
     }
 
     static func environmentInfoLine(
@@ -694,25 +656,6 @@ enum StatusPopoverFormatting {
         quotaDisplay(for: metric, snapshot: snapshot, status: status)
     }
 
-    static func recoverySummaryLine(
-        resetAt: Date?,
-        status: QuotaRefreshStatus,
-        now: Date = .now,
-        calendar: Calendar = .current,
-        locale: Locale = .current,
-        timeZone: TimeZone = .current
-    ) -> String {
-        let details = recoveryDetails(
-            resetAt: resetAt,
-            status: status,
-            now: now,
-            calendar: calendar,
-            locale: locale,
-            timeZone: timeZone
-        )
-        return "恢复 \(details.resetText) · 还需 \(details.remainingText)"
-    }
-
     static func recoveryDetails(
         resetAt: Date?,
         status: QuotaRefreshStatus,
@@ -738,73 +681,6 @@ enum StatusPopoverFormatting {
         )
         let remainingText = relativeRecoveryLine(for: resetAt, now: now)
         return RecoveryDetails(resetText: resetText, remainingText: remainingText)
-    }
-
-    static func resetBankDisplayItems(
-        snapshot: QuotaSnapshot,
-        status: QuotaRefreshStatus,
-        now: Date = .now,
-        calendar: Calendar = .current,
-        locale: Locale = .current,
-        timeZone: TimeZone = .current
-    ) -> [ResetBankDisplayItem] {
-        guard showsQuotaValues(for: status), snapshot.dataSource == .real else {
-            return []
-        }
-
-        return snapshot.resetBanks
-            .sorted(by: compareResetBankDisplayOrder)
-            .prefix(3)
-            .map { bank in
-            let details = recoveryDetails(
-                resetAt: bank.resetAt,
-                status: status,
-                now: now,
-                calendar: calendar,
-                locale: locale,
-                timeZone: timeZone
-            )
-
-            return ResetBankDisplayItem(
-                id: bank.id,
-                resetText: details.resetText,
-                remainingText: details.remainingText,
-                sourceText: nil,
-                detailText: bankDetailText(for: bank)
-            )
-        }
-    }
-
-    static func resetCreditTimeDisplayItems(
-        snapshot: QuotaSnapshot,
-        status: QuotaRefreshStatus,
-        now: Date = .now,
-        calendar: Calendar = .current,
-        locale: Locale = .current,
-        timeZone: TimeZone = .current
-    ) -> [ResetCreditTimeDisplayItem] {
-        guard showsQuotaValues(for: status), snapshot.dataSource == .real else {
-            return []
-        }
-
-        return snapshot.resetCreditTimeEntries.map { entry in
-            let details = recoveryDetails(
-                resetAt: entry.date,
-                status: status,
-                now: now,
-                calendar: calendar,
-                locale: locale,
-                timeZone: timeZone
-            )
-
-            return ResetCreditTimeDisplayItem(
-                id: entry.id,
-                label: entry.label,
-                resetText: details.resetText,
-                remainingText: details.remainingText,
-                sourceText: "来源：\(entry.sourcePath)"
-            )
-        }
     }
 
     static func resetCreditsSummary(
@@ -1214,38 +1090,6 @@ enum StatusPopoverFormatting {
 
     private static func fallbackSuffix(isUsingCachedSnapshot: Bool) -> String {
         isUsingCachedSnapshot ? "，显示上次成功数据" : "，当前无可用快照"
-    }
-
-    private static func compareResetBankDisplayOrder(_ lhs: ResetBankSnapshot, _ rhs: ResetBankSnapshot) -> Bool {
-        switch (lhs.resetAt, rhs.resetAt) {
-        case let (left?, right?):
-            if left != right {
-                return left < right
-            }
-        case (_?, nil):
-            return true
-        case (nil, _?):
-            return false
-        case (nil, nil):
-            break
-        }
-
-        if lhs.displayName != rhs.displayName {
-            return lhs.displayName < rhs.displayName
-        }
-
-        return lhs.id < rhs.id
-    }
-
-    private static func bankDetailText(for bank: ResetBankSnapshot) -> String? {
-        switch bank.resetTimeStatus {
-        case .actual:
-            return nil
-        case .unexposed:
-            return "诊断：重置时间未知/未暴露"
-        case .parseFailed:
-            return "诊断：重置时间格式不受支持"
-        }
     }
 
     private static func resetCreditDetailLines(
