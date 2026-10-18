@@ -66,6 +66,14 @@ enum StatusPopoverFormatting {
         }
     }
 
+    /// The status item's complete update payload. Both strings project the same
+    /// prepared quota-window items, so one menu-bar update formats every window
+    /// once instead of once per string.
+    struct StatusItemPresentation: Equatable {
+        let title: String
+        let tooltip: String
+    }
+
     struct ResetBankDisplayItem: Equatable, Identifiable {
         let id: String
         let resetText: String
@@ -366,14 +374,21 @@ enum StatusPopoverFormatting {
         locale: Locale = .current,
         timeZone: TimeZone = .current
     ) -> String {
-        let items = quotaWindowDisplayItems(
-            snapshot: snapshot,
-            status: status,
-            now: now,
-            calendar: calendar,
-            locale: locale,
-            timeZone: timeZone
+        quotaSummaryLine(
+            from: quotaWindowDisplayItems(
+                snapshot: snapshot,
+                status: status,
+                now: now,
+                calendar: calendar,
+                locale: locale,
+                timeZone: timeZone
+            )
         )
+    }
+
+    /// The summary line projected from already-derived items. Callers that need
+    /// more than one window projection derive the items once and reuse them.
+    private static func quotaSummaryLine(from items: [QuotaWindowDisplayItem]) -> String {
         guard !items.isEmpty else {
             return "额度 --"
         }
@@ -391,6 +406,36 @@ enum StatusPopoverFormatting {
         locale: Locale = .current,
         timeZone: TimeZone = .current
     ) -> [QuotaWindowDisplayItem] {
+        quotaWindowPlan(snapshot: snapshot, status: status).map { item in
+            makeQuotaWindowDisplayItem(
+                window: item.window,
+                label: item.label,
+                origin: item.origin,
+                dataSource: snapshot.dataSource,
+                status: status,
+                now: now,
+                calendar: calendar,
+                locale: locale,
+                timeZone: timeZone
+            )
+        }
+    }
+
+    /// The selected windows together with their labels: the single derivation of
+    /// window selection, legacy fallback, ordering, and labels that
+    /// `quotaWindowDisplayItems` and `quotaWindowLayoutSignal` both project from.
+    /// A layout token is therefore built without repeating that selection or
+    /// formatting any window value.
+    private struct QuotaWindowPlanItem {
+        let window: QuotaWindow
+        let label: String
+        let origin: QuotaWindowDisplayItem.Origin
+    }
+
+    private static func quotaWindowPlan(
+        snapshot: QuotaSnapshot,
+        status: QuotaRefreshStatus
+    ) -> [QuotaWindowPlanItem] {
         guard snapshot.dataSource == .real, showsQuotaValues(for: status) else {
             return []
         }
@@ -442,16 +487,10 @@ enum StatusPopoverFormatting {
                 ordinal: ordinal,
                 count: sameKind.count
             )
-            return makeQuotaWindowDisplayItem(
+            return QuotaWindowPlanItem(
                 window: candidate.window,
                 label: label,
-                origin: candidate.origin,
-                dataSource: snapshot.dataSource,
-                status: status,
-                now: now,
-                calendar: calendar,
-                locale: locale,
-                timeZone: timeZone
+                origin: candidate.origin
             )
         }
     }
@@ -500,15 +539,63 @@ enum StatusPopoverFormatting {
         columns: Int = 2
     ) -> QuotaWindowLayoutSignal {
         let safeColumns = max(1, columns)
-        let items = quotaWindowDisplayItems(snapshot: snapshot, status: status)
-        let rowCount = (items.count + safeColumns - 1) / safeColumns
+        // Reuse the same window plan as `quotaWindowDisplayItems` and derive the
+        // token from the shared cache-provenance rule alone, without formatting
+        // reset timestamps or percentages just to detect a state change.
+        let plan = quotaWindowPlan(snapshot: snapshot, status: status)
+        let now = Date.now
+        let rowCount = (plan.count + safeColumns - 1) / safeColumns
         return QuotaWindowLayoutSignal(
-            itemTokens: items.map {
-                "\($0.id)|\($0.label)|\($0.historyCaption == nil ? "current" : "cached")"
+            itemTokens: plan.map { item in
+                let isTrusted = isTrustedQuotaWindow(
+                    item.window,
+                    dataSource: snapshot.dataSource,
+                    status: status,
+                    now: now
+                )
+                let caption = historyCaption(for: item.window, isTrusted: isTrusted)
+                return "\(item.window.id)|\(item.label)|\(caption == nil ? "current" : "cached")"
             },
             rowCount: rowCount,
             requiresScrolling: rowCount > 2
         )
+    }
+
+    /// The only definition of window display trust: the status must carry
+    /// trusted values, the snapshot must be real, and the window itself must be
+    /// displayable.
+    private static func hasQuotaDisplayTrust(
+        _ window: QuotaWindow,
+        dataSource: QuotaDataSource,
+        status: QuotaRefreshStatus
+    ) -> Bool {
+        showsQuotaValues(for: status)
+            && dataSource == .real
+            && window.state.isDisplayable
+    }
+
+    private static func isBeforeReset(_ window: QuotaWindow, now: Date) -> Bool {
+        window.resetAt.map {
+            QuotaTemporalSemantics.isPending(deadline: $0, at: now)
+        } ?? true
+    }
+
+    /// The only definition of window trust: display trust plus a reset deadline
+    /// that has not passed. A missing deadline counts as still pending.
+    private static func isTrustedQuotaWindow(
+        _ window: QuotaWindow,
+        dataSource: QuotaDataSource,
+        status: QuotaRefreshStatus,
+        now: Date
+    ) -> Bool {
+        hasQuotaDisplayTrust(window, dataSource: dataSource, status: status)
+            && isBeforeReset(window, now: now)
+    }
+
+    /// The only definition of the historical-cache caption. A cached window
+    /// advertises its cache provenance only while its number is still trusted.
+    private static func historyCaption(for window: QuotaWindow, isTrusted: Bool) -> String? {
+        isTrusted && window.state == .cached ? "（历史缓存）" : nil
     }
 
     static func quotaWindowSelection(
@@ -520,25 +607,30 @@ enum StatusPopoverFormatting {
         locale: Locale = .current,
         timeZone: TimeZone = .current
     ) -> QuotaWindowSelection {
-        guard capacity > 0 else {
-            return QuotaWindowSelection(visibleItems: [], overflowCount: quotaWindowDisplayItems(
+        quotaWindowSelection(
+            from: quotaWindowDisplayItems(
                 snapshot: snapshot,
                 status: status,
                 now: now,
                 calendar: calendar,
                 locale: locale,
                 timeZone: timeZone
-            ).count)
+            ),
+            capacity: capacity
+        )
+    }
+
+    /// The selection projected from already-derived items. The first trustworthy
+    /// window stays primary while the remaining items keep their presentation
+    /// order, so the visible set never depends on which projection asked for it.
+    private static func quotaWindowSelection(
+        from items: [QuotaWindowDisplayItem],
+        capacity: Int
+    ) -> QuotaWindowSelection {
+        guard capacity > 0 else {
+            return QuotaWindowSelection(visibleItems: [], overflowCount: items.count)
         }
 
-        let items = quotaWindowDisplayItems(
-            snapshot: snapshot,
-            status: status,
-            now: now,
-            calendar: calendar,
-            locale: locale,
-            timeZone: timeZone
-        )
         guard !items.isEmpty else {
             return QuotaWindowSelection(visibleItems: [], overflowCount: 0)
         }
@@ -560,14 +652,28 @@ enum StatusPopoverFormatting {
         status: QuotaRefreshStatus,
         now: Date = .now
     ) -> String {
-        guard snapshot.dataSource == .real else { return "--%" }
-        let weeklyItem = quotaWindowDisplayItems(
-            snapshot: snapshot,
-            status: status,
-            now: now
+        weeklyQuotaMenuTitle(
+            from: quotaWindowDisplayItems(
+                snapshot: snapshot,
+                status: status,
+                now: now
+            ),
+            dataSource: snapshot.dataSource
         )
-            .first { $0.kind == .weekly && $0.trustedPercent != nil }
-        return weeklyItem?.percentText ?? "--%"
+    }
+
+    /// The weekly menu-bar value projected from already-derived items: only a
+    /// real snapshot may contribute a weekly percentage, and only from a window
+    /// whose value is trusted. This is the single definition of that guard, so a
+    /// combined status-item update cannot disagree with a standalone call.
+    private static func weeklyQuotaMenuTitle(
+        from items: [QuotaWindowDisplayItem],
+        dataSource: QuotaDataSource
+    ) -> String {
+        guard dataSource == .real else { return "--%" }
+        return items
+            .first { $0.kind == .weekly && $0.trustedPercent != nil }?
+            .percentText ?? "--%"
     }
 
     static func quotaValueText(
@@ -746,6 +852,34 @@ enum StatusPopoverFormatting {
         )
     }
 
+    /// One status-item update, one quota-window derivation: the menu-bar title
+    /// and the tooltip are projections of the same prepared display items.
+    static func statusItemPresentation(
+        snapshot: QuotaSnapshot,
+        status: QuotaRefreshStatus,
+        now: Date = .now,
+        calendar: Calendar = .current,
+        locale: Locale = .current,
+        timeZone: TimeZone = .current
+    ) -> StatusItemPresentation {
+        let items = quotaWindowDisplayItems(
+            snapshot: snapshot,
+            status: status,
+            now: now,
+            calendar: calendar,
+            locale: locale,
+            timeZone: timeZone
+        )
+        return StatusItemPresentation(
+            title: weeklyQuotaMenuTitle(from: items, dataSource: snapshot.dataSource),
+            tooltip: quotaTooltip(
+                from: items,
+                status: status,
+                dataSource: snapshot.dataSource
+            )
+        )
+    }
+
     static func quotaTooltip(
         snapshot: QuotaSnapshot,
         status: QuotaRefreshStatus,
@@ -754,29 +888,35 @@ enum StatusPopoverFormatting {
         locale: Locale = .current,
         timeZone: TimeZone = .current
     ) -> String {
-        let summary = quotaSummaryLine(
-            snapshot: snapshot,
+        quotaTooltip(
+            from: quotaWindowDisplayItems(
+                snapshot: snapshot,
+                status: status,
+                now: now,
+                calendar: calendar,
+                locale: locale,
+                timeZone: timeZone
+            ),
             status: status,
-            now: now,
-            calendar: calendar,
-            locale: locale,
-            timeZone: timeZone
+            dataSource: snapshot.dataSource
         )
-        let selection = quotaWindowSelection(
-            snapshot: snapshot,
-            status: status,
-            capacity: 1,
-            now: now,
-            calendar: calendar,
-            locale: locale,
-            timeZone: timeZone
-        )
+    }
+
+    /// The tooltip projected from already-derived items: the summary line, the
+    /// selected primary window's recovery line, and the status suffix.
+    private static func quotaTooltip(
+        from items: [QuotaWindowDisplayItem],
+        status: QuotaRefreshStatus,
+        dataSource: QuotaDataSource
+    ) -> String {
+        let summary = quotaSummaryLine(from: items)
+        let selection = quotaWindowSelection(from: items, capacity: 1)
         let recovery = selection.primaryItem.flatMap { item -> String? in
             guard item.trustedPercent != nil else { return nil }
             return "\(item.label)恢复 \(item.resetText) · 还需 \(item.resetRemainingText)"
         }
         let detail = [summary, recovery].compactMap { $0 }.joined(separator: " · ")
-        let failureDataSuffix = snapshot.dataSource == .real
+        let failureDataSuffix = dataSource == .real
             ? "显示上次数据"
             : "当前无可用快照"
 
@@ -813,13 +953,17 @@ enum StatusPopoverFormatting {
         locale: Locale,
         timeZone: TimeZone
     ) -> QuotaWindowDisplayItem {
-        let hasDisplayTrust = showsQuotaValues(for: status)
-            && dataSource == .real
-            && window.state.isDisplayable
-        let isBeforeReset = window.resetAt.map {
-            QuotaTemporalSemantics.isPending(deadline: $0, at: now)
-        } ?? true
-        let isTrusted = hasDisplayTrust && isBeforeReset
+        let hasDisplayTrust = hasQuotaDisplayTrust(
+            window,
+            dataSource: dataSource,
+            status: status
+        )
+        let isTrusted = isTrustedQuotaWindow(
+            window,
+            dataSource: dataSource,
+            status: status,
+            now: now
+        )
         let trustedPercent = isTrusted ? window.remainingPercent : nil
         let percentText: String
         if let trustedPercent {
@@ -853,7 +997,7 @@ enum StatusPopoverFormatting {
             kind: window.kind,
             label: label,
             percentText: percentText,
-            historyCaption: isTrusted && window.state == .cached ? "（历史缓存）" : nil,
+            historyCaption: historyCaption(for: window, isTrusted: isTrusted),
             trustedPercent: trustedPercent,
             progress: trustedPercent.map { Double($0) / 100 },
             fieldState: window.state,
@@ -861,7 +1005,7 @@ enum StatusPopoverFormatting {
                 state: window.state,
                 dataSource: dataSource,
                 status: status,
-                hasReachedReset: hasDisplayTrust && !isBeforeReset
+                hasReachedReset: hasDisplayTrust && !isBeforeReset(window, now: now)
             ),
             resetAt: window.resetAt,
             resetText: resetText,

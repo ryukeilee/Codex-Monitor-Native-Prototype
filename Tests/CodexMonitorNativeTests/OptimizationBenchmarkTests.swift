@@ -177,6 +177,326 @@ final class OptimizationBenchmarkTests: XCTestCase {
         }
     }
 
+    /// The popover asks for a layout signal on every body pass, and that signal
+    /// only needs each card's identity, label, and cache provenance. The baseline
+    /// below rebuilds the fully formatted display items for it, which pays for
+    /// two reset-timestamp formats plus a countdown per window just to read three
+    /// fields; the current path projects the shared window plan instead. Both
+    /// paths are timed in one process so the comparison is not cross-run noise.
+    /// The baseline reproduces the pre-change signal algorithm on top of today's
+    /// display-item builder, so it isolates the cost of formatting values the
+    /// signal never reads rather than replaying a historical revision.
+    func testPopoverLayoutSignalDerivationBaseline() throws {
+        guard ProcessInfo.processInfo.environment["CODEX_MONITOR_BENCHMARK"] == "1" else {
+            throw XCTSkip("Opt-in performance comparison")
+        }
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 71,
+            fiveHourQuotaPercent: 62,
+            resetAvailableCount: 3,
+            resetCreditDetailsState: .detailed,
+            resetCreditDetails: (0..<4).map { index in
+                ResetCreditDetailSnapshot(
+                    ordinal: index,
+                    status: "available",
+                    grantedAt: now.addingTimeInterval(-86_400),
+                    expiresAt: now.addingTimeInterval(Double(86_400 * (index + 1)))
+                )
+            },
+            refreshedAt: now,
+            dataSource: .real,
+            quotaWindows: [
+                QuotaWindow(
+                    limitId: "codex",
+                    windowId: "primary",
+                    kind: .fiveHour,
+                    durationMinutes: 300,
+                    remainingPercent: 62,
+                    state: .live,
+                    resetAt: now.addingTimeInterval(3_600)
+                ),
+                QuotaWindow(
+                    limitId: "codex",
+                    windowId: "secondary",
+                    kind: .weekly,
+                    durationMinutes: 10_080,
+                    remainingPercent: 71,
+                    state: .live,
+                    resetAt: now.addingTimeInterval(86_400 * 2)
+                ),
+                QuotaWindow(
+                    limitId: "codex",
+                    windowId: "monthly",
+                    kind: .monthly,
+                    durationMinutes: 43_200,
+                    remainingPercent: 55,
+                    state: .live,
+                    resetAt: now.addingTimeInterval(86_400 * 20)
+                )
+            ]
+        )
+
+        // Pre-optimization signal derivation: rebuild every formatted display
+        // item, then read the three fields the signal actually needs.
+        func formattedItemsSignal(columns: Int = 2) -> StatusPopoverFormatting.QuotaWindowLayoutSignal {
+            let items = StatusPopoverFormatting.quotaWindowDisplayItems(
+                snapshot: snapshot,
+                status: .success,
+                now: now
+            )
+            let rowCount = (items.count + columns - 1) / columns
+            return StatusPopoverFormatting.QuotaWindowLayoutSignal(
+                itemTokens: items.map {
+                    "\($0.id)|\($0.label)|\($0.historyCaption == nil ? "current" : "cached")"
+                },
+                rowCount: rowCount,
+                requiresScrolling: rowCount > 2
+            )
+        }
+
+        let expected = formattedItemsSignal()
+        XCTAssertEqual(
+            StatusPopoverFormatting.quotaWindowLayoutSignal(snapshot: snapshot, status: .success),
+            expected
+        )
+
+        for round in 0..<5 {
+            var start = Date()
+            for _ in 0..<3_000 {
+                XCTAssertEqual(formattedItemsSignal(), expected)
+            }
+            let baseline = Date().timeIntervalSince(start)
+            start = Date()
+            for _ in 0..<3_000 {
+                XCTAssertEqual(
+                    StatusPopoverFormatting.quotaWindowLayoutSignal(snapshot: snapshot, status: .success),
+                    expected
+                )
+            }
+            let optimized = Date().timeIntervalSince(start)
+            print("BENCH popover-layout-signal×3000 round=\(round) baseline=\(baseline) plan=\(optimized)")
+        }
+    }
+
+    /// A status-item update used to derive the same quota-window presentation
+    /// three times: the weekly title derived its own items, and the tooltip
+    /// derived them once more for the summary line and once more for the
+    /// selection. The optimized path derives the display items once and projects
+    /// both strings from them.
+    ///
+    /// The baseline is a deliberate replay of HEAD's three-derivation algorithm
+    /// on top of today's single-derivation builders, the same convention as
+    /// `testPopoverLayoutSignalDerivationBaseline`: it makes the three separate
+    /// public calls a pre-change status-item update made
+    /// (`weeklyQuotaMenuTitle`, then `quotaSummaryLine` for the summary line and
+    /// `quotaWindowSelection(capacity: 1)` for the selection) and recomposes the
+    /// tooltip string in test code, byte-for-byte as HEAD's `quotaTooltip` did.
+    /// That replay is only a valid baseline because the in-loop assertion proves
+    /// the replayed output still equals `statusItemPresentation`'s output, which
+    /// also validates the local recomposition.
+    ///
+    /// Both paths run in one process and are asserted equal inside the loop so a
+    /// faster wrong answer cannot pass; the measurement order alternates each
+    /// round so neither path systematically benefits from the other's ordering.
+    func testStatusItemPresentationSingleDerivationBaseline() throws {
+        guard ProcessInfo.processInfo.environment["CODEX_MONITOR_BENCHMARK"] == "1" else {
+            throw XCTSkip("Opt-in performance comparison")
+        }
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let timeZone = TimeZone(secondsFromGMT: 0)!
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        let locale = Locale(identifier: "en_US")
+
+        // A realistic menu-bar shape: a live five-hour window, a live weekly
+        // window, and a third live window, all with reset deadlines.
+        let dynamicSnapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 71,
+            fiveHourQuotaPercent: 62,
+            refreshedAt: now,
+            dataSource: .real,
+            quotaWindows: [
+                QuotaWindow(
+                    limitId: "codex",
+                    windowId: "primary",
+                    kind: .fiveHour,
+                    durationMinutes: 300,
+                    remainingPercent: 62,
+                    state: .live,
+                    resetAt: now.addingTimeInterval(3_600)
+                ),
+                QuotaWindow(
+                    limitId: "codex",
+                    windowId: "secondary",
+                    kind: .weekly,
+                    durationMinutes: 10_080,
+                    remainingPercent: 71,
+                    state: .live,
+                    resetAt: now.addingTimeInterval(86_400 * 2)
+                ),
+                QuotaWindow(
+                    limitId: "codex",
+                    windowId: "monthly",
+                    kind: .monthly,
+                    durationMinutes: 43_200,
+                    remainingPercent: 55,
+                    state: .live,
+                    resetAt: now.addingTimeInterval(86_400 * 20)
+                )
+            ]
+        )
+        // Cost comparison for the legacy fallback shape as well, where both
+        // windows carry unmapped reset metadata.
+        let legacySnapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 44,
+            fiveHourQuotaPercent: 37,
+            weeklyQuotaState: .live,
+            fiveHourQuotaState: .live,
+            refreshedAt: now,
+            dataSource: .real,
+            quotaWindows: []
+        )
+        let scenarios: [(name: String, snapshot: QuotaSnapshot)] = [
+            ("dynamic-3-windows", dynamicSnapshot),
+            ("legacy-fallback", legacySnapshot)
+        ]
+        let iterations = 2_000
+
+        func baseline(_ snapshot: QuotaSnapshot) -> StatusPopoverFormatting.StatusItemPresentation {
+            let status: QuotaRefreshStatus = .success
+            // Pre-change sequence, exactly three quota-window derivations: one
+            // for the title, one for the tooltip's summary line, one for the
+            // tooltip's primary selection. Each call derives its own items.
+            let title = StatusPopoverFormatting.weeklyQuotaMenuTitle(
+                snapshot: snapshot,
+                status: status,
+                now: now
+            )
+            let summary = StatusPopoverFormatting.quotaSummaryLine(
+                snapshot: snapshot,
+                status: status,
+                now: now,
+                calendar: calendar,
+                locale: locale,
+                timeZone: timeZone
+            )
+            let selection = StatusPopoverFormatting.quotaWindowSelection(
+                snapshot: snapshot,
+                status: status,
+                capacity: 1,
+                now: now,
+                calendar: calendar,
+                locale: locale,
+                timeZone: timeZone
+            )
+
+            // HEAD's `quotaTooltip` recomposition, copied verbatim: recovery
+            // line from the selected primary item, then the status suffix.
+            let recovery = selection.primaryItem.flatMap { item -> String? in
+                guard item.trustedPercent != nil else { return nil }
+                return "\(item.label)恢复 \(item.resetText) · 还需 \(item.resetRemainingText)"
+            }
+            let detail = [summary, recovery].compactMap { $0 }.joined(separator: " · ")
+            let failureDataSuffix = snapshot.dataSource == .real
+                ? "显示上次数据"
+                : "当前无可用快照"
+            let tooltip: String
+            switch status {
+            case .success:
+                tooltip = "Codex Monitor：\(detail)"
+            case .refreshing:
+                tooltip = "Codex Monitor：\(detail) · 正在刷新"
+            case .networkFailed:
+                tooltip = "Codex Monitor：\(detail) · 网络异常，\(failureDataSuffix)"
+            case .authRequired:
+                tooltip = "Codex Monitor：\(detail) · 需要登录，\(failureDataSuffix)"
+            case .parseFailed:
+                tooltip = "Codex Monitor：\(detail) · 数据异常，\(failureDataSuffix)"
+            case .stale:
+                tooltip = "Codex Monitor：\(detail) · 数据已过期"
+            case .noSnapshot:
+                tooltip = "Codex Monitor：等待连接"
+            case .idle:
+                tooltip = "Codex Monitor：等待首次刷新"
+            case .demoMode:
+                tooltip = "Codex Monitor：演示模式"
+            }
+
+            return StatusPopoverFormatting.StatusItemPresentation(
+                title: title,
+                tooltip: tooltip
+            )
+        }
+
+        func optimized(_ snapshot: QuotaSnapshot) -> StatusPopoverFormatting.StatusItemPresentation {
+            StatusPopoverFormatting.statusItemPresentation(
+                snapshot: snapshot,
+                status: .success,
+                now: now,
+                calendar: calendar,
+                locale: locale,
+                timeZone: timeZone
+            )
+        }
+
+        for (name, snapshot) in scenarios {
+            let expected = optimized(snapshot)
+            XCTAssertEqual(baseline(snapshot), expected)
+
+            let rounds = 5
+            var baselineTimes: [TimeInterval] = []
+            var optimizedTimes: [TimeInterval] = []
+
+            // Both measured loops assert the same way, so neither side is charged
+            // for a check the other one skips.
+            func measureBaseline() -> TimeInterval {
+                let start = Date()
+                for _ in 0..<iterations {
+                    XCTAssertEqual(baseline(snapshot), expected)
+                }
+                return Date().timeIntervalSince(start)
+            }
+
+            func measureOptimized() -> TimeInterval {
+                let start = Date()
+                for _ in 0..<iterations {
+                    XCTAssertEqual(optimized(snapshot), expected)
+                }
+                return Date().timeIntervalSince(start)
+            }
+
+            for round in 0..<rounds {
+                let baselineFirst = round.isMultiple(of: 2)
+                let order = baselineFirst ? "baseline-first" : "optimized-first"
+                let baselineTime: TimeInterval
+                let optimizedTime: TimeInterval
+                if baselineFirst {
+                    baselineTime = measureBaseline()
+                    optimizedTime = measureOptimized()
+                } else {
+                    optimizedTime = measureOptimized()
+                    baselineTime = measureBaseline()
+                }
+                baselineTimes.append(baselineTime)
+                optimizedTimes.append(optimizedTime)
+                let speedup = optimizedTime > 0 ? baselineTime / optimizedTime : .infinity
+                print(
+                    "BENCH status-item-presentation×\(iterations) scenario=\(name) round=\(round) "
+                        + "order=\(order) baseline=\(baselineTime) optimized=\(optimizedTime) speedup=\(speedup)"
+                )
+            }
+
+            let meanBaseline = baselineTimes.reduce(0, +) / Double(baselineTimes.count)
+            let meanOptimized = optimizedTimes.reduce(0, +) / Double(optimizedTimes.count)
+            let meanSpeedup = meanOptimized > 0 ? meanBaseline / meanOptimized : .infinity
+            print(
+                "BENCH status-item-presentation×\(iterations) scenario=\(name) rounds=\(rounds) order=alternating "
+                    + "mean-baseline=\(meanBaseline) mean-optimized=\(meanOptimized) mean-speedup=\(meanSpeedup)"
+            )
+        }
+    }
+
     func testPersistenceAndTrendBaseline() throws {
         guard ProcessInfo.processInfo.environment["CODEX_MONITOR_BENCHMARK"] == "1" else {
             throw XCTSkip("Opt-in performance comparison")

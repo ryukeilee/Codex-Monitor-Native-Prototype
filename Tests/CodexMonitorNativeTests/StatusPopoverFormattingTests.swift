@@ -695,6 +695,51 @@ final class StatusPopoverFormattingTests: XCTestCase {
         XCTAssertEqual(expanded.itemTokens.count, 3)
     }
 
+    /// The layout signal exists only to detect identity, label, or cache-provenance
+    /// changes, so its tokens must stay derivable from the display items it shares a
+    /// window plan with.
+    func testLayoutSignalTokensMatchDisplayItemIdentityLabelAndCacheProvenance() {
+        let snapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 0,
+            fiveHourQuotaPercent: 0,
+            weeklyQuotaState: .unavailable,
+            fiveHourQuotaState: .unavailable,
+            refreshedAt: .now,
+            dataSource: .real,
+            quotaWindows: [
+                QuotaWindow(
+                    limitId: "codex",
+                    windowId: "primary",
+                    kind: .fiveHour,
+                    remainingPercent: 80,
+                    resetAt: .now.addingTimeInterval(3_600)
+                ),
+                QuotaWindow(
+                    limitId: "codex",
+                    windowId: "secondary",
+                    kind: .weekly,
+                    remainingPercent: 70,
+                    resetAt: .now.addingTimeInterval(-60)
+                )
+            ]
+        )
+
+        let items = StatusPopoverFormatting.quotaWindowDisplayItems(snapshot: snapshot, status: .success)
+        let signal = StatusPopoverFormatting.quotaWindowLayoutSignal(snapshot: snapshot, status: .success)
+
+        XCTAssertEqual(items.map(\.id), ["codex.primary", "codex.secondary"])
+        XCTAssertEqual(signal.itemTokens, [
+            "codex.primary|5小时额度|current",
+            "codex.secondary|周额度|current"
+        ])
+        XCTAssertEqual(
+            signal.itemTokens,
+            items.map { "\($0.id)|\($0.label)|\($0.historyCaption == nil ? "current" : "cached")" }
+        )
+        XCTAssertEqual(signal.rowCount, 1)
+        XCTAssertFalse(signal.requiresScrolling)
+    }
+
     func testWeeklyMenuTitleNeverSubstitutesMonthlyOrUnknownWindow() {
         let makeSnapshot: (QuotaWindow) -> QuotaSnapshot = { window in
             QuotaSnapshot(
@@ -729,6 +774,170 @@ final class StatusPopoverFormattingTests: XCTestCase {
             ),
             "66%"
         )
+    }
+
+    /// The status item receives its title and tooltip from one combined
+    /// derivation. Both strings must stay identical to the standalone
+    /// projections for every status and snapshot shape, so a menu-bar update
+    /// cannot drift from the tooltip it ships with.
+    func testStatusItemPresentationMatchesStandaloneTitleAndTooltip() {
+        let now = makeDate("2026-06-19T12:40:00Z")
+        let calendar = Calendar(identifier: .gregorian).setting(timeZone: TimeZone(secondsFromGMT: 0)!)
+        let locale = Locale(identifier: "en_US")
+        let timeZone = TimeZone(secondsFromGMT: 0)!
+        let statuses: [QuotaRefreshStatus] = [
+            .success, .stale, .refreshing, .networkFailed, .authRequired, .parseFailed,
+            .noSnapshot, .idle, .demoMode
+        ]
+
+        // Three windows including a `.cached` five-hour window and a live weekly
+        // window. The shared window plan keeps only live dynamic windows, so the
+        // cached one keeps that filtering identical on both paths.
+        let dynamicWindows = QuotaSnapshot(
+            weeklyQuotaPercent: 71,
+            fiveHourQuotaPercent: 62,
+            weeklyQuotaState: .live,
+            fiveHourQuotaState: .cached,
+            refreshedAt: now,
+            dataSource: .real,
+            quotaWindows: [
+                QuotaWindow(
+                    limitId: "codex",
+                    windowId: "primary",
+                    kind: .fiveHour,
+                    durationMinutes: 300,
+                    remainingPercent: 62,
+                    state: .cached,
+                    resetAt: now.addingTimeInterval(3_600)
+                ),
+                QuotaWindow(
+                    limitId: "codex",
+                    windowId: "secondary",
+                    kind: .weekly,
+                    durationMinutes: 10_080,
+                    remainingPercent: 71,
+                    state: .live,
+                    resetAt: now.addingTimeInterval(86_400 * 2)
+                ),
+                QuotaWindow(
+                    limitId: "codex",
+                    windowId: "monthly",
+                    kind: .monthly,
+                    durationMinutes: 43_200,
+                    remainingPercent: 55,
+                    state: .live,
+                    resetAt: now.addingTimeInterval(86_400 * 20)
+                )
+            ]
+        )
+        // Legacy fallback only: the five-hour window's reset already passed, so
+        // its value is untrusted, and without a weekly window every value stays
+        // `--`.
+        let untrustedLegacy = QuotaSnapshot(
+            weeklyQuotaPercent: 0,
+            fiveHourQuotaPercent: 37,
+            weeklyQuotaState: .unavailable,
+            fiveHourQuotaState: .live,
+            fiveHourResetAt: now.addingTimeInterval(-60),
+            refreshedAt: now,
+            dataSource: .real,
+            quotaWindows: []
+        )
+        // Legacy fallback only, with a trusted weekly value and unexposed resets.
+        let legacyWeekly = QuotaSnapshot(
+            weeklyQuotaPercent: 44,
+            fiveHourQuotaPercent: 37,
+            weeklyQuotaState: .live,
+            fiveHourQuotaState: .live,
+            refreshedAt: now,
+            dataSource: .real,
+            quotaWindows: []
+        )
+        let mock = QuotaSnapshot(
+            weeklyQuotaPercent: 33,
+            fiveHourQuotaPercent: 22,
+            refreshedAt: now,
+            dataSource: .mock
+        )
+        let snapshots: [(name: String, snapshot: QuotaSnapshot)] = [
+            ("dynamic three windows", dynamicWindows),
+            ("untrusted legacy fallback", untrustedLegacy),
+            ("legacy weekly fallback", legacyWeekly),
+            ("mock snapshot", mock)
+        ]
+
+        for (name, snapshot) in snapshots {
+            for status in statuses {
+                let presentation = StatusPopoverFormatting.statusItemPresentation(
+                    snapshot: snapshot,
+                    status: status,
+                    now: now,
+                    calendar: calendar,
+                    locale: locale,
+                    timeZone: timeZone
+                )
+                XCTAssertEqual(
+                    presentation.title,
+                    StatusPopoverFormatting.weeklyQuotaMenuTitle(
+                        snapshot: snapshot,
+                        status: status,
+                        now: now
+                    ),
+                    "\(name) title diverged for \(status.rawValue)"
+                )
+                XCTAssertEqual(
+                    presentation.tooltip,
+                    StatusPopoverFormatting.quotaTooltip(
+                        snapshot: snapshot,
+                        status: status,
+                        now: now,
+                        calendar: calendar,
+                        locale: locale,
+                        timeZone: timeZone
+                    ),
+                    "\(name) tooltip diverged for \(status.rawValue)"
+                )
+            }
+        }
+
+        // Anchor the equivalence on concrete output so a shared regression in
+        // both projections cannot pass unnoticed.
+        func makePresentation(
+            _ snapshot: QuotaSnapshot,
+            _ status: QuotaRefreshStatus
+        ) -> StatusPopoverFormatting.StatusItemPresentation {
+            StatusPopoverFormatting.statusItemPresentation(
+                snapshot: snapshot,
+                status: status,
+                now: now,
+                calendar: calendar,
+                locale: locale,
+                timeZone: timeZone
+            )
+        }
+
+        let dynamicDetail = "Codex Monitor：周额度 71% · 月额度 55% · 周额度恢复 6月21日 12:40 · 还需 48小时"
+        XCTAssertEqual(makePresentation(dynamicWindows, .success).title, "71%")
+        XCTAssertEqual(makePresentation(dynamicWindows, .success).tooltip, dynamicDetail)
+        XCTAssertEqual(
+            makePresentation(dynamicWindows, .networkFailed).tooltip,
+            "\(dynamicDetail) · 网络异常，显示上次数据"
+        )
+        XCTAssertEqual(makePresentation(dynamicWindows, .noSnapshot).tooltip, "Codex Monitor：等待连接")
+        XCTAssertEqual(makePresentation(untrustedLegacy, .success).title, "--%")
+        XCTAssertEqual(makePresentation(untrustedLegacy, .success).tooltip, "Codex Monitor：5小时额度 --")
+        XCTAssertEqual(makePresentation(legacyWeekly, .success).title, "44%")
+        XCTAssertEqual(
+            makePresentation(legacyWeekly, .success).tooltip,
+            "Codex Monitor：5小时额度 37% · 周额度 44% · 5小时额度恢复 未暴露 · 还需 未暴露"
+        )
+        XCTAssertEqual(makePresentation(mock, .success).title, "--%")
+        XCTAssertEqual(makePresentation(mock, .success).tooltip, "Codex Monitor：额度 --")
+        XCTAssertEqual(
+            makePresentation(mock, .networkFailed).tooltip,
+            "Codex Monitor：额度 -- · 网络异常，当前无可用快照"
+        )
+        XCTAssertEqual(makePresentation(mock, .demoMode).tooltip, "Codex Monitor：演示模式")
     }
 
     func testDemoProjectionNeverExposesMockPercentAsTrusted() {

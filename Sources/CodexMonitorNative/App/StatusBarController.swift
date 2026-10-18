@@ -66,6 +66,10 @@ final class StatusBarController {
     private func updateTitle(with presentationSnapshot: QuotaPresentationSnapshot) {
         let snapshot = presentationSnapshot.snapshot
         let status = presentationSnapshot.effectiveStatus(at: .now)
+        let presentation = StatusPopoverFormatting.statusItemPresentation(
+            snapshot: snapshot,
+            status: status
+        )
         let title: String
 
         // Only states with no trusted weekly value fall back to the
@@ -76,27 +80,13 @@ final class StatusBarController {
             title = "--%"
 
         case .success, .stale, .refreshing, .networkFailed, .authRequired, .parseFailed:
-            title = weeklyQuotaTitle(for: snapshot, status: status)
+            title = presentation.title
         }
 
         applyTitle(title)
-        statusItem.button?.toolTip = tooltip(for: snapshot, status: status)
+        statusItem.button?.toolTip = presentation.tooltip
         statusItem.button?.setAccessibilityTitle("Codex Monitor Native \(title)")
         AppLogger.statusBar.info("Menu bar: \(title, privacy: .public) status=\(status.rawValue, privacy: .public)")
-    }
-
-    private func weeklyQuotaTitle(for snapshot: QuotaSnapshot, status: QuotaRefreshStatus) -> String {
-        StatusPopoverFormatting.weeklyQuotaMenuTitle(
-            snapshot: snapshot,
-            status: status
-        )
-    }
-
-    private func tooltip(for snapshot: QuotaSnapshot, status: QuotaRefreshStatus) -> String {
-        StatusPopoverFormatting.quotaTooltip(
-            snapshot: snapshot,
-            status: status
-        )
     }
 
     private func applyTitle(_ title: String) {

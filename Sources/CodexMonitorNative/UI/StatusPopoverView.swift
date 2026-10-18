@@ -60,8 +60,11 @@ struct StatusPopoverView: View {
     }
 
     var body: some View {
+        // Evaluate the layout signal once per body pass: the viewport decision
+        // and the change observer both read the same value.
+        let quotaSignal = quotaLayoutSignal
         MetallicPanelBackground {
-            if hasExpandedContent {
+            if hasExpandedContent(quotaSignal: quotaSignal) {
                 ScrollView(.vertical) {
                     panelContent
                 }
@@ -81,15 +84,17 @@ struct StatusPopoverView: View {
                 onLayoutChange()
             }
         }
-        .onChange(of: quotaLayoutSignal) { _, _ in onLayoutChange() }
+        .onChange(of: quotaSignal) { _, _ in onLayoutChange() }
     }
 
-    private var hasExpandedContent: Bool {
+    private func hasExpandedContent(
+        quotaSignal: StatusPopoverFormatting.QuotaWindowLayoutSignal
+    ) -> Bool {
         StatusPopoverInteractionPolicy.requiresScrollableViewport(
             isQuotaExpanded: isQuotaExpanded,
             isDiagnosticsExpanded: showsDiagnostics,
             hasDiagnosticsContent: hasDiagnosticsContent,
-            quotaLayoutSignal: quotaLayoutSignal
+            quotaLayoutSignal: quotaSignal
         )
     }
 
