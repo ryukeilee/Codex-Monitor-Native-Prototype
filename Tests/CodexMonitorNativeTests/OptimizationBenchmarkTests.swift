@@ -294,15 +294,22 @@ final class OptimizationBenchmarkTests: XCTestCase {
         }
     }
 
-    /// A commit that replaced an already-valid primary used to validate that
-    /// datum three separate times (`containsNewerPersistenceVersion`,
-    /// `loadEnvelope`, and `isTrustedPersistenceData`). The single-pass audit now
-    /// performs the first of those validation passes plus the write readback, so
-    /// this replays exactly the second and third envelope validations and their
-    /// payload decodes — the four decode passes that were removed. Because the
-    /// old commit performed the same audit-equivalent and write work, its cost
-    /// is `commit + removedValidation`.
-    func testSnapshotStoreRedundantValidationBaseline() throws {
+    /// Measures one commit over an already-valid primary together with the decode
+    /// work this round removed.
+    ///
+    /// Decode counts here are exact observations: a warm commit performs three
+    /// JSON decodes per iteration, and `removedRoundDecodeCount` replays exactly
+    /// the kinds and counts of decodes this round dropped (the write readback's
+    /// envelope validation and payload decode, plus the newer-schema probe's
+    /// legacy-shape fallback). A commit that replaced an already-valid primary
+    /// used to validate that datum three separate times
+    /// (`containsNewerPersistenceVersion`, `loadEnvelope`, and
+    /// `isTrustedPersistenceData`) and probe it twice for a newer raw snapshot,
+    /// so the pre-round path ran six decodes. That six is a constant describing
+    /// the old code path rather than a measurement of it, and the wall-clock gain
+    /// printed below is estimated by replaying those removed decodes instead of
+    /// timing the old implementation.
+    func testSnapshotStoreCommitDecodeCountIsExactAndRemovedCostIsEstimated() throws {
         guard ProcessInfo.processInfo.environment["CODEX_MONITOR_BENCHMARK"] == "1" else {
             throw XCTSkip("Opt-in performance comparison")
         }
@@ -355,15 +362,18 @@ final class OptimizationBenchmarkTests: XCTestCase {
         XCTAssertTrue(store.saveState(state))
         let primary = try XCTUnwrap(defaults.data(forKey: "benchmark"))
 
-        XCTAssertEqual(removedValidationDecodeCount(of: primary), 4)
+        XCTAssertEqual(removedRoundDecodeCount(of: primary), 3)
 
         let iterations = 200
+        // The pre-round commit ran six decodes per iteration. This is an explicit
+        // expectation of the removed path, not a measurement of it.
+        let expectedPreRoundCommitDecodes = iterations * 6
         for round in 0..<5 {
             var start = Date()
             for _ in 0..<iterations {
-                _ = removedValidationDecodeCount(of: primary)
+                _ = removedRoundDecodeCount(of: primary)
             }
-            let removedValidation = Date().timeIntervalSince(start)
+            let removedRound = Date().timeIntervalSince(start)
 
             let decodeBaseline = SnapshotStore.debugPersistenceDecodeCount
             start = Date()
@@ -375,11 +385,11 @@ final class OptimizationBenchmarkTests: XCTestCase {
 
             print(
                 "BENCH snapshot-store round=\(round) iterations=\(iterations) "
-                    + "legacyCommitDecodes=\(iterations * 10) commitDecodes=\(commitDecodes) "
-                    + "removedValidation=\(removedValidation) commit=\(commit) "
-                    + "estimatedLegacyCommit=\(removedValidation + commit)"
+                    + "expectedPreRoundCommitDecodes=\(expectedPreRoundCommitDecodes) commitDecodes=\(commitDecodes) "
+                    + "removedRoundDecodeReplay=\(removedRound) commit=\(commit) "
+                    + "estimatedPreRoundCommit=\(removedRound + commit)"
             )
-            XCTAssertEqual(commitDecodes, iterations * 6)
+            XCTAssertEqual(commitDecodes, iterations * 3)
         }
     }
 
@@ -599,6 +609,570 @@ final class OptimizationBenchmarkTests: XCTestCase {
         }
     }
 
+    /// `CodexAuthBoundaryObserver` 每秒调用一次 `CodexAuthIdentityReader.currentBoundary()`，
+    /// 其中绝大部分成本是重复解析一份绝大多数时候没变的 `auth.json`。
+    /// `CodexAuthBoundaryPoller` 以原始字节为键跳过解析，本基准给出「每次调用都解析」与
+    /// 「字节比较 + 命中即跳过」的 per-call 对比。`synthetic` 列用 ≥4 KB 的合成 payload，
+    /// 任何机器都能复现，它测的是纯解析 vs 纯命中，因此用可控的固定字节手搓 poller。
+    /// `real` 列测的是**生产接线本身**：被测对象是
+    /// `CodexAuthBoundaryObserver.makeDefaultAuthBoundaryProvider()` 返回的闭包，也就是
+    /// `AppDelegate` 装配 observer 时实际走的那条路径（工厂 + 默认 `readData`）。
+    /// 两列都只输出耗时与字节数，绝不输出文件内容、账号标识或令牌。
+    @MainActor
+    func testAuthBoundaryPollBaseline() throws {
+        guard ProcessInfo.processInfo.environment["CODEX_MONITOR_BENCHMARK"] == "1" else {
+            throw XCTSkip("Opt-in performance comparison")
+        }
+        let iterations = 200
+        func perCallMicroseconds(_ elapsed: TimeInterval) -> Double {
+            elapsed / Double(iterations) * 1_000_000
+        }
+
+        let synthetic = Self.authBoundaryPayload(paddingBytes: 4_096)
+        XCTAssertGreaterThan(synthetic.count, 4_096)
+        let syntheticPoller = CodexAuthBoundaryPoller(readData: { synthetic })
+        XCTAssertNotNil(syntheticPoller.currentBoundary())
+        for round in 0..<5 {
+            var start = Date()
+            var parsed = 0
+            for _ in 0..<iterations {
+                parsed += CodexAuthIdentityReader.parse(data: synthetic) == nil ? 0 : 1
+            }
+            let parseEveryCall = Date().timeIntervalSince(start)
+
+            start = Date()
+            var hits = 0
+            for _ in 0..<iterations {
+                hits += syntheticPoller.currentBoundary() == nil ? 0 : 1
+            }
+            let memoizedHit = Date().timeIntervalSince(start)
+
+            XCTAssertEqual(parsed, iterations)
+            XCTAssertEqual(hits, iterations)
+            print(
+                "BENCH auth-boundary[synthetic] bytes=\(synthetic.count) round=\(round) iterations=\(iterations) "
+                    + "parseEveryCallUs=\(perCallMicroseconds(parseEveryCall)) "
+                    + "memoizedHitUs=\(perCallMicroseconds(memoizedHit)) "
+                    + "ratio=\(parseEveryCall / memoizedHit)"
+            )
+        }
+
+        // 生产路径：旧的每次轮询 = 读文件 + 解析；新的每次轮询 = 读文件 + 字节比较。
+        // 两段跳过分支都只打印、不失败：本机没有可读 `auth.json`（未登录），或文件可读但
+        // 身份不可验证（`auth_mode` 非 chatgpt、令牌形状异常、文件损坏），都属于环境状态，
+        // 不是基准要证明的东西。
+        guard let realData = CodexAuthIdentityReader.currentAuthData() else {
+            print("BENCH auth-boundary[real] skipped: no readable auth.json in this CODEX_HOME")
+            return
+        }
+        guard let baseline = CodexAuthIdentityReader.currentBoundary(), baseline.isValid else {
+            print(
+                "BENCH auth-boundary[real] skipped: readable auth.json (bytes=\(realData.count)) "
+                    + "but the identity is not verifiable in this CODEX_HOME"
+            )
+            return
+        }
+        // 工厂产物：与 `AppDelegate` 装配 observer 时用的是同一个入口。若默认参数被改写成
+        // 内联的 `CodexAuthBoundaryPoller().currentBoundary()`，每次求值都会新建 poller，
+        // 这一列的加速比会退回 ~1×。
+        let productionProvider = CodexAuthBoundaryObserver.makeDefaultAuthBoundaryProvider()
+        XCTAssertEqual(productionProvider(), baseline)
+        for round in 0..<5 {
+            var start = Date()
+            var readAndParsed = 0
+            for _ in 0..<iterations {
+                readAndParsed += CodexAuthIdentityReader.currentBoundary() == nil ? 0 : 1
+            }
+            let readAndParse = Date().timeIntervalSince(start)
+
+            start = Date()
+            var readAndCompared = 0
+            for _ in 0..<iterations {
+                readAndCompared += productionProvider() == nil ? 0 : 1
+            }
+            let readAndCompare = Date().timeIntervalSince(start)
+
+            XCTAssertEqual(readAndParsed, iterations)
+            XCTAssertEqual(readAndCompared, iterations)
+            print(
+                "BENCH auth-boundary[real] bytes=\(realData.count) round=\(round) iterations=\(iterations) "
+                    + "oldPollReadAndParseUs=\(perCallMicroseconds(readAndParse)) "
+                    + "newPollReadAndCompareUs=\(perCallMicroseconds(readAndCompare)) "
+                    + "ratio=\(readAndParse / readAndCompare)"
+            )
+        }
+    }
+
+    /// 一份形状真实的合成 auth JSON（值全部是合成值），`padding` 用来把体积推到真实的 ~4 KB。
+    private static func authBoundaryPayload(paddingBytes: Int) -> Data {
+        let claims: [String: Any] = ["sub": "bench-subject", "sid": "bench-session"]
+        let claimPayload = try! JSONSerialization.data(withJSONObject: claims, options: [.sortedKeys])
+        let syntheticJWT = "header." + claimPayload.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "") + ".signature"
+        return try! JSONSerialization.data(withJSONObject: [
+            "auth_mode": "chatgpt",
+            "tokens": [
+                "id_token": syntheticJWT,
+                "refresh_token": "bench-refresh-token",
+                "account_id": "bench-account-id"
+            ],
+            "padding": String(repeating: "A", count: paddingBytes)
+        ], options: [.sortedKeys])
+    }
+
+    /// Measures stdout framing end to end through the real `CodexRPCClient`.
+    ///
+    /// The `baseline`, `hoisted` and `rewrite` columns are SIMPLIFIED FRAMING MODELS, not verbatim
+    /// copies of the production loop: they substitute a frame counter for the real line handler
+    /// (JSON decode, request matching, completion) and omit the production init/EOF state machine.
+    /// They isolate the buffer arithmetic this round touched. Because `baseline` and `hoisted` are
+    /// structurally identical apart from the LF search operand, their ratio is a valid in-process
+    /// measure of the LF-constant hoist. `rewrite` models the single-removal alternative that was
+    /// measured and deliberately not shipped.
+    ///
+    /// The `production` column is a DIFFERENT CODE PATH: one whole refresh per call, including the
+    /// per-iteration client and transport construction, request encoding, async scheduling, JSON
+    /// decode, snapshot parse and XCTest assertions. A `framing/production` ratio is therefore NOT a
+    /// production time share, and neither is a difference against a smaller workload (the removed
+    /// frames also remove their JSON processing).
+    func testRPCStdoutFramingBaseline() async throws {
+        guard ProcessInfo.processInfo.environment["CODEX_MONITOR_BENCHMARK"] == "1" else {
+            throw XCTSkip("Opt-in performance comparison")
+        }
+        let maxFrameBytes = 512 * 1_024
+
+        for workload in Self.rpcFramingWorkloads() {
+            for round in 0..<5 {
+                var start = Date()
+                for _ in 0..<workload.iterations {
+                    let transport = BenchmarkRPCTransport(script: workload.script)
+                    let client = CodexRPCClient(
+                        transport: transport,
+                        timeoutScheduler: BenchmarkTimeoutScheduler()
+                    )
+                    do {
+                        let snapshot = try await client.fetchQuota(timeoutSeconds: 60)
+                        XCTAssertNil(workload.expectedFailure, "\(workload.label) completed but must fail")
+                        XCTAssertEqual(snapshot.fiveHourQuotaPercent, 50, workload.label)
+                    } catch let error as RealQuotaError {
+                        XCTAssertEqual(error, workload.expectedFailure, "\(workload.label) failed unexpectedly")
+                    } catch {
+                        XCTFail("\(workload.label) failed unexpectedly: \(error)")
+                    }
+                }
+                let production = Date().timeIntervalSince(start) / Double(workload.iterations)
+
+                start = Date()
+                var baselineFrames = 0
+                for _ in 0..<workload.iterations {
+                    let result = Self.framingLoop(
+                        workload.script,
+                        maxFrameBytes: maxFrameBytes,
+                        stopAfterFrames: workload.frames,
+                        variant: .baseline
+                    )
+                    XCTAssertEqual(result.didFail, workload.expectedFailure != nil, workload.label)
+                    baselineFrames += result.frames
+                }
+                let baseline = Date().timeIntervalSince(start) / Double(workload.iterations)
+
+                start = Date()
+                var hoistedFrames = 0
+                for _ in 0..<workload.iterations {
+                    let result = Self.framingLoop(
+                        workload.script,
+                        maxFrameBytes: maxFrameBytes,
+                        stopAfterFrames: workload.frames,
+                        variant: .hoisted
+                    )
+                    XCTAssertEqual(result.didFail, workload.expectedFailure != nil, workload.label)
+                    hoistedFrames += result.frames
+                }
+                let hoisted = Date().timeIntervalSince(start) / Double(workload.iterations)
+
+                start = Date()
+                var rewriteFrames = 0
+                for _ in 0..<workload.iterations {
+                    let result = Self.framingLoop(
+                        workload.script,
+                        maxFrameBytes: maxFrameBytes,
+                        stopAfterFrames: workload.frames,
+                        variant: .singleRemoval
+                    )
+                    XCTAssertEqual(result.didFail, workload.expectedFailure != nil, workload.label)
+                    rewriteFrames += result.frames
+                }
+                let rewrite = Date().timeIntervalSince(start) / Double(workload.iterations)
+
+                XCTAssertEqual(baselineFrames, workload.frames * workload.iterations, workload.label)
+                XCTAssertEqual(hoistedFrames, workload.frames * workload.iterations, workload.label)
+                XCTAssertEqual(rewriteFrames, workload.frames * workload.iterations, workload.label)
+                print(
+                    "BENCH rpc-framing[\(workload.label)] bytes=\(workload.bytes) chunks=\(workload.chunkCount) "
+                        + "frames=\(workload.frames) round=\(round) iterations=\(workload.iterations) "
+                        + "productionPerCall=\(production) baseline=\(baseline) hoisted=\(hoisted) "
+                        + "rewrite=\(rewrite) baselineOverHoisted=\(baseline / hoisted) "
+                        + "baselineOverProduction=\(baseline / production) "
+                        + "hoistedOverProduction=\(hoisted / production)"
+                )
+            }
+        }
+    }
+
+    /// The stdout scripts the framing benchmark drives, in the shapes a refresh and a hostile peer
+    /// can produce.
+    private static func rpcFramingWorkloads() -> [RPCFramingWorkload] {
+        let maxFrameBytes = 512 * 1_024
+        let initializeResponse = line(
+            #"{"id":1,"result":{"codexHome":"/tmp/codex","platformFamily":"unix","platformOs":"macos","userAgent":"codex-test"}}"#
+        )
+        let rateLimitsResponse = line(#"{"id":2,"result":{"rateLimits":{"primary":{"windowDurationMins":300,"usedPercent":50}}}}"#)
+        let realisticRateLimitsResponse = line(
+            #"{"id":2,"result":{"rateLimits":{"primary":{"windowDurationMins":300,"usedPercent":50}},"padding":""#
+                + String(repeating: "A", count: 1_392)
+                + #""}}"#
+        )
+        let notification = line(#"{"method":"account/rateLimits/updated","params":{}}"#)
+        let completion = initializeResponse + rateLimitsResponse
+
+        var workloads: [RPCFramingWorkload] = [
+            // The realistic shape: one 16 KiB read that already holds the whole exchange.
+            RPCFramingWorkload(
+                label: "realistic-3frame",
+                script: [.stdout(initializeResponse + notification + realisticRateLimitsResponse)],
+                frames: 3,
+                iterations: 300
+            ),
+            // The same shape with the frames that do the work removed: it bounds the fixed cost of
+            // the production column, but its difference against `realistic-3frame` also mixes in
+            // the removed frames' JSON processing, so that difference is not a framing share.
+            RPCFramingWorkload(
+                label: "floor-2frame",
+                script: [.stdout(completion)],
+                frames: 2,
+                iterations: 300
+            )
+        ]
+
+        // Saturated 16 KiB chunks: the shape that makes the loop's per-frame arithmetic visible.
+        for frameSize in [19, 200, 1_024, 8_192] {
+            let frame = notificationFrame(wireBytes: frameSize)
+            var chunk = Data()
+            for _ in 0..<(16_384 / frameSize) {
+                chunk.append(frame)
+            }
+            workloads.append(
+                RPCFramingWorkload(
+                    label: "saturated-\(frameSize)b",
+                    script: [.stdout(chunk), .stdout(completion)],
+                    frames: 16_384 / frameSize + 2,
+                    iterations: frameSize <= 32 ? 30 : (frameSize <= 256 ? 100 : 200)
+                )
+            )
+        }
+
+        // A single frame exactly at the limit, with no LF anywhere in it: every 16 KiB chunk grows
+        // the partial frame and re-searches it.
+        let largeBody = Data(
+            (#"{"method":""# + String(repeating: "A", count: maxFrameBytes - 13) + #""}"#).utf8
+        )
+        XCTAssertEqual(largeBody.count, maxFrameBytes)
+        func sixteenKiBChunks(of data: Data) -> [Data] {
+            var chunks: [Data] = []
+            var index = data.startIndex
+            while index < data.endIndex {
+                let end = data.index(index, offsetBy: 16_384, limitedBy: data.endIndex) ?? data.endIndex
+                chunks.append(data[index..<end])
+                index = end
+            }
+            return chunks
+        }
+        workloads.append(
+            RPCFramingWorkload(
+                label: "large-partial-512kib",
+                script: sixteenKiBChunks(of: largeBody).map { .stdout($0) }
+                    + [.stdout(Data([0x0A]) + completion)],
+                frames: 3,
+                iterations: 8
+            )
+        )
+
+        // The same frame with one byte too many: the last chunk pushes newline-less data past the
+        // limit, which rejects the request without any LF ever arriving.
+        workloads.append(
+            RPCFramingWorkload(
+                label: "over-limit-512kib",
+                script: sixteenKiBChunks(of: largeBody).map { .stdout($0) } + [.stdout(Data([0x41]))],
+                frames: 0,
+                iterations: 8,
+                expectedFailure: .codexIncompatible
+            )
+        )
+
+        // The worst case the loop can see: the limit-sized partial frame, then one 16 KiB chunk that
+        // carries its LF plus many tiny frames.
+        var worstCaseTail = Data([0x0A])
+        for _ in 0..<800 {
+            worstCaseTail.append(notificationFrame(wireBytes: 19))
+        }
+        worstCaseTail.append(completion)
+        workloads.append(
+            RPCFramingWorkload(
+                label: "worst-case-512kib-plus-tiny",
+                script: sixteenKiBChunks(of: largeBody).map { .stdout($0) }
+                    + [.stdout(worstCaseTail)],
+                frames: 803,
+                iterations: 8
+            )
+        )
+
+        // One frame split into one-byte chunks, then one split into seven-byte chunks.
+        var fragmentedScript: [BenchmarkRPCTransport.Emission] = initializeResponse.map { .stdout(Data([$0])) }
+        for chunk in strideChunks(of: rateLimitsResponse, size: 7) {
+            fragmentedScript.append(.stdout(chunk))
+        }
+        workloads.append(
+            RPCFramingWorkload(
+                label: "fragmented-1b-7b",
+                script: fragmentedScript,
+                frames: 2,
+                iterations: 300
+            )
+        )
+
+        // EOF delivering a frame that never got its LF.
+        workloads.append(
+            RPCFramingWorkload(
+                label: "eof-no-newline",
+                script: [.stdout(initializeResponse.dropLast()), .stdoutEOF, .stdout(rateLimitsResponse)],
+                frames: 2,
+                iterations: 300
+            )
+        )
+
+        return workloads
+    }
+
+    private static func line(_ body: String) -> Data {
+        Data(body.utf8) + Data([0x0A])
+    }
+
+    /// A notification frame whose wire size (body plus LF) is exactly `wireBytes`.
+    private static func notificationFrame(wireBytes: Int) -> Data {
+        let padding = wireBytes - 14
+        XCTAssertGreaterThanOrEqual(padding, 1)
+        return line(#"{"method":""# + String(repeating: "A", count: padding) + #""}"#)
+    }
+
+    private static func strideChunks(of data: Data, size: Int) -> [Data] {
+        var chunks: [Data] = []
+        var index = data.startIndex
+        while index < data.endIndex {
+            let end = data.index(index, offsetBy: size, limitedBy: data.endIndex) ?? data.endIndex
+            chunks.append(data[index..<end])
+            index = end
+        }
+        return chunks
+    }
+
+    private enum FramingLoopVariant {
+        case baseline
+        case hoisted
+        case singleRemoval
+    }
+
+    private struct FramingLoopResult {
+        let frames: Int
+        let didFail: Bool
+    }
+
+    private static let lineFeedData = Data([0x0A])
+
+    /// The three simplified framing models the benchmark pushes the scripts through, each with a
+    /// frame counter standing in for the production line handler so the measurement is the buffer
+    /// arithmetic alone. Stops exactly where the client resumes (after the frame that completes the
+    /// request, or on the first frame that exceeds the limit).
+    private static func framingLoop(
+        _ script: [BenchmarkRPCTransport.Emission],
+        maxFrameBytes: Int,
+        stopAfterFrames: Int,
+        variant: FramingLoopVariant
+    ) -> FramingLoopResult {
+        switch variant {
+        case .baseline:
+            return baselineFramingLoop(
+                script,
+                maxFrameBytes: maxFrameBytes,
+                stopAfterFrames: stopAfterFrames
+            )
+        case .hoisted:
+            return hoistedFramingLoop(
+                script,
+                maxFrameBytes: maxFrameBytes,
+                stopAfterFrames: stopAfterFrames
+            )
+        case .singleRemoval:
+            return singleRemovalFramingLoop(
+                script,
+                maxFrameBytes: maxFrameBytes,
+                stopAfterFrames: stopAfterFrames
+            )
+        }
+    }
+
+    /// A simplified framing model of the pre-change loop, kept so the A/B ratio is reproducible in
+    /// one process. It is not a verbatim copy of the production loop: the real line handler is
+    /// replaced by a frame counter and both replicas inline that counting identically, so the only
+    /// difference from `hoistedFramingLoop` is the LF search operand.
+    private static func baselineFramingLoop(
+        _ script: [BenchmarkRPCTransport.Emission],
+        maxFrameBytes: Int,
+        stopAfterFrames: Int
+    ) -> FramingLoopResult {
+        var stdoutBuffer = Data()
+        var frames = 0
+        for emission in script {
+            switch emission {
+            case .stdout(let chunk):
+                stdoutBuffer.append(chunk)
+                while let newlineRange = stdoutBuffer.range(of: Data("\n".utf8)) {
+                    if newlineRange.lowerBound > maxFrameBytes {
+                        return FramingLoopResult(frames: frames, didFail: true)
+                    }
+                    let lineData = stdoutBuffer.subdata(in: 0..<newlineRange.lowerBound)
+                    stdoutBuffer.removeSubrange(0...newlineRange.lowerBound)
+                    _ = lineData
+                    frames += 1
+                    if frames == stopAfterFrames {
+                        return FramingLoopResult(frames: frames, didFail: false)
+                    }
+                }
+                if stdoutBuffer.count > maxFrameBytes {
+                    return FramingLoopResult(frames: frames, didFail: true)
+                }
+            case .stdoutEOF:
+                guard !stdoutBuffer.isEmpty else { continue }
+                let trailingLine = stdoutBuffer
+                stdoutBuffer.removeAll(keepingCapacity: false)
+                guard trailingLine.count <= maxFrameBytes else {
+                    return FramingLoopResult(frames: frames, didFail: true)
+                }
+                _ = trailingLine
+                frames += 1
+                if frames == stopAfterFrames {
+                    return FramingLoopResult(frames: frames, didFail: false)
+                }
+            }
+        }
+        return FramingLoopResult(frames: frames, didFail: false)
+    }
+
+    /// A simplified framing model of the shipped loop: structurally identical to
+    /// `baselineFramingLoop` apart from the LF search operand, which is the hoisted `lineFeedData`
+    /// constant instead of a freshly built `Data("\n".utf8)` per search.
+    private static func hoistedFramingLoop(
+        _ script: [BenchmarkRPCTransport.Emission],
+        maxFrameBytes: Int,
+        stopAfterFrames: Int
+    ) -> FramingLoopResult {
+        var stdoutBuffer = Data()
+        var frames = 0
+        for emission in script {
+            switch emission {
+            case .stdout(let chunk):
+                stdoutBuffer.append(chunk)
+                while let newlineRange = stdoutBuffer.range(of: lineFeedData) {
+                    if newlineRange.lowerBound > maxFrameBytes {
+                        return FramingLoopResult(frames: frames, didFail: true)
+                    }
+                    let lineData = stdoutBuffer.subdata(in: 0..<newlineRange.lowerBound)
+                    stdoutBuffer.removeSubrange(0...newlineRange.lowerBound)
+                    _ = lineData
+                    frames += 1
+                    if frames == stopAfterFrames {
+                        return FramingLoopResult(frames: frames, didFail: false)
+                    }
+                }
+                if stdoutBuffer.count > maxFrameBytes {
+                    return FramingLoopResult(frames: frames, didFail: true)
+                }
+            case .stdoutEOF:
+                guard !stdoutBuffer.isEmpty else { continue }
+                let trailingLine = stdoutBuffer
+                stdoutBuffer.removeAll(keepingCapacity: false)
+                guard trailingLine.count <= maxFrameBytes else {
+                    return FramingLoopResult(frames: frames, didFail: true)
+                }
+                _ = trailingLine
+                frames += 1
+                if frames == stopAfterFrames {
+                    return FramingLoopResult(frames: frames, didFail: false)
+                }
+            }
+        }
+        return FramingLoopResult(frames: frames, didFail: false)
+    }
+
+    /// A simplified framing model of the single-removal rewrite this round considered: complete
+    /// frames are consumed by advancing a read offset instead of removing the front of the buffer
+    /// per frame, and the consumed prefix is compacted once per chunk, so the remaining bytes are
+    /// moved at most once per chunk. Measured but not shipped.
+    private static func singleRemovalFramingLoop(
+        _ script: [BenchmarkRPCTransport.Emission],
+        maxFrameBytes: Int,
+        stopAfterFrames: Int
+    ) -> FramingLoopResult {
+        var stdoutBuffer = Data()
+        var consumed = 0
+        var frames = 0
+        for emission in script {
+            switch emission {
+            case .stdout(let chunk):
+                stdoutBuffer.append(chunk)
+                while let newlineRange = stdoutBuffer.range(
+                    of: lineFeedData,
+                    in: consumed..<stdoutBuffer.count
+                ) {
+                    if newlineRange.lowerBound - consumed > maxFrameBytes {
+                        return FramingLoopResult(frames: frames, didFail: true)
+                    }
+                    let lineData = stdoutBuffer.subdata(in: consumed..<newlineRange.lowerBound)
+                    consumed = newlineRange.lowerBound + 1
+                    _ = lineData
+                    frames += 1
+                    if frames == stopAfterFrames {
+                        return FramingLoopResult(frames: frames, didFail: false)
+                    }
+                }
+                // The candidate's single removal: drop the consumed prefix once per chunk.
+                if consumed > 0 {
+                    stdoutBuffer.removeSubrange(0..<consumed)
+                    consumed = 0
+                }
+                if stdoutBuffer.count > maxFrameBytes {
+                    return FramingLoopResult(frames: frames, didFail: true)
+                }
+            case .stdoutEOF:
+                // Each chunk compacts on the way out, so `consumed` is always 0 here and this EOF
+                // path matches the other two replicas' value-assignment form.
+                guard !stdoutBuffer.isEmpty else { continue }
+                let trailingLine = stdoutBuffer
+                stdoutBuffer.removeAll(keepingCapacity: false)
+                guard trailingLine.count <= maxFrameBytes else {
+                    return FramingLoopResult(frames: frames, didFail: true)
+                }
+                _ = trailingLine
+                frames += 1
+                if frames == stopAfterFrames {
+                    return FramingLoopResult(frames: frames, didFail: false)
+                }
+            }
+        }
+        return FramingLoopResult(frames: frames, didFail: false)
+    }
+
     private static func snapshot(fromRateLimitLine line: Data) throws -> QuotaSnapshot {
         let message = try CodexAppServerCodec.decodeLine(line)
         guard case .response(_, let result) = message,
@@ -638,11 +1212,16 @@ private final class BenchmarkWidgetStateFileManager: FileManager {
     }
 }
 
-/// Replays the decode passes the pre-change commit performed beyond the single
-/// audit and the write readback that remain: the second envelope validation from
-/// `loadEnvelope`, the third from `isTrustedPersistenceData`, and both payload
-/// decodes. Returns how many JSON decodes it performed.
-private func removedValidationDecodeCount(of data: Data) -> Int {
+/// Replays the kinds and counts of JSON decodes this round removed from one
+/// commit of an already-valid primary: the write readback's envelope validation
+/// and payload decode (the readback now compares bytes against the buffer it just
+/// encoded), plus the legacy-shape fallback of the newer-schema raw-snapshot
+/// probe (which could only ever report schema version 1). The current commit runs
+/// three decodes per iteration and the pre-round commit ran six, so timing this
+/// replay alongside a current commit estimates the pre-round cost; it is not a
+/// measured duration of the removed production path. Returns how many JSON
+/// decodes it performed.
+private func removedRoundDecodeCount(of data: Data) -> Int {
     let decoder = JSONDecoder()
     var decodes = 0
 
@@ -651,13 +1230,137 @@ private func removedValidationDecodeCount(of data: Data) -> Int {
         return decode()
     }
 
-    // `loadEnvelope` followed by `isTrustedPersistenceData`'s `loadEnvelope`.
-    for _ in 0..<2 {
-        if let envelope = count({ try? decoder.decode(PersistenceEnvelope.self, from: data) }) {
-            _ = count { try? envelope.decode(PersistedAppState.self) }
+    // The write readback's `loadEnvelope`: envelope, then payload.
+    if let envelope = count({ try? decoder.decode(PersistenceEnvelope.self, from: data) }) {
+        _ = count { try? envelope.decode(PersistedAppState.self) }
+    }
+
+    // The probe's legacy-shape fallback.
+    struct LegacyProbe: Decodable {
+        let weeklyQuotaPercent: Int
+        let fiveHourQuotaPercent: Int
+        let refreshedAt: Date
+    }
+    _ = count { try? decoder.decode(LegacyProbe.self, from: data) }
+
+    return decodes
+}
+
+/// One stdout script for the framing benchmark, together with the frame count the client consumes
+/// before it resumes.
+private struct RPCFramingWorkload {
+    let label: String
+    let script: [BenchmarkRPCTransport.Emission]
+    let frames: Int
+    let iterations: Int
+    let expectedFailure: RealQuotaError?
+
+    init(
+        label: String,
+        script: [BenchmarkRPCTransport.Emission],
+        frames: Int,
+        iterations: Int,
+        expectedFailure: RealQuotaError? = nil
+    ) {
+        self.label = label
+        self.script = script
+        self.frames = frames
+        self.iterations = iterations
+        self.expectedFailure = expectedFailure
+    }
+
+    var bytes: Int {
+        script.reduce(0) { total, emission in
+            if case .stdout(let data) = emission { return total + data.count }
+            return total
         }
     }
-    return decodes
+
+    var chunkCount: Int {
+        script.reduce(0) { total, emission in
+            if case .stdout = emission { return total + 1 }
+            return total
+        }
+    }
+}
+
+/// Scripted stdout for the real `CodexRPCClient`.
+///
+/// The script is delivered by the client's own first request write, so the handlers are registered
+/// before anything is emitted. The whole script is emitted at that first write, which is NOT how a
+/// real pipe behaves: a response can arrive while its request is still being sent in the same write
+/// (the realistic script's rate-limits response is emitted that way). The emissions are queued in
+/// order, so chunk boundaries and frame order reach the framing loop exactly as the workload
+/// declares them without involving any scheduling.
+private final class BenchmarkRPCTransport: CodexRPCTransport, @unchecked Sendable {
+    enum Emission {
+        case stdout(Data)
+        case stdoutEOF
+    }
+
+    private let lock = NSLock()
+    private var script: [Emission]
+    private var stdout: (@Sendable (Data) -> Void)?
+    private var stdoutEOF: (@Sendable () -> Void)?
+    private var stderr: (@Sendable (Data) -> Void)?
+    private var termination: (@Sendable (Int32) -> Void)?
+    private var writeCount = 0
+
+    init(script: [Emission]) {
+        self.script = script
+    }
+
+    func start(
+        stdout: @escaping @Sendable (Data) -> Void,
+        stdoutEOF: @escaping @Sendable () -> Void,
+        stderr: @escaping @Sendable (Data) -> Void,
+        termination: @escaping @Sendable (Int32) -> Void
+    ) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        self.stdout = stdout
+        self.stdoutEOF = stdoutEOF
+        self.stderr = stderr
+        self.termination = termination
+    }
+
+    func write(_ data: Data) throws {
+        _ = data
+        lock.lock()
+        writeCount += 1
+        let pending = writeCount == 1 ? script : []
+        if writeCount == 1 { script = [] }
+        let stdout = self.stdout
+        let stdoutEOF = self.stdoutEOF
+        lock.unlock()
+        for emission in pending {
+            switch emission {
+            case .stdout(let chunk): stdout?(chunk)
+            case .stdoutEOF: stdoutEOF?()
+            }
+        }
+    }
+
+    func shutdownAndWait() throws {
+        lock.lock()
+        stdout = nil
+        stdoutEOF = nil
+        stderr = nil
+        termination = nil
+        lock.unlock()
+    }
+}
+
+/// Never fires: the framing benchmark always feeds a completing script, so a timeout would only
+/// hide a workload that cannot complete.
+private final class BenchmarkTimeoutScheduler: CodexRPCTimeoutScheduling, @unchecked Sendable {
+    func schedule(after _: Double, action _: @escaping @Sendable () -> Void) -> any CodexRPCCancellable {
+        BenchmarkTimeoutToken()
+    }
+}
+
+private final class BenchmarkTimeoutToken: CodexRPCCancellable, @unchecked Sendable {
+    func cancel() {}
 }
 
 /// Yields the given snapshots once, then keeps returning the last one so the

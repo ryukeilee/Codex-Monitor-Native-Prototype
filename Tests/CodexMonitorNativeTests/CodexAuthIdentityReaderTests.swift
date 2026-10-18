@@ -71,6 +71,39 @@ final class CodexAuthIdentityReaderTests: XCTestCase {
         XCTAssertTrue(boundary.isValid)
     }
 
+    func testAuthDataReadsFileBytesAndBoundaryMatchesParsingThem() throws {
+        let codexHome = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexMonitorNativeTests.authData.\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: codexHome) }
+        let written = makeAuthData(
+            accountID: "account-a",
+            subject: "user-a",
+            sessionID: "session-a"
+        )
+        try written.write(to: codexHome.appendingPathComponent("auth.json"), options: .atomic)
+
+        let data = try XCTUnwrap(CodexAuthIdentityReader.authData(codexHome: codexHome.path))
+
+        // 抽取后 `boundary(codexHome:)` 只能等价于「读字节 + 解析字节」。
+        XCTAssertEqual(data, written)
+        XCTAssertEqual(
+            CodexAuthIdentityReader.boundary(codexHome: codexHome.path),
+            CodexAuthIdentityReader.parse(data: data)
+        )
+    }
+
+    func testAuthDataReturnsNilForUnreadableAuthFile() throws {
+        let codexHome = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CodexMonitorNativeTests.missingAuth.\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: codexHome) }
+
+        XCTAssertNil(CodexAuthIdentityReader.authData(codexHome: codexHome.path))
+        XCTAssertNil(CodexAuthIdentityReader.boundary(codexHome: codexHome.path))
+        XCTAssertNil(CodexAuthIdentityReader.authData(codexHome: "~/..nonexistent-\(UUID().uuidString)"))
+    }
+
     func testCurrentBoundaryHonorsCodexHomeOverride() throws {
         let codexHome = FileManager.default.temporaryDirectory
             .appendingPathComponent("CodexMonitorNativeTests.authHome.\(UUID().uuidString)", isDirectory: true)

@@ -116,13 +116,41 @@ enum CodexAuthIdentityReader {
         environment: [String: String] = ProcessInfo.processInfo.environment,
         fileManager: FileManager = .default
     ) -> QuotaAccountBoundary? {
-        boundary(
+        guard let data = currentAuthData(environment: environment, fileManager: fileManager) else {
+            return nil
+        }
+        return parse(data: data)
+    }
+
+    /// 每次调用都重新解析 `CODEX_HOME` 并真实读取 `auth.json` 的原始字节。
+    /// 原始字节可能包含账号标识与令牌，因此不得写入日志、持久化或任何呈现路径；
+    /// 它只作为 `parse(data:)` 的输入在内存中传递。
+    static func currentAuthData(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        fileManager: FileManager = .default
+    ) -> Data? {
+        authData(
             codexHome: defaultCodexHomeURL(
                 environment: environment,
                 fileManager: fileManager
             ).path,
             fileManager: fileManager
         )
+    }
+
+    /// 读取 `auth.json` 的原始字节；不可读时返回 `nil`。读取结果不做任何缓存。
+    static func authData(
+        codexHome: String,
+        fileManager: FileManager = .default
+    ) -> Data? {
+        let expandedHome = NSString(string: codexHome).expandingTildeInPath
+        let authURL = URL(fileURLWithPath: expandedHome, isDirectory: true)
+            .appendingPathComponent("auth.json", isDirectory: false)
+        guard fileManager.isReadableFile(atPath: authURL.path),
+              let data = try? Data(contentsOf: authURL) else {
+            return nil
+        }
+        return data
     }
 
     static func defaultCodexHomeURL(
@@ -141,11 +169,7 @@ enum CodexAuthIdentityReader {
         codexHome: String,
         fileManager: FileManager = .default
     ) -> QuotaAccountBoundary? {
-        let expandedHome = NSString(string: codexHome).expandingTildeInPath
-        let authURL = URL(fileURLWithPath: expandedHome, isDirectory: true)
-            .appendingPathComponent("auth.json", isDirectory: false)
-        guard fileManager.isReadableFile(atPath: authURL.path),
-              let data = try? Data(contentsOf: authURL) else {
+        guard let data = authData(codexHome: codexHome, fileManager: fileManager) else {
             return nil
         }
         return parse(data: data)

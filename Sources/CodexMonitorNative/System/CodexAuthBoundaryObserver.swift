@@ -27,9 +27,8 @@ final class CodexAuthBoundaryObserver {
 
     init(
         pollInterval: TimeInterval = 1,
-        boundaryProvider: @escaping @MainActor () -> QuotaAccountBoundary? = {
-            CodexAuthIdentityReader.currentBoundary()
-        },
+        boundaryProvider: @escaping @MainActor () -> QuotaAccountBoundary? = CodexAuthBoundaryObserver
+            .makeDefaultAuthBoundaryProvider(),
         scheduler: any CodexAuthBoundaryRepeatingScheduling = DispatchMainRepeatingScheduler(),
         onChange: @escaping @MainActor () -> Void
     ) {
@@ -37,6 +36,14 @@ final class CodexAuthBoundaryObserver {
         self.boundaryProvider = boundaryProvider
         self.scheduler = scheduler
         self.onChange = onChange
+    }
+
+    /// 默认边界提供者的工厂。默认参数表达式在每次 `init` 调用时求值一次，所以这里只创建
+    /// **一个** poller 并让返回的闭包持有它；不能把 `CodexAuthBoundaryPoller().currentBoundary()`
+    /// 直接写成默认值，那样每次求值都会新建 poller，memo 永远不命中。
+    static func makeDefaultAuthBoundaryProvider() -> @MainActor () -> QuotaAccountBoundary? {
+        let poller = CodexAuthBoundaryPoller()
+        return { poller.currentBoundary() }
     }
 
     func start() {
@@ -66,6 +73,39 @@ final class CodexAuthBoundaryObserver {
         guard currentBoundary != lastBoundary else { return }
         lastBoundary = currentBoundary
         onChange()
+    }
+}
+
+/// 以原始字节为键复用已解析出的边界。
+///
+/// `CodexAuthIdentityReader.parse(data:)` 是 `data` 的纯函数（只读取入参和文件内的静态常量），
+/// 因此同一份字节重复解析必然得到同一答案，命中时跳过解析不可能改变任何可观察结果。
+/// 每次调用仍然重新解析 `CODEX_HOME` 并真实读取 `auth.json`，所以字节变化在同一次轮询被重新
+/// 解析并上报；文件不可读时仍然返回 `nil`，不会退回缓存值。
+/// memo 只属于单个轮询者：没有全局状态，也没有跨 observer 共享。
+@MainActor
+final class CodexAuthBoundaryPoller {
+    private let readData: @MainActor () -> Data?
+    private let parse: @MainActor (Data) -> QuotaAccountBoundary?
+    private var lastData: Data?
+    private var lastBoundary: QuotaAccountBoundary?
+
+    init(
+        readData: @escaping @MainActor () -> Data? = { CodexAuthIdentityReader.currentAuthData() },
+        parse: @escaping @MainActor (Data) -> QuotaAccountBoundary? = {
+            CodexAuthIdentityReader.parse(data: $0)
+        }
+    ) {
+        self.readData = readData
+        self.parse = parse
+    }
+
+    func currentBoundary() -> QuotaAccountBoundary? {
+        let data = readData()
+        guard data != lastData else { return lastBoundary }
+        lastData = data
+        lastBoundary = data.flatMap(parse)
+        return lastBoundary
     }
 }
 
