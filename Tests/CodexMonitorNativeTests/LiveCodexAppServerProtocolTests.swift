@@ -167,6 +167,7 @@ final class LiveCodexAppServerProtocolTests: XCTestCase {
             "refresh frames=\(lines.count) weeklyRemaining=\(snapshot.weeklyQuotaPercent) "
                 + "fiveHourRemaining=\(snapshot.fiveHourQuotaPercent) windows=\(snapshot.quotaWindows.count)"
         )
+        Self.report("refresh transport \(transport.bootBreakdown)")
     }
 
     // MARK: - Wire scanner oracle
@@ -590,11 +591,51 @@ private final class LiveAppServerSession: @unchecked Sendable {
 }
 
 /// Wraps the production transport so a test can inspect the exact bytes the app-server wrote.
+///
+/// It also records the structure of the stdout stream and the phases of a refresh, so the opt-in
+/// live report can show *where* a refresh spends its time: how many stdout callbacks the transport
+/// delivered, how many bytes they carried, how many callbacks contributed to each frame, and the
+/// start → first frame → shutdown split. Recording is passive: `capturedLines` and the production
+/// transport's behaviour are unchanged, and every counter is guarded by `lock`.
 private final class RecordingRPCTransport: CodexRPCTransport, @unchecked Sendable {
     private let inner: ProcessRPCTransport
     private let lock = NSLock()
     private var buffer = Data()
     private var lines: [Data] = []
+
+    /// Wall-clock origin of `start()`, the reference for every phase below.
+    private var startedAt: Date?
+    /// Time from `start()` until the first complete frame.
+    private var firstFrameElapsed: TimeInterval?
+    /// Time from `start()` until `shutdownAndWait()` was called.
+    private var stopRequestedElapsed: TimeInterval?
+    /// Time from `start()` until `shutdownAndWait()` returned.
+    private var totalElapsed: TimeInterval?
+    /// Total stdout callbacks and the bytes they delivered.
+    private var stdoutChunkCount = 0
+    private var stdoutByteCount = 0
+    /// How many *earlier* stdout callbacks already contributed bytes to the frame that is still
+    /// incomplete in `buffer`. It is cleared whenever a callback starts with an empty buffer and
+    /// after every completed frame, so `recordFrame` can turn it into the frame's contribution
+    /// callback count as `residueCallbacks + 1`.
+    private var residueCallbacks = 0
+    /// Per-frame contribution callback count: how many stdout callbacks delivered the bytes of that
+    /// frame. 1 means the frame arrived complete inside a single callback; 2 or more means the frame
+    /// was reassembled across callback boundaries, i.e. it was genuinely split. Frame-by-frame
+    /// reasoning for the interesting chunk sequences:
+    /// - `"A\n"` then `"B\n"` → `[1, 1]`: each frame is owned by its own callback.
+    /// - `"A\nB\n"` → `[1, 1]`: two frames inside one callback, each contributed by that callback
+    ///   only (the counter restarts at 1 after every frame).
+    /// - `"A\nB"` then `"C\n"` → `[1, 2]`: the second frame is `"BC"` and spans two callbacks.
+    /// - `"A"` then `"\n"` → `[2]`: the single frame needed both callbacks.
+    private var frameCallbacks: [Int] = []
+    /// Per-frame byte length on the wire, including frames reassembled from several callbacks.
+    private var frameByteCounts: [Int] = []
+    /// Per-frame completion time relative to `start()`, parallel to `frameByteCounts`.
+    private var frameElapsed: [TimeInterval] = []
+    /// Time relative to `start()` of every `write(_:)` call (production refresh issues three:
+    /// the initialize request, the initialized notification, and the rate-limits request).
+    private var writeElapsed: [TimeInterval] = []
 
     init(codexPath: String, graceSeconds: TimeInterval = 3) {
         inner = ProcessRPCTransport(codexPath: codexPath, shutdownGraceSeconds: graceSeconds)
@@ -606,12 +647,45 @@ private final class RecordingRPCTransport: CodexRPCTransport, @unchecked Sendabl
         return lines
     }
 
+    /// One-line millisecond/byte summary of the measured phases and per-frame contribution
+    /// callbacks for the live report. A phase that was never reached reads `n/a` rather than a
+    /// fabricated number.
+    var bootBreakdown: String {
+        lock.lock()
+        defer { lock.unlock() }
+        func milliseconds(_ elapsed: TimeInterval?) -> String {
+            guard let elapsed else { return "n/a" }
+            return String(format: "%.2f", elapsed * 1000)
+        }
+        func millisecondList(_ elapsed: [TimeInterval]) -> String {
+            elapsed.map { String(format: "%.1f", $0 * 1000) }.joined(separator: ",")
+        }
+        let frames = frameByteCounts.map(String.init).joined(separator: ",")
+        let callbacks = frameCallbacks.map(String.init).joined(separator: ",")
+        return "totalMs=\(milliseconds(totalElapsed)) "
+            + "startToFirstFrameMs=\(milliseconds(firstFrameElapsed)) "
+            + "startToStopMs=\(milliseconds(stopRequestedElapsed)) "
+            + "shutdownMs=\(milliseconds(shutdownDuration)) "
+            + "stdoutChunks=\(stdoutChunkCount) stdoutBytes=\(stdoutByteCount) "
+            + "frames=[\(frames)] frameCallbacks=[\(callbacks)] "
+            + "timesMs=[\(millisecondList(frameElapsed))] "
+            + "writesMs=[\(millisecondList(writeElapsed))]"
+    }
+
+    private var shutdownDuration: TimeInterval? {
+        guard let totalElapsed, let stopRequestedElapsed else { return nil }
+        return totalElapsed - stopRequestedElapsed
+    }
+
     func start(
         stdout: @escaping @Sendable (Data) -> Void,
         stdoutEOF: @escaping @Sendable () -> Void,
         stderr: @escaping @Sendable (Data) -> Void,
         termination: @escaping @Sendable (Int32) -> Void
     ) throws {
+        lock.lock()
+        startedAt = Date()
+        lock.unlock()
         try inner.start(
             stdout: { [weak self] chunk in
                 self?.ingest(chunk)
@@ -626,19 +700,61 @@ private final class RecordingRPCTransport: CodexRPCTransport, @unchecked Sendabl
     private func ingest(_ chunk: Data) {
         lock.lock()
         defer { lock.unlock() }
+        stdoutChunkCount += 1
+        stdoutByteCount += chunk.count
+        if buffer.isEmpty {
+            residueCallbacks = 0
+        } else {
+            residueCallbacks += 1
+        }
         buffer.append(chunk)
         while let newline = buffer.firstIndex(of: 0x0A) {
-            lines.append(buffer.subdata(in: buffer.startIndex..<newline))
+            let frame = buffer.subdata(in: buffer.startIndex..<newline)
+            lines.append(frame)
             buffer.removeSubrange(buffer.startIndex...newline)
+            recordFrame(frame)
         }
     }
 
+    /// Records one completed frame; the caller must hold `lock`.
+    ///
+    /// Its contribution callback count is this callback plus every earlier callback that left bytes
+    /// in `buffer` (`residueCallbacks`); the residue is cleared immediately so a following frame
+    /// inside the same callback counts from 1 again.
+    private func recordFrame(_ frame: Data) {
+        let completedAt = Date()
+        if firstFrameElapsed == nil, let startedAt {
+            firstFrameElapsed = completedAt.timeIntervalSince(startedAt)
+        }
+        if let startedAt {
+            frameElapsed.append(completedAt.timeIntervalSince(startedAt))
+        }
+        frameCallbacks.append(residueCallbacks + 1)
+        residueCallbacks = 0
+        frameByteCounts.append(frame.count)
+    }
+
     func write(_ data: Data) throws {
+        lock.lock()
+        if let startedAt {
+            writeElapsed.append(Date().timeIntervalSince(startedAt))
+        }
+        lock.unlock()
         try inner.write(data)
     }
 
     func shutdownAndWait() throws {
+        lock.lock()
+        if let startedAt {
+            stopRequestedElapsed = Date().timeIntervalSince(startedAt)
+        }
+        lock.unlock()
         try inner.shutdownAndWait()
+        lock.lock()
+        if let startedAt {
+            totalElapsed = Date().timeIntervalSince(startedAt)
+        }
+        lock.unlock()
     }
 }
 
