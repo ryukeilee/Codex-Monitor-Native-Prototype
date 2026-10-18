@@ -978,10 +978,10 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         )
     }
 
-    /// A warm commit used to classify the same primary five times
+    /// A warm commit used to classify the same primary four times
     /// (`containsNewerPersistenceVersion`, `decodeEnvelope`, `envelopeRevision`,
-    /// the backup-trust probe, and the write readback) and used to encode the
-    /// same `WidgetDisplayState` twice. The single-pass audit must classify the
+    /// and the backup-trust probe) and used to encode the same
+    /// `WidgetDisplayState` twice. The single-pass audit must classify the
     /// primary once and reuse that result for the newer-version, trust,
     /// revision, and account-boundary decisions.
     func testWarmWidgetStateCommitAndLoadClassifyPrimaryOnce() throws {
@@ -996,13 +996,14 @@ final class WidgetTimelineBridgeTests: XCTestCase {
             XCTAssertTrue(WidgetDisplayStateStore.save(state, fileManager: fileManager))
         }
 
-        // One audit (envelope + payload + checksum validation) and the write
-        // readback envelope check. Measured against the pre-change store, the
-        // same commit spent 10 decodes, 2 payload encodes, and 8 checksum
-        // validations.
+        // One audit (envelope + payload + checksum validation) and the one
+        // payload encode; the write readback only compares bytes against the
+        // buffer this call built. Measured against the store before the
+        // single-pass audit, the same commit spent 10 decodes, 2 payload
+        // encodes, and 8 checksum validations.
         XCTAssertEqual(
             commit,
-            WidgetDisplayStateStore.Instrumentation(decodes: 3, payloadEncodes: 1, checksumValidations: 2)
+            WidgetDisplayStateStore.Instrumentation(decodes: 2, payloadEncodes: 1, checksumValidations: 1)
         )
         // A trusted primary is what backs the backup, byte for byte.
         XCTAssertEqual(
@@ -1039,12 +1040,13 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         let repair = widgetStateWork {
             XCTAssertTrue(WidgetDisplayStateStore.save(replacement, fileManager: fileManager))
         }
-        // Envelope + checksum for the untrusted primary, one payload encode, and
-        // one envelope check for the write readback. The pre-change repair spent
-        // 6 decodes, 2 payload encodes, and 6 checksum validations.
+        // Envelope + checksum for the untrusted primary and one payload encode;
+        // the write readback only compares bytes. The repair before the
+        // single-pass audit spent 6 decodes, 2 payload encodes, and 6 checksum
+        // validations.
         XCTAssertEqual(
             repair,
-            WidgetDisplayStateStore.Instrumentation(decodes: 2, payloadEncodes: 1, checksumValidations: 2)
+            WidgetDisplayStateStore.Instrumentation(decodes: 1, payloadEncodes: 1, checksumValidations: 1)
         )
         // An untrusted primary never becomes the backup.
         XCTAssertFalse(FileManager.default.fileExists(atPath: stateURL.appendingPathExtension("backup").path))
@@ -1101,11 +1103,12 @@ final class WidgetTimelineBridgeTests: XCTestCase {
             XCTAssertEqual(WidgetDisplayStateStore.load(fileManager: fileManager), state)
         }
         // Load audit: envelope probe + legacy payload. Migration commit: envelope
-        // probe + legacy payload + one payload encode + the write readback. The
-        // pre-change migration spent 13 decodes and 2 payload encodes.
+        // probe + legacy payload + one payload encode; the write readback only
+        // compares bytes. The migration before the single-pass audit spent 13
+        // decodes and 2 payload encodes.
         XCTAssertEqual(
             migration,
-            WidgetDisplayStateStore.Instrumentation(decodes: 5, payloadEncodes: 1, checksumValidations: 1)
+            WidgetDisplayStateStore.Instrumentation(decodes: 4, payloadEncodes: 1, checksumValidations: 0)
         )
         let envelope = try JSONDecoder().decode(
             PersistenceEnvelope.self,
@@ -1113,6 +1116,34 @@ final class WidgetTimelineBridgeTests: XCTestCase {
         )
         XCTAssertEqual(envelope.revision, 1)
         XCTAssertEqual(try envelope.decode(WidgetDisplayState.self), state)
+    }
+
+    /// The write readback no longer re-derives envelope metadata from the bytes
+    /// it just wrote, so a write cannot fail on the revision it was constructed
+    /// with. `UInt64.max` is the largest revision a write can produce and still
+    /// serialize: it round-trips through the merge, re-serialize, and decode
+    /// path unchanged, and the next write is refused.
+    func testWidgetStateRevisionBoundaryPersistsLastRepresentableRevision() throws {
+        let (fileManager, groupURL, stateURL) = makeWidgetStateTestDirectory("widgetStoreRevisionBoundary")
+        defer { try? FileManager.default.removeItem(at: groupURL) }
+        try FileManager.default.createDirectory(at: groupURL, withIntermediateDirectories: true)
+        try legacyCompatibleEnvelopeData(makeTrustedWidgetState(weekly: 70), revision: UInt64.max - 1)
+            .write(to: stateURL)
+        let laterState = makeTrustedWidgetState(weekly: 65, refreshedAt: Date(timeIntervalSince1970: 200))
+
+        XCTAssertTrue(WidgetDisplayStateStore.save(laterState, fileManager: fileManager))
+
+        let primary = try Data(contentsOf: stateURL)
+        let envelope = try JSONDecoder().decode(PersistenceEnvelope.self, from: primary)
+        XCTAssertEqual(envelope.formatVersion, PersistenceEnvelope.currentFormatVersion)
+        XCTAssertEqual(envelope.revision, UInt64.max)
+        XCTAssertTrue(envelope.hasValidChecksum)
+        XCTAssertEqual(try envelope.decode(WidgetDisplayState.self), laterState)
+        // Older readers still decode the flattened top-level payload.
+        XCTAssertEqual(try JSONDecoder().decode(WidgetDisplayState.self, from: primary), laterState)
+
+        XCTAssertFalse(WidgetDisplayStateStore.save(laterState, fileManager: fileManager))
+        XCTAssertEqual(try Data(contentsOf: stateURL), primary)
     }
 
     /// The version probes never inspected the flattened fields once an envelope

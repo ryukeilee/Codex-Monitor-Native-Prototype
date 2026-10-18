@@ -884,9 +884,16 @@ enum WidgetDisplayStateStore {
                     try fileManager.moveItem(at: temporaryURL, to: url)
                     writeURL = url
                 }
+                // `data` is the very buffer this call built from a
+                // `PersistenceEnvelope` carrying the current format version, a
+                // checksum computed from this payload, and the revision passed
+                // in above; `encodedEnvelopeData` also refuses payloads whose
+                // flattened fields would overwrite those envelope keys. Equal
+                // bytes therefore already imply the format version, checksum,
+                // payload, and revision that `isEnvelope` re-derived from the
+                // same bytes, so this check is as strong without the JSON work.
                 guard let readback = try? Data(contentsOf: writeURL),
-                      readback == data,
-                      isEnvelope(data, atRevision: revision) else {
+                      readback == data else {
                     PersistenceLog.logger.error("Widget state write verification failed at revision \(revision); restoring backup")
                     try? fileManager.removeItem(at: writeURL)
                     if let currentData { try? currentData.write(to: url, options: .atomic) }
@@ -894,9 +901,9 @@ enum WidgetDisplayStateStore {
                 }
             } else {
                 try fileManager.moveItem(at: temporaryURL, to: url)
+                // Same reasoning: the bytes moved into place are that buffer.
                 guard let readback = try? Data(contentsOf: url),
-                      readback == data,
-                      isEnvelope(data, atRevision: revision) else {
+                      readback == data else {
                     PersistenceLog.logger.error("Widget state write verification failed at revision \(revision); rolling back")
                     try? fileManager.removeItem(at: url)
                     if let current = currentData { try? current.write(to: url, options: .atomic) }
@@ -933,17 +940,6 @@ enum WidgetDisplayStateStore {
     private static func validateChecksum(of envelope: PersistenceEnvelope) -> Bool {
         recordChecksumValidation()
         return envelope.hasValidChecksum
-    }
-
-    /// Verifies the envelope bytes this store just produced. The payload is not
-    /// re-decoded: this same call encoded it from an already-supported state.
-    private static func isEnvelope(_ data: Data, atRevision revision: UInt64) -> Bool {
-        guard let envelope = decodePersistedEnvelope(data),
-              validateChecksum(of: envelope),
-              envelope.formatVersion == PersistenceEnvelope.currentFormatVersion else {
-            return false
-        }
-        return envelope.revision == revision
     }
 
     private static func containsEnvelopeMetadata(_ data: Data) -> Bool {
@@ -984,6 +980,15 @@ enum WidgetDisplayStateStore {
             with: encoder.encode(envelope)
         ) as? [String: Any],
               let legacyObject = try JSONSerialization.jsonObject(with: payload) as? [String: Any] else {
+            throw PersistenceError.invalidEnvelopeEncoding
+        }
+
+        // Payload fields share the envelope's top-level JSON namespace because
+        // pre-envelope readers decode them directly, so a payload key named like
+        // `formatVersion`, `revision`, `payload`, `checksum`, or `writtenAt`
+        // would overwrite metadata every reader depends on. Refuse the write
+        // instead of silently persisting an envelope that cannot self-validate.
+        guard envelopeMetadataKeys.isDisjoint(with: legacyObject.keys) else {
             throw PersistenceError.invalidEnvelopeEncoding
         }
 
