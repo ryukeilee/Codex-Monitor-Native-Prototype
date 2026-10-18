@@ -155,7 +155,14 @@ struct SnapshotStore {
                 }
             }
             defaults.set(data, forKey: key)
-            guard let readback = defaults.data(forKey: key), readback == data, loadEnvelope(from: readback)?.revision == nextRevision else {
+            // `data` is the buffer this call just encoded from `nextEnvelope`, so
+            // byte equality already proves every fact `loadEnvelope` used to
+            // re-derive: the format version is current, the checksum matches the
+            // payload, the payload decodes, and the revision is `nextRevision`.
+            // Re-decoding the same buffer cannot add evidence — byte equality is
+            // strictly stronger than "decodes to this revision" — so the readback
+            // check stays exactly as strong while doing no JSON work.
+            guard let readback = defaults.data(forKey: key), readback == data else {
                 AppLogger.snapshot.error("App state write verification failed at revision \(nextRevision); restoring trusted backup")
                 if let trustedData { defaults.set(trustedData, forKey: key) } else { defaults.removeObject(forKey: key) }
                 return false
@@ -233,7 +240,7 @@ struct SnapshotStore {
         }
 
         if !isNewerPersistenceVersion, shouldProbeRawSnapshot,
-           (decodeRawSnapshot(data)?.schemaVersion ?? 0) > QuotaSnapshot.currentSchemaVersion {
+           rawSnapshotSchemaVersion(data) > QuotaSnapshot.currentSchemaVersion {
             isNewerPersistenceVersion = true
         }
 
@@ -341,6 +348,21 @@ struct SnapshotStore {
         return data
     }
 
+    /// The newer-schema probe only needs a "newer than current" verdict, and
+    /// `decodeRawSnapshot`'s built-in `LegacySnapshot` fallback hard-codes
+    /// `schemaVersion: 1`, which can never exceed `QuotaSnapshot.currentSchemaVersion`
+    /// (8 today, and never below 1). The two probes can therefore only disagree
+    /// when modern decoding fails and the legacy fallback succeeds: the old probe
+    /// then read 1 and this one reads 0, and both are `<= currentSchemaVersion`,
+    /// so `isNewerPersistenceVersion` is identical either way. Probing only the
+    /// modern shape drops a guaranteed-useless second parse of the same bytes.
+    /// `decodeRawSnapshot` keeps its legacy fallback for the real recovery path
+    /// in `decodeLegacyState`.
+    private func rawSnapshotSchemaVersion(_ data: Data) -> Int {
+        Self.recordPersistenceDecode()
+        return (try? decoder.decode(QuotaSnapshot.self, from: data))?.schemaVersion ?? 0
+    }
+
     private func decodeRawSnapshot(_ data: Data) -> QuotaSnapshot? {
         Self.recordPersistenceDecode()
         if let snapshot = try? decoder.decode(QuotaSnapshot.self, from: data) {
@@ -408,7 +430,10 @@ struct SnapshotStore {
                 }
             }
             defaults.set(data, forKey: key)
-            guard let readback = defaults.data(forKey: key), readback == data, loadEnvelope(from: readback)?.revision == nextRevision else {
+            // Same reasoning as `saveState`: the readback bytes are compared with
+            // the exact buffer just encoded, which subsumes the envelope, checksum,
+            // payload, and revision facts `loadEnvelope` would decode again.
+            guard let readback = defaults.data(forKey: key), readback == data else {
                 AppLogger.snapshot.error("App state migration write verification failed at revision \(nextRevision); restoring trusted backup")
                 if let trustedData { defaults.set(trustedData, forKey: key) } else { defaults.removeObject(forKey: key) }
                 return

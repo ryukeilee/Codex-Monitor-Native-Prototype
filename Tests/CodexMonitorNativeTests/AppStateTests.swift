@@ -821,6 +821,70 @@ final class AppStateTests: XCTestCase {
         XCTAssertEqual(store.loadState()?.snapshot.accountBoundary, .testOtherAccount)
     }
 
+    /// The launch sequence commits exactly once. `AppState.init` publishes and
+    /// persists the restored checkpoint; the launch-window boundary verification
+    /// `AppDelegate` runs immediately afterwards must not rewrite that same
+    /// checkpoint just to stamp a new `savedAt`.
+    func testLaunchSequenceWritesAppCheckpointExactlyOnce() {
+        let (defaults, suiteName) = makeCheckpointWriteRecorder()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let base = Date(timeIntervalSince1970: 1_000_000)
+        let store = seedRealCheckpoint(defaults: defaults, refreshedAt: base)
+        let seededPrimary = defaults.writeCount(forKey: Self.checkpointKey)
+        let seededBackup = defaults.writeCount(forKey: Self.checkpointBackupKey)
+
+        let provider = MutableAccountBoundaryProvider(.testDefault)
+        let state = AppState(
+            snapshotStore: store,
+            refreshService: MockRefreshService(error: MockRefreshError.simulatedFailure),
+            now: { base },
+            sleep: { _ in throw CancellationError() },
+            initialNetworkReachability: false,
+            accountBoundaryProvider: { provider.value }
+        )
+
+        state.accountBoundaryDidChange()
+
+        XCTAssertEqual(defaults.writeCount(forKey: Self.checkpointKey) - seededPrimary, 1)
+        XCTAssertEqual(defaults.writeCount(forKey: Self.checkpointBackupKey) - seededBackup, 1)
+        XCTAssertEqual(state.snapshot.accountBoundary, .testDefault)
+        XCTAssertEqual(state.status, .success)
+    }
+
+    /// An account-boundary change must still commit and land the fail-closed
+    /// checkpoint on disk, dropping the previous owner's backup recovery source.
+    func testBoundaryChangeStillCommitsFailClosedCheckpointToDisk() {
+        let (defaults, suiteName) = makeCheckpointWriteRecorder()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let base = Date(timeIntervalSince1970: 1_000_000)
+        let store = seedRealCheckpoint(defaults: defaults, refreshedAt: base)
+        let seededPrimary = defaults.writeCount(forKey: Self.checkpointKey)
+
+        let provider = MutableAccountBoundaryProvider(.testDefault)
+        let state = AppState(
+            snapshotStore: store,
+            refreshService: MockRefreshService(error: MockRefreshError.simulatedFailure),
+            now: { base },
+            sleep: { _ in throw CancellationError() },
+            initialNetworkReachability: false,
+            accountBoundaryProvider: { provider.value }
+        )
+
+        provider.value = .testOtherAccount
+        state.accountBoundaryDidChange()
+
+        // One commit from `init` and one from the invalidation.
+        XCTAssertEqual(defaults.writeCount(forKey: Self.checkpointKey) - seededPrimary, 2)
+        XCTAssertEqual(state.status, .noSnapshot)
+        XCTAssertEqual(state.snapshot.dataSource, .mock)
+        XCTAssertEqual(defaults.removalCount(forKey: Self.checkpointBackupKey), 1)
+
+        let reloaded = SnapshotStore(defaults: defaults, key: Self.checkpointKey).loadState()
+        XCTAssertEqual(reloaded?.status, .noSnapshot)
+        XCTAssertEqual(reloaded?.snapshot.dataSource, .mock)
+        XCTAssertNil(reloaded?.snapshot.accountBoundary)
+    }
+
     func testAccountChangeDuringActiveRefreshRejectsOldResultAndAcceptsNewOwnerTrailingResult() async {
         let provider = MutableAccountBoundaryProvider(.testDefault)
         let store = makeAccountBoundaryStore(
@@ -979,6 +1043,34 @@ final class AppStateTests: XCTestCase {
             dataSource: .real,
             accountBoundary: boundary
         ))
+        return store
+    }
+
+    static let checkpointKey = "snapshot"
+    static let checkpointBackupKey = "snapshot.backup"
+
+    private func makeCheckpointWriteRecorder() -> (AppStateWriteRecorder, String) {
+        let suiteName = "CodexMonitorNativeTests.launchWrites.\(UUID().uuidString)"
+        return (AppStateWriteRecorder(suiteName: suiteName)!, suiteName)
+    }
+
+    /// Seeds the exact shape `AppState.init` restores at launch: an
+    /// account-bound real snapshot written through the same store the app uses.
+    private func seedRealCheckpoint(defaults: UserDefaults, refreshedAt: Date) -> SnapshotStore {
+        let store = SnapshotStore(defaults: defaults, key: Self.checkpointKey)
+        XCTAssertTrue(store.saveState(PersistedAppState(
+            snapshot: QuotaSnapshot(
+                weeklyQuotaPercent: 72,
+                fiveHourQuotaPercent: 69,
+                refreshedAt: refreshedAt,
+                dataSource: .real,
+                accountBoundary: .testDefault
+            ),
+            status: .success,
+            lastSuccessAt: refreshedAt,
+            lastAttemptAt: nil,
+            failureCount: 0
+        )))
         return store
     }
 
@@ -2369,4 +2461,24 @@ private final class MutableAccountBoundaryProvider {
     init(_ value: QuotaAccountBoundary?) {
         self.value = value
     }
+}
+
+/// Counts `UserDefaults` writes and removals per key so the launch sequence's
+/// checkpoint traffic is directly observable instead of inferred from timing.
+private final class AppStateWriteRecorder: UserDefaults {
+    private var writes: [String: Int] = [:]
+    private var removals: [String: Int] = [:]
+
+    override func set(_ value: Any?, forKey defaultName: String) {
+        writes[defaultName, default: 0] += 1
+        super.set(value, forKey: defaultName)
+    }
+
+    override func removeObject(forKey defaultName: String) {
+        removals[defaultName, default: 0] += 1
+        super.removeObject(forKey: defaultName)
+    }
+
+    func writeCount(forKey key: String) -> Int { writes[key] ?? 0 }
+    func removalCount(forKey key: String) -> Int { removals[key] ?? 0 }
 }
