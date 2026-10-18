@@ -37,7 +37,8 @@ final class QuotaRefreshServiceTests: XCTestCase {
         let service = QuotaRefreshService(
             realProvider: StubRealQuotaProvider(snapshot: appServerSnapshot),
             resetCreditsDetailProvider: SucceedingResetCreditsProvider(payload: details),
-            mockProvider: MockQuotaProvider()
+            mockProvider: MockQuotaProvider(),
+            currentAccountBoundary: { .testDefault }
         )
 
         let refreshed = try await service.refresh(basedOn: QuotaSnapshot.notConnected)
@@ -65,7 +66,8 @@ final class QuotaRefreshServiceTests: XCTestCase {
         let service = QuotaRefreshService(
             realProvider: StubRealQuotaProvider(snapshot: appServerSnapshot),
             resetCreditsDetailProvider: FailingResetCreditsProvider(),
-            mockProvider: MockQuotaProvider()
+            mockProvider: MockQuotaProvider(),
+            currentAccountBoundary: { .testDefault }
         )
 
         let refreshed = try await service.refresh(basedOn: QuotaSnapshot.notConnected)
@@ -92,7 +94,8 @@ final class QuotaRefreshServiceTests: XCTestCase {
         let service = QuotaRefreshService(
             realProvider: StubRealQuotaProvider(snapshot: appServerSnapshot),
             resetCreditsDetailProvider: NoAvailableCreditsProvider(),
-            mockProvider: MockQuotaProvider()
+            mockProvider: MockQuotaProvider(),
+            currentAccountBoundary: { .testDefault }
         )
 
         let refreshed = try await service.refresh(basedOn: QuotaSnapshot.notConnected)
@@ -174,7 +177,8 @@ final class QuotaRefreshServiceTests: XCTestCase {
             QuotaRefreshService(
                 realProvider: StubRealQuotaProvider(snapshot: appServerSnapshot),
                 resetCreditsDetailProvider: detailProvider,
-                mockProvider: MockQuotaProvider()
+                mockProvider: MockQuotaProvider(),
+                currentAccountBoundary: { .testDefault }
             )
         }
 
@@ -250,7 +254,8 @@ final class QuotaRefreshServiceTests: XCTestCase {
         let service = QuotaRefreshService(
             realProvider: StubRealQuotaProvider(snapshot: appServerSnapshot),
             resetCreditsDetailProvider: NoAvailableCreditsProvider(),
-            mockProvider: MockQuotaProvider()
+            mockProvider: MockQuotaProvider(),
+            currentAccountBoundary: { .testDefault }
         )
 
         let refreshed = try await service.refresh(basedOn: previous)
@@ -300,7 +305,8 @@ final class QuotaRefreshServiceTests: XCTestCase {
         let service = QuotaRefreshService(
             realProvider: StubRealQuotaProvider(snapshot: appServerSnapshot),
             resetCreditsDetailProvider: FailingResetCreditsProvider(),
-            mockProvider: MockQuotaProvider()
+            mockProvider: MockQuotaProvider(),
+            currentAccountBoundary: { .testDefault }
         )
 
         let refreshed = try await service.refresh(basedOn: previous)
@@ -350,7 +356,8 @@ final class QuotaRefreshServiceTests: XCTestCase {
         let service = QuotaRefreshService(
             realProvider: StubRealQuotaProvider(snapshot: appServerSnapshot),
             resetCreditsDetailProvider: FailingResetCreditsProvider(),
-            mockProvider: MockQuotaProvider()
+            mockProvider: MockQuotaProvider(),
+            currentAccountBoundary: { .testDefault }
         )
 
         let refreshed = try await service.refresh(basedOn: previous)
@@ -380,7 +387,8 @@ final class QuotaRefreshServiceTests: XCTestCase {
         let service = QuotaRefreshService(
             realProvider: StubRealQuotaProvider(snapshot: partial),
             resetCreditsDetailProvider: FailingResetCreditsProvider(),
-            mockProvider: MockQuotaProvider()
+            mockProvider: MockQuotaProvider(),
+            currentAccountBoundary: { .testDefault }
         )
 
         let refreshed = try await service.refresh(basedOn: current)
@@ -422,7 +430,8 @@ final class QuotaRefreshServiceTests: XCTestCase {
         let service = QuotaRefreshService(
             realProvider: StubRealQuotaProvider(snapshot: switchedAccountPartial),
             resetCreditsDetailProvider: FailingResetCreditsProvider(),
-            mockProvider: MockQuotaProvider()
+            mockProvider: MockQuotaProvider(),
+            currentAccountBoundary: { .testOtherAccount }
         )
 
         let refreshed = try await service.refresh(basedOn: current)
@@ -444,7 +453,8 @@ final class QuotaRefreshServiceTests: XCTestCase {
         let service = QuotaRefreshService(
             realProvider: StubRealQuotaProvider(snapshot: unbound),
             resetCreditsDetailProvider: FailingResetCreditsProvider(),
-            mockProvider: MockQuotaProvider()
+            mockProvider: MockQuotaProvider(),
+            currentAccountBoundary: { nil }
         )
 
         do {
@@ -463,13 +473,16 @@ final class QuotaRefreshServiceTests: XCTestCase {
         let service = QuotaRefreshService(
             realProvider: StubRealQuotaProvider(snapshot: snapshot),
             resetCreditsDetailProvider: RecordingResetCreditsProvider(recorder: recorder),
-            mockProvider: MockQuotaProvider()
+            mockProvider: MockQuotaProvider(),
+            currentAccountBoundary: { .testDefault }
         )
 
-        _ = try await service.refresh(basedOn: .notConnected)
+        let refreshed = try await service.refresh(basedOn: .notConnected)
 
         let boundaries = await recorder.detailAccountBoundaries
         XCTAssertEqual(boundaries, [.testDefault])
+        XCTAssertEqual(refreshed.resetCreditDetailsState, .detailed)
+        XCTAssertEqual(refreshed.accountBoundary, .testDefault)
     }
 
     func testRefreshCancelledBeforeRealProviderDoesNotStartProviders() async {
@@ -479,7 +492,8 @@ final class QuotaRefreshServiceTests: XCTestCase {
         let service = QuotaRefreshService(
             realProvider: RecordingRealQuotaProvider(snapshot: snapshot, recorder: recorder),
             resetCreditsDetailProvider: RecordingResetCreditsProvider(recorder: recorder),
-            mockProvider: MockQuotaProvider()
+            mockProvider: MockQuotaProvider(),
+            currentAccountBoundary: { .testDefault }
         )
 
         let task = Task {
@@ -504,7 +518,7 @@ final class QuotaRefreshServiceTests: XCTestCase {
         XCTAssertEqual(detailCallCount, 0)
     }
 
-    func testRefreshCancelledAfterRealProviderDoesNotStartDetailProvider() async {
+    func testRefreshCancelledAfterRealProviderThrowsCancellationWithoutPublishingSnapshot() async {
         let recorder = RefreshCallRecorder()
         let realProviderGate = RefreshCancellationGate()
         let snapshot = makeBoundRealSnapshot()
@@ -515,17 +529,19 @@ final class QuotaRefreshServiceTests: XCTestCase {
                 gate: realProviderGate
             ),
             resetCreditsDetailProvider: RecordingResetCreditsProvider(recorder: recorder),
-            mockProvider: MockQuotaProvider()
+            mockProvider: MockQuotaProvider(),
+            currentAccountBoundary: { .testDefault }
         )
 
         let task = Task { try await service.refresh(basedOn: .notConnected) }
-        await realProviderGate.waitForStart()
+        let realLegStarted = await waitForStart(of: realProviderGate)
+        XCTAssertTrue(realLegStarted, "The refresh must have entered the RPC leg before it was cancelled")
         task.cancel()
         await realProviderGate.release()
 
         do {
             _ = try await task.value
-            XCTFail("Expected cancellation")
+            XCTFail("Expected cancellation instead of a published snapshot")
         } catch is CancellationError {
             // Expected.
         } catch {
@@ -535,20 +551,28 @@ final class QuotaRefreshServiceTests: XCTestCase {
         let realCallCount = await recorder.realCallCount
         let detailCallCount = await recorder.detailCallCount
         XCTAssertEqual(realCallCount, 1)
-        XCTAssertEqual(detailCallCount, 0)
+        // The detail leg now starts before the RPC leg is awaited, so its
+        // request has already been made by the time the RPC leg completes.
+        // The cancelled refresh must still publish nothing.
+        XCTAssertEqual(detailCallCount, 1)
     }
 
     func testRefreshCancelledWhileResetCreditDetailsAreBlockedRethrowsCancellation() async {
+        // The detail leg now runs concurrently with the RPC leg; a refresh
+        // cancelled while that leg is still blocked must still throw
+        // `CancellationError` and publish nothing.
         let detailProviderGate = RefreshCancellationGate()
         let snapshot = makeBoundRealSnapshot()
         let service = QuotaRefreshService(
             realProvider: StubRealQuotaProvider(snapshot: snapshot),
             resetCreditsDetailProvider: BlockingResetCreditsProvider(gate: detailProviderGate),
-            mockProvider: MockQuotaProvider()
+            mockProvider: MockQuotaProvider(),
+            currentAccountBoundary: { .testDefault }
         )
 
         let task = Task { try await service.refresh(basedOn: .notConnected) }
-        await detailProviderGate.waitForStart()
+        let detailLegStarted = await waitForStart(of: detailProviderGate)
+        XCTAssertTrue(detailLegStarted, "The refresh must have entered the detail leg before it was cancelled")
         task.cancel()
         await detailProviderGate.release()
 
@@ -560,6 +584,356 @@ final class QuotaRefreshServiceTests: XCTestCase {
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
+    }
+
+    func testResetCreditDetailLegRunsWhileRealProviderLegIsStillInFlight() async throws {
+        let recorder = RefreshCallRecorder()
+        let realGate = RefreshCancellationGate()
+        let detailGate = RefreshCancellationGate()
+        let service = QuotaRefreshService(
+            realProvider: BlockingRealQuotaProvider(
+                snapshot: makeBoundRealSnapshot(),
+                recorder: recorder,
+                gate: realGate
+            ),
+            resetCreditsDetailProvider: BlockingRecordingResetCreditsProvider(
+                recorder: recorder,
+                gate: detailGate
+            ),
+            mockProvider: MockQuotaProvider(),
+            currentAccountBoundary: { .testDefault }
+        )
+
+        let task = Task { try await service.refresh(basedOn: .notConnected) }
+        // The RPC leg is blocked on its gate here, so a detail call observed
+        // before that gate is released can only have started concurrently.
+        let realLegStarted = await waitForStart(of: realGate)
+        let detailLegStarted = await waitForStart(of: detailGate)
+        let realCallCount = await recorder.realCallCount
+        let detailCallCount = await recorder.detailCallCount
+        await realGate.release()
+        await detailGate.release()
+        let refreshed = try await task.value
+
+        XCTAssertTrue(realLegStarted, "The RPC leg must have started")
+        XCTAssertTrue(detailLegStarted, "The detail leg must start while the RPC leg is still in flight")
+        XCTAssertEqual(realCallCount, 1)
+        XCTAssertEqual(detailCallCount, 1)
+        XCTAssertEqual(refreshed.resetCreditDetailsState, .detailed)
+    }
+
+    func testRefreshDiscardsPrefetchedDetailsFetchedUnderADifferentAccountBoundary() async throws {
+        // `auth.json` held a different login session than the one the RPC leg
+        // proved, so the prefetched payload must not be published under the
+        // refreshed snapshot.
+        let recorder = RefreshCallRecorder()
+        let payload = ResetCreditsDetailPayload(
+            availableCount: 2,
+            availableCredits: [
+                ResetCreditDetailSnapshot(
+                    ordinal: 1,
+                    status: "available",
+                    grantedAt: makeDate("2026-06-19T10:00:00Z"),
+                    expiresAt: makeDate("2026-06-19T18:00:00Z")
+                )
+            ],
+            statusSummary: [ResetCreditStatusSummary(status: "available", count: 1)]
+        )
+        let service = QuotaRefreshService(
+            realProvider: StubRealQuotaProvider(snapshot: makeBoundRealSnapshot()),
+            resetCreditsDetailProvider: RecordingDetailedResetCreditsProvider(
+                recorder: recorder,
+                payload: payload
+            ),
+            mockProvider: MockQuotaProvider(),
+            currentAccountBoundary: { .testRelogin }
+        )
+
+        let refreshed = try await service.refresh(basedOn: .notConnected)
+
+        let boundaries = await recorder.detailAccountBoundaries
+        XCTAssertEqual(boundaries, [.testRelogin])
+        XCTAssertEqual(refreshed.resetCreditDetailsState, .unavailable)
+        XCTAssertEqual(
+            refreshed.resetCreditDiagnostic?.summary,
+            ResetCreditsDetailError.accountBoundaryMismatch.localizedDescription
+        )
+        XCTAssertEqual(refreshed.resetAvailableCount, 1)
+        XCTAssertTrue(refreshed.resetCreditDetails.isEmpty)
+        XCTAssertTrue(refreshed.resetCreditStatusSummary.isEmpty)
+        XCTAssertEqual(refreshed.accountBoundary, .testDefault)
+    }
+
+    func testRefreshGatesPrefetchedNonPayloadOutcomesUnderADifferentAccountBoundary() async throws {
+        // Every prefetched outcome carries the identity its request was bound
+        // to, not only a payload. An outcome produced under identity A must not
+        // be published under the identity B snapshot the RPC leg proved: for
+        // `noAvailableCredits` that would downgrade the identity-mismatch
+        // contract to the neutral app-server count, and for a fetch failure it
+        // would persist a diagnostic produced under A.
+        let previousUnderRequestedIdentity = QuotaSnapshot(
+            weeklyQuotaPercent: 70,
+            fiveHourQuotaPercent: 64,
+            resetAvailableCount: 1,
+            resetCreditDetailsState: .detailed,
+            resetCreditDetails: [
+                ResetCreditDetailSnapshot(
+                    ordinal: 1,
+                    status: "available",
+                    grantedAt: makeDate("2026-06-19T10:00:00Z"),
+                    expiresAt: makeDate("2026-06-19T18:00:00Z")
+                )
+            ],
+            resetCreditStatusSummary: [ResetCreditStatusSummary(status: "available", count: 1)],
+            refreshedAt: makeDate("2026-06-19T12:40:00Z"),
+            dataSource: .real,
+            accountBoundary: .testRelogin
+        )
+        let providers: [(name: String, provider: any ResetCreditsDetailRefreshing)] = [
+            ("noAvailableCredits", NoAvailableCreditsProvider()),
+            ("fetchFailure", FailingResetCreditsProvider())
+        ]
+
+        for (name, detailProvider) in providers {
+            let service = QuotaRefreshService(
+                realProvider: StubRealQuotaProvider(snapshot: makeBoundRealSnapshot()),
+                resetCreditsDetailProvider: detailProvider,
+                mockProvider: MockQuotaProvider(),
+                currentAccountBoundary: { .testRelogin }
+            )
+
+            let refreshed = try await service.refresh(
+                basedOn: previousUnderRequestedIdentity
+            )
+
+            XCTAssertEqual(refreshed.resetCreditDetailsState, .unavailable, name)
+            XCTAssertNotEqual(refreshed.resetCreditDetailsState, .appServerCountOnly, name)
+            XCTAssertEqual(
+                refreshed.resetCreditDiagnostic?.summary,
+                ResetCreditsDetailError.accountBoundaryMismatch.localizedDescription,
+                name
+            )
+            // Identity A's cached details must not leak into identity B's
+            // snapshot ...
+            XCTAssertTrue(refreshed.resetCreditDetails.isEmpty, name)
+            XCTAssertTrue(refreshed.resetCreditStatusSummary.isEmpty, name)
+            // ... and the count still comes from the RPC snapshot.
+            XCTAssertEqual(refreshed.resetAvailableCount, 1, name)
+            XCTAssertEqual(refreshed.accountBoundary, .testDefault, name)
+        }
+    }
+
+    func testRefreshUsesSerialDetailLegWhenNoRequestIdentityIsAvailable() async throws {
+        // No usable identity when the refresh started means no request could be
+        // bound upfront, so the detail leg runs after the RPC leg under the
+        // boundary the refreshed snapshot proves, exactly as it did before the
+        // legs overlapped.
+        let recorder = RefreshCallRecorder()
+        let payload = ResetCreditsDetailPayload(
+            availableCount: 2,
+            availableCredits: [
+                ResetCreditDetailSnapshot(
+                    ordinal: 1,
+                    status: "available",
+                    grantedAt: makeDate("2026-06-19T10:00:00Z"),
+                    expiresAt: makeDate("2026-06-19T18:00:00Z")
+                )
+            ],
+            statusSummary: [ResetCreditStatusSummary(status: "available", count: 1)]
+        )
+        let service = QuotaRefreshService(
+            realProvider: StubRealQuotaProvider(snapshot: makeBoundRealSnapshot()),
+            resetCreditsDetailProvider: RecordingDetailedResetCreditsProvider(
+                recorder: recorder,
+                payload: payload
+            ),
+            mockProvider: MockQuotaProvider(),
+            currentAccountBoundary: { nil }
+        )
+
+        let refreshed = try await service.refresh(basedOn: .notConnected)
+
+        XCTAssertEqual(refreshed.resetCreditDetailsState, .detailed)
+        XCTAssertEqual(refreshed.resetAvailableCount, 2)
+        XCTAssertEqual(refreshed.resetCreditDetails, payload.availableCredits)
+        XCTAssertEqual(refreshed.resetCreditStatusSummary, payload.statusSummary)
+        XCTAssertNil(refreshed.resetCreditDiagnostic)
+        let boundaries = await recorder.detailAccountBoundaries
+        XCTAssertEqual(boundaries, [.testDefault])
+    }
+
+    func testPrefetchedAndSerialDetailOutcomesPublishIdenticalSnapshots() async throws {
+        // The concurrency change must not change what is published: for every
+        // detail outcome the prefetched path produces a snapshot that is
+        // field-for-field identical to the serial path's snapshot.
+        let payload = ResetCreditsDetailPayload(
+            availableCount: 2,
+            availableCredits: [
+                ResetCreditDetailSnapshot(
+                    ordinal: 1,
+                    status: "available",
+                    grantedAt: makeDate("2026-06-19T10:00:00Z"),
+                    expiresAt: makeDate("2026-06-19T18:00:00Z")
+                )
+            ],
+            statusSummary: [ResetCreditStatusSummary(status: "available", count: 1)]
+        )
+        let previous = QuotaSnapshot(
+            weeklyQuotaPercent: 70,
+            fiveHourQuotaPercent: 64,
+            resetAvailableCount: 1,
+            resetCreditDetailsState: .detailed,
+            resetCreditDetails: [
+                ResetCreditDetailSnapshot(
+                    ordinal: 1,
+                    status: "available",
+                    grantedAt: makeDate("2026-06-19T10:00:00Z"),
+                    expiresAt: makeDate("2026-06-19T18:00:00Z")
+                )
+            ],
+            resetCreditStatusSummary: [ResetCreditStatusSummary(status: "available", count: 1)],
+            refreshedAt: makeDate("2026-06-19T12:40:00Z"),
+            dataSource: .real,
+            accountBoundary: .testDefault
+        )
+        let appServerSnapshot = QuotaSnapshot(
+            weeklyQuotaPercent: 69,
+            fiveHourQuotaPercent: 63,
+            resetAvailableCount: 1,
+            resetCreditDetailsState: .appServerCountOnly,
+            refreshedAt: makeDate("2026-06-19T12:45:00Z"),
+            dataSource: .real,
+            accountBoundary: .testDefault
+        )
+
+        func refreshed(
+            basedOn currentSnapshot: QuotaSnapshot,
+            detailProvider: any ResetCreditsDetailRefreshing,
+            requestBoundary: QuotaAccountBoundary?
+        ) async throws -> QuotaSnapshot {
+            try await QuotaRefreshService(
+                realProvider: StubRealQuotaProvider(snapshot: appServerSnapshot),
+                resetCreditsDetailProvider: detailProvider,
+                mockProvider: MockQuotaProvider(),
+                currentAccountBoundary: { requestBoundary }
+            ).refresh(basedOn: currentSnapshot)
+        }
+
+        let providers: [any ResetCreditsDetailRefreshing] = [
+            SucceedingResetCreditsProvider(payload: payload),
+            NoAvailableCreditsProvider(),
+            FailingResetCreditsProvider()
+        ]
+        let expectedStates: [ResetCreditDetailsState] = [.detailed, .appServerCountOnly, .unavailable]
+
+        for (detailProvider, expectedState) in zip(providers, expectedStates) {
+            let serial = try await refreshed(
+                basedOn: .notConnected,
+                detailProvider: detailProvider,
+                requestBoundary: nil
+            )
+            let prefetched = try await refreshed(
+                basedOn: .notConnected,
+                detailProvider: detailProvider,
+                requestBoundary: .testDefault
+            )
+            XCTAssertEqual(serial.resetCreditDetailsState, expectedState)
+            XCTAssertEqual(serial, prefetched)
+
+            // The reusable-details fallback must be identical on both paths
+            // too.
+            let serialWithPrevious = try await refreshed(
+                basedOn: previous,
+                detailProvider: detailProvider,
+                requestBoundary: nil
+            )
+            let prefetchedWithPrevious = try await refreshed(
+                basedOn: previous,
+                detailProvider: detailProvider,
+                requestBoundary: .testDefault
+            )
+            XCTAssertEqual(serialWithPrevious, prefetchedWithPrevious)
+        }
+    }
+
+    func testFailedRealProviderDoesNotWaitForThePrefetchedDetailLeg() async throws {
+        let recorder = RefreshCallRecorder()
+        let realGate = RefreshCancellationGate()
+        let detailGate = RefreshCancellationGate()
+        let service = QuotaRefreshService(
+            realProvider: FailingRealQuotaProvider(
+                error: .rpcRejected(code: 7),
+                recorder: recorder,
+                gate: realGate
+            ),
+            resetCreditsDetailProvider: CancellationUnblockedResetCreditsProvider(
+                recorder: recorder,
+                gate: detailGate
+            ),
+            mockProvider: MockQuotaProvider(),
+            currentAccountBoundary: { .testDefault }
+        )
+
+        let returned = FirstSignal<RefreshOutcome>()
+        let refreshTask = Task { () -> RefreshOutcome in
+            let outcome: RefreshOutcome
+            do {
+                _ = try await service.refresh(basedOn: .notConnected)
+                outcome = .snapshotReturned
+            } catch let error as RealQuotaError {
+                outcome = .rpcError(error)
+            } catch {
+                outcome = .unexpectedError
+            }
+            await returned.signal(outcome)
+            return outcome
+        }
+        Task {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            await returned.signal(.timedOut)
+        }
+
+        // The RPC leg is held until the detail leg has provably started and
+        // entered its own wait, so a regression cannot pass by failing the RPC
+        // leg before the detail leg ever ran.
+        let detailLegStarted = await waitForStart(of: detailGate)
+        let realLegStarted = await waitForStart(of: realGate)
+        await realGate.release()
+        let outcome = await returned.wait()
+        // Failure cleanup: unblock a refresh that wrongly waited for the gate.
+        await detailGate.release()
+        _ = await refreshTask.value
+
+        XCTAssertTrue(detailLegStarted, "The failed refresh must have started the detail leg")
+        XCTAssertTrue(realLegStarted, "The RPC leg must have started before it failed")
+        XCTAssertEqual(
+            outcome,
+            .rpcError(.rpcRejected(code: 7)),
+            "A failed RPC leg must cancel the detail leg instead of waiting for it"
+        )
+        let detailCallCount = await recorder.detailCallCount
+        let detailCancellationCount = await recorder.detailCancellationCount
+        XCTAssertEqual(detailCallCount, 1)
+        XCTAssertEqual(detailCancellationCount, 1)
+    }
+
+    /// Bounded wait for a gate to reach its "started" state. Used where the
+    /// assertion is "this leg started while the other was still in flight", so
+    /// a regression fails the assertion instead of hanging the suite.
+    private func waitForStart(
+        of gate: RefreshCancellationGate,
+        timeout: TimeInterval = 2
+    ) async -> Bool {
+        let first = FirstSignal<Bool>()
+        Task {
+            await gate.waitForStart()
+            await first.signal(true)
+        }
+        Task {
+            try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            await first.signal(false)
+        }
+        return await first.wait()
     }
 
     private func makeBoundRealSnapshot() -> QuotaSnapshot {
@@ -615,6 +989,18 @@ private struct SucceedingResetCreditsProvider: ResetCreditsDetailRefreshing, Sen
     }
 }
 
+private struct RecordingDetailedResetCreditsProvider: ResetCreditsDetailRefreshing, Sendable {
+    let recorder: RefreshCallRecorder
+    let payload: ResetCreditsDetailPayload
+
+    func fetchDetails(
+        for accountBoundary: QuotaAccountBoundary
+    ) async throws -> ResetCreditsDetailPayload {
+        await recorder.recordDetailCall(accountBoundary: accountBoundary)
+        return payload
+    }
+}
+
 private struct RecordingRealQuotaProvider: RealQuotaRefreshing, Sendable {
     let snapshot: QuotaSnapshot
     let recorder: RefreshCallRecorder
@@ -622,6 +1008,21 @@ private struct RecordingRealQuotaProvider: RealQuotaRefreshing, Sendable {
     func fetchQuota() async throws -> QuotaSnapshot {
         await recorder.recordRealCall()
         return snapshot
+    }
+}
+
+private struct FailingRealQuotaProvider: RealQuotaRefreshing, Sendable {
+    let error: RealQuotaError
+    let recorder: RefreshCallRecorder
+    var gate: RefreshCancellationGate? = nil
+
+    func fetchQuota() async throws -> QuotaSnapshot {
+        await recorder.recordRealCall()
+        if let gate {
+            await gate.markStarted()
+            await gate.waitForRelease()
+        }
+        throw error
     }
 }
 
@@ -670,9 +1071,57 @@ private struct BlockingResetCreditsProvider: ResetCreditsDetailRefreshing, Senda
     }
 }
 
+private struct BlockingRecordingResetCreditsProvider: ResetCreditsDetailRefreshing, Sendable {
+    let recorder: RefreshCallRecorder
+    let gate: RefreshCancellationGate
+
+    func fetchDetails(
+        for accountBoundary: QuotaAccountBoundary
+    ) async throws -> ResetCreditsDetailPayload {
+        await recorder.recordDetailCall(accountBoundary: accountBoundary)
+        await gate.markStarted()
+        await gate.waitForRelease()
+        return ResetCreditsDetailPayload(
+            availableCount: 1,
+            availableCredits: [],
+            statusSummary: []
+        )
+    }
+}
+
+/// Blocks until the refresh is cancelled, mirroring a request that only
+/// completes when `URLSession` observes cancellation. The cancellation handler
+/// releases the gate so the refresh can drain the leg.
+private struct CancellationUnblockedResetCreditsProvider: ResetCreditsDetailRefreshing, Sendable {
+    let recorder: RefreshCallRecorder
+    let gate: RefreshCancellationGate
+
+    func fetchDetails(
+        for accountBoundary: QuotaAccountBoundary
+    ) async throws -> ResetCreditsDetailPayload {
+        await recorder.recordDetailCall(accountBoundary: accountBoundary)
+        await gate.markStarted()
+        await withTaskCancellationHandler {
+            await gate.waitForRelease()
+        } onCancel: {
+            Task {
+                await recorder.recordDetailCancellation()
+                await gate.release()
+            }
+        }
+        try Task.checkCancellation()
+        return ResetCreditsDetailPayload(
+            availableCount: 1,
+            availableCredits: [],
+            statusSummary: []
+        )
+    }
+}
+
 private actor RefreshCallRecorder {
     private(set) var realCallCount = 0
     private(set) var detailCallCount = 0
+    private(set) var detailCancellationCount = 0
     private(set) var detailAccountBoundaries: [QuotaAccountBoundary] = []
 
     func recordRealCall() {
@@ -682,6 +1131,43 @@ private actor RefreshCallRecorder {
     func recordDetailCall(accountBoundary: QuotaAccountBoundary) {
         detailCallCount += 1
         detailAccountBoundaries.append(accountBoundary)
+    }
+
+    func recordDetailCancellation() {
+        detailCancellationCount += 1
+    }
+}
+
+/// Result of a refresh call, raced against a bound so a regression fails an
+/// assertion instead of hanging the suite.
+private enum RefreshOutcome: Equatable, Sendable {
+    case snapshotReturned
+    case rpcError(RealQuotaError)
+    case unexpectedError
+    /// No outcome arrived before the test's bound elapsed.
+    case timedOut
+}
+
+/// Returns the first value it is signalled with, from whichever signal arrives
+/// first. The losing unstructured task is left unawaited on purpose, so a wait
+/// can be bounded without blocking the suite.
+private actor FirstSignal<Value: Sendable> {
+    private var value: Value?
+    private var waiters: [CheckedContinuation<Value, Never>] = []
+
+    func signal(_ value: Value) {
+        guard self.value == nil else { return }
+        self.value = value
+        let waiters = self.waiters
+        self.waiters.removeAll()
+        waiters.forEach { $0.resume(returning: value) }
+    }
+
+    func wait() async -> Value {
+        if let value {
+            return value
+        }
+        return await withCheckedContinuation { waiters.append($0) }
     }
 }
 
